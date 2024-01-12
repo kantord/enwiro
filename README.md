@@ -23,7 +23,7 @@ An environment could be linked to:
 ### Recipe
 
 <p align="center">
-  <img src="recipes.png" />
+ <img src="recipes.png" width="400" />
 </p>
 
 Recipes are automatically generated blueprints for environments.
