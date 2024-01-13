@@ -8,6 +8,10 @@ Enwiro is the successor to `i3-env`.
  
 ### Environment
 
+<p align="center">
+ <img src="environments.png" width="400" />
+</p>
+
 An `enwiro` is a local folder or a symbolic link pointing to a folder.
 
 An environment serves as a working directory for your applications,
