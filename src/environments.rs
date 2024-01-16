@@ -7,7 +7,7 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn get_environments(source_directory: &str) -> HashMap<String, Environment> {
+    pub fn get_all(source_directory: &str) -> HashMap<String, Environment> {
         let mut results: HashMap<String, Environment> = HashMap::new();
         let directory_entries = fs::read_dir(source_directory).expect("Could not read workspaces directory. Make sure that the path is a directory you have permissions to access.");
 
