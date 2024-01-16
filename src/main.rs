@@ -2,7 +2,7 @@ mod environments;
 
 use clap::Parser;
 
-use environments::get_environments;
+use environments::Environment;
 use serde_derive::{Deserialize, Serialize};
 use std::env;
 use std::fs::create_dir;
@@ -56,7 +56,7 @@ fn ensure_can_run<R: Read, W: Write>(config: &CommandContext<R, W>) {
 }
 
 fn list_environments<R: Read, W: Write>(context: &mut CommandContext<R, W>) {
-    let environments = get_environments(&context.config.workspaces_directory);
+    let environments = Environment::get_environments(&context.config.workspaces_directory);
 
     for environment in environments.values() {
         println!("{}", environment.name);
@@ -64,7 +64,7 @@ fn list_environments<R: Read, W: Write>(context: &mut CommandContext<R, W>) {
 }
 
 fn show_path<R: Read, W: Write>(context: &mut CommandContext<R, W>, args: ShowPathArgs) {
-    let environments = get_environments(&context.config.workspaces_directory);
+    let environments = Environment::get_environments(&context.config.workspaces_directory);
     let selected_environment = environments
         .get(&args.environment_name)
         .expect("Environment not found");
