@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod context;
 mod environments;
+mod test_utils;
 
 use clap::Parser;
 
@@ -55,31 +56,12 @@ mod tests {
     use rand::Rng;
     use rstest::{fixture, rstest};
 
-    use crate::commands::show_path::{show_path, ShowPathArgs};
+    use crate::{
+        commands::show_path::{show_path, ShowPathArgs},
+        test_utils::test_utils::{FakeContext, FakeIO},
+    };
 
     use super::*;
-
-    type FakeIO = Cursor<Vec<u8>>;
-    type FakeContext = CommandContext<Cursor<Vec<u8>>, Cursor<Vec<u8>>>;
-
-    impl FakeContext {
-        fn get_output(&mut self) -> String {
-            let mut output = String::new();
-            self.writer.set_position(0);
-
-            self.writer
-                .read_to_string(&mut output)
-                .expect("Could not read output");
-
-            return output;
-        }
-
-        fn create_mock_environment(&mut self, environment_name: &str) {
-            let environment_directory =
-                Path::new(&self.config.workspaces_directory).join(environment_name);
-            create_dir(environment_directory).expect("Could not create directory");
-        }
-    }
 
     #[fixture]
     fn in_memory_buffer() -> FakeIO {
