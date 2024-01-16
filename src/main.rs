@@ -1,5 +1,6 @@
 mod commands;
 mod config;
+mod context;
 mod environments;
 
 use clap::Parser;
@@ -7,6 +8,7 @@ use clap::Parser;
 use commands::list_environments::{list_environments, ListEnvironmentsArgs};
 use commands::show_path::{show_path, ShowPathArgs};
 use config::ConfigurationValues;
+use context::CommandContext;
 use std::fs::create_dir;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -15,12 +17,6 @@ use std::path::Path;
 enum EnwiroCli {
     ListEnvironments(ListEnvironmentsArgs),
     ShowPath(ShowPathArgs),
-}
-
-struct CommandContext<R: Read, W: Write> {
-    config: ConfigurationValues,
-    reader: R,
-    writer: W,
 }
 
 fn ensure_can_run<R: Read, W: Write>(config: &CommandContext<R, W>) {
