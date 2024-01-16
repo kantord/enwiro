@@ -1,32 +1,15 @@
 mod commands;
+mod config;
 mod environments;
 
 use clap::Parser;
 
 use commands::list_environments::{list_environments, ListEnvironmentsArgs};
 use commands::show_path::{show_path, ShowPathArgs};
-use environments::Environment;
-use serde_derive::{Deserialize, Serialize};
-use std::env;
+use config::ConfigurationValues;
 use std::fs::create_dir;
 use std::io::{Read, Write};
 use std::path::Path;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ConfigurationValues {
-    workspaces_directory: String,
-}
-
-impl ::std::default::Default for ConfigurationValues {
-    fn default() -> Self {
-        let home_dir = env::home_dir().expect("User home directory not found");
-        let default_workspaces_directory = home_dir.join(".enwiro_envs");
-
-        Self {
-            workspaces_directory: default_workspaces_directory.to_str().unwrap().to_string(),
-        }
-    }
-}
 
 #[derive(Parser)]
 enum EnwiroCli {
