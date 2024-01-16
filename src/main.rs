@@ -1,7 +1,9 @@
+mod commands;
 mod environments;
 
 use clap::Parser;
 
+use commands::show_path::{show_path, ShowPathArgs};
 use environments::Environment;
 use serde_derive::{Deserialize, Serialize};
 use std::env;
@@ -35,12 +37,6 @@ enum EnwiroCli {
 #[command(author, version, about)]
 struct ListEnvironmentsArgs {}
 
-#[derive(clap::Args)]
-#[command(author, version, about)]
-struct ShowPathArgs {
-    environment_name: String,
-}
-
 struct CommandContext<R: Read, W: Write> {
     config: ConfigurationValues,
     reader: R,
@@ -61,20 +57,6 @@ fn list_environments<R: Read, W: Write>(context: &mut CommandContext<R, W>) {
     for environment in environments.values() {
         println!("{}", environment.name);
     }
-}
-
-fn show_path<R: Read, W: Write>(context: &mut CommandContext<R, W>, args: ShowPathArgs) {
-    let environments = Environment::get_all(&context.config.workspaces_directory);
-    let selected_environment = environments
-        .get(&args.environment_name)
-        .expect("Environment not found");
-
-    println!("{}", selected_environment.path);
-
-    context
-        .writer
-        .write(selected_environment.path.as_bytes())
-        .unwrap();
 }
 
 fn main() {
@@ -104,6 +86,8 @@ mod tests {
 
     use rand::Rng;
     use rstest::{fixture, rstest};
+
+    use crate::commands::show_path::{show_path, ShowPathArgs};
 
     use super::*;
 
