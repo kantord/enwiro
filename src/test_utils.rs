@@ -1,12 +1,16 @@
 #[cfg(test)]
 pub mod test_utils {
     use std::{
+        env::temp_dir,
         fs::create_dir,
         io::{Cursor, Read},
         path::Path,
     };
 
-    use crate::context::CommandContext;
+    use rand::Rng;
+    use rstest::fixture;
+
+    use crate::{config::ConfigurationValues, context::CommandContext};
 
     pub type FakeIO = Cursor<Vec<u8>>;
     pub type FakeContext = CommandContext<Cursor<Vec<u8>>, Cursor<Vec<u8>>>;
@@ -28,5 +32,30 @@ pub mod test_utils {
                 Path::new(&self.config.workspaces_directory).join(environment_name);
             create_dir(environment_directory).expect("Could not create directory");
         }
+    }
+
+    #[fixture]
+    pub fn in_memory_buffer() -> FakeIO {
+        Cursor::new(vec![])
+    }
+
+    #[fixture]
+    pub fn context_object() -> FakeContext {
+        let temporary_directory_path = temp_dir().join(
+            rand::thread_rng()
+                .gen_range(100000000..999999999)
+                .to_string(),
+        );
+        create_dir(&temporary_directory_path).expect("Could not create temporary directory");
+        let reader = in_memory_buffer();
+        let writer = in_memory_buffer();
+        let mut config = ConfigurationValues::default();
+        config.workspaces_directory = temporary_directory_path.to_str().unwrap().to_string();
+
+        return CommandContext {
+            config,
+            reader,
+            writer,
+        };
     }
 }

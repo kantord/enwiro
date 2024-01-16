@@ -51,42 +51,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use std::{env::temp_dir, io::Cursor, vec};
-
-    use rand::Rng;
-    use rstest::{fixture, rstest};
+    use rstest::rstest;
 
     use crate::{
         commands::show_path::{show_path, ShowPathArgs},
-        test_utils::test_utils::{FakeContext, FakeIO},
+        test_utils::test_utils::{context_object, FakeContext},
     };
-
-    use super::*;
-
-    #[fixture]
-    fn in_memory_buffer() -> FakeIO {
-        Cursor::new(vec![])
-    }
-
-    #[fixture]
-    fn context_object() -> FakeContext {
-        let temporary_directory_path = temp_dir().join(
-            rand::thread_rng()
-                .gen_range(100000000..999999999)
-                .to_string(),
-        );
-        create_dir(&temporary_directory_path).expect("Could not create temporary directory");
-        let reader = in_memory_buffer();
-        let writer = in_memory_buffer();
-        let mut config = ConfigurationValues::default();
-        config.workspaces_directory = temporary_directory_path.to_str().unwrap().to_string();
-
-        return CommandContext {
-            config,
-            reader,
-            writer,
-        };
-    }
 
     #[rstest]
     fn test_show_path_when_environment_works(mut context_object: FakeContext) {
