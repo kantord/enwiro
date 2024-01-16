@@ -1,9 +1,10 @@
+mod environments;
+
 use clap::Parser;
 
+use environments::get_environments;
 use serde_derive::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::env;
-use std::fs;
 use std::fs::create_dir;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -22,32 +23,6 @@ impl ::std::default::Default for ConfigurationValues {
             workspaces_directory: default_workspaces_directory.to_str().unwrap().to_string(),
         }
     }
-}
-
-struct Environment {
-    path: String,
-    name: String,
-}
-
-fn get_environments(source_directory: &str) -> HashMap<String, Environment> {
-    let mut results: HashMap<String, Environment> = HashMap::new();
-    let directory_entries = fs::read_dir(source_directory).expect("Could not read workspaces directory. Make sure that the path is a directory you have permissions to access.");
-
-    for directory_entry in directory_entries {
-        let path = directory_entry.unwrap().path();
-        let id = path.file_name().unwrap().to_str().unwrap().to_string();
-
-        if path.is_dir() {
-            let new_environment = Environment {
-                path: path.to_str().unwrap().to_string(),
-                name: id.clone(),
-            };
-
-            results.insert(id.clone(), new_environment);
-        }
-    }
-
-    results
 }
 
 #[derive(Parser)]
