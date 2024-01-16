@@ -3,6 +3,7 @@ mod environments;
 
 use clap::Parser;
 
+use commands::list_environments::{list_environments, ListEnvironmentsArgs};
 use commands::show_path::{show_path, ShowPathArgs};
 use environments::Environment;
 use serde_derive::{Deserialize, Serialize};
@@ -33,10 +34,6 @@ enum EnwiroCli {
     ShowPath(ShowPathArgs),
 }
 
-#[derive(clap::Args)]
-#[command(author, version, about)]
-struct ListEnvironmentsArgs {}
-
 struct CommandContext<R: Read, W: Write> {
     config: ConfigurationValues,
     reader: R,
@@ -48,14 +45,6 @@ fn ensure_can_run<R: Read, W: Write>(config: &CommandContext<R, W>) {
     if !environments_directory.exists() {
         create_dir(environments_directory)
             .expect("Workspace directory does not exist and could not be automatically created.");
-    }
-}
-
-fn list_environments<R: Read, W: Write>(context: &mut CommandContext<R, W>) {
-    let environments = Environment::get_all(&context.config.workspaces_directory);
-
-    for environment in environments.values() {
-        println!("{}", environment.name);
     }
 }
 
