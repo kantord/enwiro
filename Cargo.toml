@@ -12,5 +12,6 @@ serde = "1.0.195"
 serde_derive = "1.0.195"
 
 [dev-dependencies]
+assertables = "7.0.1"
 rand = "0.8.5"
 rstest = "0.18.2"

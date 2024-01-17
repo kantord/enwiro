@@ -60,6 +60,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "assertables"
+version = "7.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0c24e9d990669fbd16806bff449e4ac644fd9b1fca014760087732fe4102f131"
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -166,6 +172,7 @@ dependencies = [
 name = "enwiro"
 version = "0.1.0"
 dependencies = [
+ "assertables",
  "clap",
  "confy",
  "rand",
