@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.4.17", features = ["derive"] }
 confy = "0.6.0"
+home = "0.5.9"
 serde = "1.0.195"
 serde_derive = "1.0.195"
 
