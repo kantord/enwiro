@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 
 pub struct Environment {
+    // Actual path to the environment
     pub path: String,
+
+    // Name should be short enough to be displayed
     pub name: String,
 }
 
