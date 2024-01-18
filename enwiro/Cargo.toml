@@ -1,0 +1,17 @@
+[package]
+name = "enwiro"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4.4.17", features = ["derive"] }
+confy = "0.6.0"
+serde = "1.0.195"
+serde_derive = "1.0.195"
+
+[dev-dependencies]
+assertables = "7.0.1"
+rand = "0.8.5"
+rstest = "0.18.2"
