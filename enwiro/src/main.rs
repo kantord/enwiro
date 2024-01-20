@@ -33,12 +33,9 @@ fn main() {
     let config: ConfigurationValues =
         confy::load("enwiro", None).expect("Configuration file must be present");
 
-    let mut context_object = CommandContext {
-        config,
-        reader: &mut std::io::stdin(),
-        writer: &mut std::io::stderr(),
-    };
-
+    let mut writer = std::io::stdout();
+    let mut reader = std::io::stdin();
+    let mut context_object = CommandContext::new(config, &mut reader, &mut writer);
     ensure_can_run(&context_object);
 
     match args {

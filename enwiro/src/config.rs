@@ -4,6 +4,7 @@ use std::env;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigurationValues {
     pub workspaces_directory: String,
+    pub adapter: Option<String>,
 }
 
 impl ::std::default::Default for ConfigurationValues {
@@ -13,6 +14,7 @@ impl ::std::default::Default for ConfigurationValues {
 
         Self {
             workspaces_directory: default_workspaces_directory.to_str().unwrap().to_string(),
+            adapter: None,
         }
     }
 }

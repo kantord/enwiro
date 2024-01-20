@@ -1,5 +1,6 @@
 #[cfg(test)]
 pub mod test_utils {
+
     use std::{
         env::temp_dir,
         fs::create_dir,
@@ -10,7 +11,28 @@ pub mod test_utils {
     use rand::Rng;
     use rstest::fixture;
 
-    use crate::{config::ConfigurationValues, context::CommandContext};
+    use crate::{
+        config::ConfigurationValues,
+        context::{CommandContext, EnwiroAdapterTrait},
+    };
+
+    pub struct EnwiroAdapterMock {
+        pub current_environment: String,
+    }
+
+    impl EnwiroAdapterTrait for EnwiroAdapterMock {
+        fn get_active_environment_name(&self) -> String {
+            self.current_environment.to_string()
+        }
+    }
+
+    impl EnwiroAdapterMock {
+        pub fn new(current_environment: &str) -> Self {
+            Self {
+                current_environment: current_environment.to_string(),
+            }
+        }
+    }
 
     pub type FakeIO = Cursor<Vec<u8>>;
     pub type FakeContext = CommandContext<Cursor<Vec<u8>>, Cursor<Vec<u8>>>;
@@ -56,6 +78,7 @@ pub mod test_utils {
             config,
             reader,
             writer,
+            adapter: Box::new(EnwiroAdapterMock::new("foobaz")),
         };
     }
 }
