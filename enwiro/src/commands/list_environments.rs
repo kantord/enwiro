@@ -1,13 +1,15 @@
 use crate::{environments::Environment, CommandContext};
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 
 #[derive(clap::Args)]
 #[command(author, version, about)]
 pub struct ListEnvironmentsArgs {}
 
-pub fn list_environments<R: Read, W: Write>(context: &mut CommandContext<R, W>) {
-    let environments = Environment::get_all(&context.config.workspaces_directory);
+pub fn list_environments<R: Read, W: Write>(
+    context: &mut CommandContext<R, W>,
+) -> Result<(), io::Error> {
+    let environments = Environment::get_all(&context.config.workspaces_directory)?;
 
     for environment in environments.values() {
         context
@@ -15,6 +17,8 @@ pub fn list_environments<R: Read, W: Write>(context: &mut CommandContext<R, W>) 
             .write(format!("{}\n", environment.name).as_bytes())
             .expect("Could not write to output");
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -30,7 +34,7 @@ mod tests {
         context_object.create_mock_environment("foobar");
         context_object.create_mock_environment("baz");
 
-        list_environments(&mut context_object);
+        list_environments(&mut context_object).unwrap();
 
         let output = context_object.get_output();
         let output_lines: Vec<&str> = output.lines().collect();

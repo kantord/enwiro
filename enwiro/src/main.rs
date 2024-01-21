@@ -9,6 +9,7 @@ use clap::Parser;
 use commands::list_environments::{list_environments, ListEnvironmentsArgs};
 use commands::show_path::{show_path, ShowPathArgs};
 use config::ConfigurationValues;
+use confy::ConfyError;
 use context::CommandContext;
 use std::fs::create_dir;
 use std::io::{Read, Write};
@@ -28,20 +29,25 @@ fn ensure_can_run<R: Read, W: Write>(config: &CommandContext<R, W>) {
     }
 }
 
-fn main() {
+fn main() -> Result<(), std::io::Error> {
     let args = EnwiroCli::parse();
-    let config: ConfigurationValues =
-        confy::load("enwiro", None).expect("Configuration file must be present");
-
+    let config: ConfigurationValues = match confy::load("enwiro", None) {
+        Ok(x) => x,
+        Err(x) => {
+            panic!("Could not load configuration: {:?}", x);
+        }
+    };
     let mut writer = std::io::stdout();
     let mut reader = std::io::stdin();
     let mut context_object = CommandContext::new(config, &mut reader, &mut writer);
     ensure_can_run(&context_object);
 
-    match args {
+    let result = match args {
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
-    }
+    };
 
     context_object.writer.write("\n".as_bytes()).unwrap();
+
+    return result;
 }

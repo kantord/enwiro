@@ -4,7 +4,7 @@ use crate::config::ConfigurationValues;
 use std::io::{Read, Write};
 
 pub trait EnwiroAdapterTrait {
-    fn get_active_environment_name(&self) -> String;
+    fn get_active_environment_name(&self) -> Result<String, std::io::Error>;
 }
 
 pub struct EnwiroAdapterExternal {
@@ -12,7 +12,7 @@ pub struct EnwiroAdapterExternal {
 }
 
 impl EnwiroAdapterTrait for EnwiroAdapterExternal {
-    fn get_active_environment_name(&self) -> String {
+    fn get_active_environment_name(&self) -> Result<String, std::io::Error> {
         let output = Command::new(&self.adapter_command)
             .arg("get-active-workspace-id")
             .output()
@@ -20,7 +20,7 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
 
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            return stdout.to_string();
+            return Ok(stdout.to_string());
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             panic!("Error: {}", stderr);
@@ -39,8 +39,11 @@ impl EnwiroAdapterExternal {
 pub struct EnwiroAdapterNone {}
 
 impl EnwiroAdapterTrait for EnwiroAdapterNone {
-    fn get_active_environment_name(&self) -> String {
-        panic!("Current environment cannot be automatically determined because no adapter is specified in the configuration.")
+    fn get_active_environment_name(&self) -> Result<String, std::io::Error> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Could not determine active environment because no adapter is configured.",
+        ))
     }
 }
 

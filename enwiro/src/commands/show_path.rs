@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 
 use crate::{environments::Environment, CommandContext};
 
@@ -8,20 +8,29 @@ pub struct ShowPathArgs {
     pub environment_name: Option<String>,
 }
 
-pub fn show_path<R: Read, W: Write>(context: &mut CommandContext<R, W>, args: ShowPathArgs) {
-    let environments = Environment::get_all(&context.config.workspaces_directory);
+pub fn show_path<R: Read, W: Write>(
+    context: &mut CommandContext<R, W>,
+    args: ShowPathArgs,
+) -> Result<(), io::Error> {
+    let environments = Environment::get_all(&context.config.workspaces_directory)?;
     let selected_environment_name = match args.environment_name {
         Some(x) => x,
-        None => context.adapter.get_active_environment_name(),
+        None => context.adapter.get_active_environment_name()?,
     };
-    let selected_environment = environments
-        .get(&selected_environment_name)
-        .expect("Environment not found");
+    let selected_environment = match environments.get(&selected_environment_name) {
+        Some(x) => x,
+        None => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Environment {} does not exist", selected_environment_name),
+        ))?,
+    };
 
     context
         .writer
         .write(selected_environment.path.as_bytes())
         .unwrap();
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -41,7 +50,8 @@ mod tests {
             ShowPathArgs {
                 environment_name: Some("foobar".to_string()),
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(context_object.get_output().ends_with("foobar"), true);
     }
@@ -55,7 +65,8 @@ mod tests {
             ShowPathArgs {
                 environment_name: Some("non_existing_env".to_string()),
             },
-        );
+        )
+        .unwrap();
     }
 
     #[rstest]
@@ -69,7 +80,8 @@ mod tests {
             ShowPathArgs {
                 environment_name: None,
             },
-        );
+        )
+        .unwrap();
     }
 
     #[rstest]
@@ -80,7 +92,8 @@ mod tests {
             ShowPathArgs {
                 environment_name: None,
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(context_object.get_output().ends_with("foobaz"), true);
     }

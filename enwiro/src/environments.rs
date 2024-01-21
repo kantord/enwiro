@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
+use std::{fs, io};
 
 pub struct Environment {
     // Actual path to the environment
@@ -10,9 +10,9 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn get_all(source_directory: &str) -> HashMap<String, Environment> {
+    pub fn get_all(source_directory: &str) -> Result<HashMap<String, Environment>, io::Error> {
         let mut results: HashMap<String, Environment> = HashMap::new();
-        let directory_entries = fs::read_dir(source_directory).expect("Could not read workspaces directory. Make sure that the path is a directory you have permissions to access.");
+        let directory_entries = fs::read_dir(source_directory)?;
 
         for directory_entry in directory_entries {
             let path = directory_entry.unwrap().path();
@@ -28,6 +28,6 @@ impl Environment {
             }
         }
 
-        results
+        Ok(results)
     }
 }
