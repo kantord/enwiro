@@ -14,10 +14,6 @@ pub fn show_path<R: Read, W: Write>(context: &mut CommandContext<R, W>, args: Sh
         Some(x) => x,
         None => context.adapter.get_active_environment_name(),
     };
-    println!(
-        "asdfadsfadf dsa ads adsf adsf adf dsf adsfadsfadsfadsfadsfssfdasf asd: '{}'",
-        selected_environment_name
-    );
     let selected_environment = environments
         .get(&selected_environment_name)
         .expect("Environment not found");
