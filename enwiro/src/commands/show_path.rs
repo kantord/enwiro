@@ -12,18 +12,14 @@ pub fn show_path<R: Read, W: Write>(
     context: &mut CommandContext<R, W>,
     args: ShowPathArgs,
 ) -> Result<(), io::Error> {
-    let environments = Environment::get_all(&context.config.workspaces_directory)?;
     let selected_environment_name = match args.environment_name {
         Some(x) => x,
         None => context.adapter.get_active_environment_name()?,
     };
-    let selected_environment = match environments.get(&selected_environment_name) {
-        Some(x) => x,
-        None => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Environment {} does not exist", selected_environment_name),
-        ))?,
-    };
+    let selected_environment = Environment::get_one(
+        &context.config.workspaces_directory,
+        &selected_environment_name,
+    )?;
 
     context
         .writer

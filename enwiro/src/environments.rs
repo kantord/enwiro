@@ -30,4 +30,16 @@ impl Environment {
 
         Ok(results)
     }
+
+    pub fn get_one(source_directory: &str, name: &str) -> Result<Environment, io::Error> {
+        let mut environments = Self::get_all(source_directory)?;
+
+        match environments.remove(name) {
+            Some(x) => Ok(x),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Environment {} does not exist", name),
+            ))?,
+        }
+    }
 }
