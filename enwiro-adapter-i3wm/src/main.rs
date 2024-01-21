@@ -8,7 +8,6 @@ enum EnwiroAdapterI3WmCLI {
 }
 
 #[derive(clap::Args)]
-#[command(author, version, about)]
 pub struct GetActiveWorkspaceIdArgs {}
 
 #[tokio::main(flavor = "current_thread")]
@@ -35,7 +34,7 @@ async fn main() -> io::Result<()> {
                     .to_string()
             }
 
-            println!("{}", environment_name);
+            print!("{}", environment_name);
         }
     };
 

@@ -9,7 +9,6 @@ use clap::Parser;
 use commands::list_environments::{list_environments, ListEnvironmentsArgs};
 use commands::show_path::{show_path, ShowPathArgs};
 use config::ConfigurationValues;
-use confy::ConfyError;
 use context::CommandContext;
 use std::fs::create_dir;
 use std::io::{Read, Write};
