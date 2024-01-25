@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use crate::config::ConfigurationValues;
+use crate::{config::ConfigurationValues, environments::Environment};
 use std::io::{Read, Write};
 
 pub trait EnwiroAdapterTrait {
@@ -67,5 +67,18 @@ impl<R: Read, W: Write> CommandContext<R, W> {
             writer,
             adapter,
         }
+    }
+
+    pub fn get_environment(&self, name: Option<String>) -> Environment {
+        let selected_environment_name = match name {
+            Some(x) => x,
+            None => self.adapter.get_active_environment_name().unwrap(),
+        };
+
+        return Environment::get_one(
+            &self.config.workspaces_directory,
+            &selected_environment_name,
+        )
+        .expect("Could not get environment");
     }
 }

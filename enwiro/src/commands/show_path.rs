@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use crate::{environments::Environment, CommandContext};
+use crate::CommandContext;
 
 #[derive(clap::Args)]
 #[command(author, version, about)]
@@ -12,14 +12,7 @@ pub fn show_path<R: Read, W: Write>(
     context: &mut CommandContext<R, W>,
     args: ShowPathArgs,
 ) -> Result<(), io::Error> {
-    let selected_environment_name = match args.environment_name {
-        Some(x) => x,
-        None => context.adapter.get_active_environment_name()?,
-    };
-    let selected_environment = Environment::get_one(
-        &context.config.workspaces_directory,
-        &selected_environment_name,
-    )?;
+    let selected_environment = context.get_environment(args.environment_name);
 
     context
         .writer

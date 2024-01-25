@@ -8,6 +8,7 @@ use clap::Parser;
 
 use commands::list_environments::{list_environments, ListEnvironmentsArgs};
 use commands::show_path::{show_path, ShowPathArgs};
+use commands::wrap::{wrap, WrapArgs};
 use config::ConfigurationValues;
 use context::CommandContext;
 use std::fs::create_dir;
@@ -18,6 +19,7 @@ use std::path::Path;
 enum EnwiroCli {
     ListEnvironments(ListEnvironmentsArgs),
     ShowPath(ShowPathArgs),
+    Wrap(WrapArgs),
 }
 
 fn ensure_can_run<R: Read, W: Write>(config: &CommandContext<R, W>) {
@@ -44,6 +46,7 @@ fn main() -> Result<(), std::io::Error> {
     let result = match args {
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
+        EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
     };
 
     context_object.writer.write("\n".as_bytes()).unwrap();
