@@ -3,7 +3,11 @@ use std::io::{self, Read, Write};
 use crate::CommandContext;
 
 #[derive(clap::Args)]
-#[command(author, version, about)]
+#[command(
+    author,
+    version,
+    about = "Show the file system path of a given environment"
+)]
 pub struct ShowPathArgs {
     pub environment_name: Option<String>,
 }

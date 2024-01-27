@@ -3,7 +3,7 @@ use crate::{environments::Environment, CommandContext};
 use std::io::{self, Read, Write};
 
 #[derive(clap::Args)]
-#[command(author, version, about)]
+#[command(author, version, about = "List all existing environments")]
 pub struct ListEnvironmentsArgs {}
 
 pub fn list_environments<R: Read, W: Write>(

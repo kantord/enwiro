@@ -6,7 +6,11 @@ use std::{
     process::Command,
 };
 #[derive(clap::Args)]
-#[command(author, version, about)]
+#[command(
+    author,
+    version,
+    about = "Run an application/command inside an environment"
+)]
 pub struct WrapArgs {
     pub command_name: String,
     pub environment_name: Option<String>,
