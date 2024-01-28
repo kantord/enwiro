@@ -2,6 +2,34 @@
 
 
 Enwiro is the successor to `i3-env`.
+
+## Usage
+
+### Integration with desktop environment
+
+`enwiro` integrates with your desktop environment using adapters such as
+`enwiro-adapter-i3wm`. Adapters implement a set of basic features
+which `enwiro` can use in order to connect to your operating system's
+graphical environment.
+
+#### Currently available adapters:
+
+* `enwiro-adapter-i3wm` supports i3
+
+#### Configuring desktop environment integration
+
+`enwiro` adapters have names prefixed with `enwiro-adapter-` and can be installed
+using `cargo`. For example, to install an adapter for i3, you can run
+
+`cargo install enwiro-adapter-i3wm`.
+
+In your configuration file, set `adapter` to your desired adapter. For example, to
+use `enwiro-adapter-i3wm`, set `adapter` to `i3wm`.
+
+
+```toml
+adapter = "i3wm"
+```
  
  
 ## Concepts
