@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod context;
 mod environments;
+mod plugin;
 mod test_utils;
 
 use clap::Parser;
@@ -32,7 +33,7 @@ fn ensure_can_run<R: Read, W: Write>(config: &CommandContext<R, W>) {
 
 fn main() -> Result<(), std::io::Error> {
     let args = EnwiroCli::parse();
-    let config: ConfigurationValues = match confy::load("enwiro", None) {
+    let config: ConfigurationValues = match confy::load("enwiro", "enwiro") {
         Ok(x) => x,
         Err(x) => {
             panic!("Could not load configuration: {:?}", x);
@@ -49,7 +50,7 @@ fn main() -> Result<(), std::io::Error> {
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
     };
 
-    context_object.writer.write("\n".as_bytes()).unwrap();
+    context_object.writer.write_all("\n".as_bytes()).unwrap();
 
     return result;
 }
