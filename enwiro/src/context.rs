@@ -69,7 +69,7 @@ impl<R: Read, W: Write> CommandContext<R, W> {
         }
     }
 
-    pub fn get_environment(&self, name: Option<String>) -> Environment {
+    pub fn get_environment(&self, name: Option<String>) -> Result<Environment, std::io::Error> {
         let selected_environment_name = match name {
             Some(x) => x,
             None => self.adapter.get_active_environment_name().unwrap(),
@@ -78,7 +78,6 @@ impl<R: Read, W: Write> CommandContext<R, W> {
         return Environment::get_one(
             &self.config.workspaces_directory,
             &selected_environment_name,
-        )
-        .expect("Could not get environment");
+        );
     }
 }

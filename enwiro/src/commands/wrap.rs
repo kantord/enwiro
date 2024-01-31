@@ -24,7 +24,29 @@ pub fn wrap<R: Read, W: Write>(
     args: WrapArgs,
 ) -> Result<(), io::Error> {
     let selected_environment = context.get_environment(args.environment_name);
-    env::set_current_dir(selected_environment.path).expect("Failed to change directory");
+    let environment_path: String = match selected_environment {
+        Ok(environment) => environment.path,
+        Err(error) => match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                // shoudl be stderr write
+                context
+                    .writer
+                    .write_all(
+                        "No matching environment found. Falling back to home directory.\n"
+                            .as_bytes(),
+                    )
+                    .unwrap();
+
+                env::home_dir()
+                    .expect("Could not determine user home directory")
+                    .into_os_string()
+                    .into_string()
+                    .unwrap()
+            }
+            _ => panic!("Could not determine environment path: {}", error),
+        },
+    };
+    env::set_current_dir(environment_path).expect("Failed to change directory");
 
     let mut child = Command::new(args.command_name)
         .args(match args.child_args {

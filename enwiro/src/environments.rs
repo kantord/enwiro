@@ -38,7 +38,7 @@ impl Environment {
             Some(x) => Ok(x),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("Environment {} does not exist", name),
+                format!("Environment \"{}\" does not exist", name),
             ))?,
         }
     }

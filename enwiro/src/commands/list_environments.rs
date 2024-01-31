@@ -14,7 +14,7 @@ pub fn list_environments<R: Read, W: Write>(
     for environment in environments.values() {
         context
             .writer
-            .write(format!("{}\n", environment.name).as_bytes())
+            .write_all(format!("{}\n", environment.name).as_bytes())
             .expect("Could not write to output");
     }
 

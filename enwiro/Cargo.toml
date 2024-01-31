@@ -1,6 +1,6 @@
 [package]
 name = "enwiro"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Simplify your workflow with dedicated project environments for each workspace in your window manager"
 license = "GPL-3.0-or-later"
@@ -11,8 +11,11 @@ license = "GPL-3.0-or-later"
 clap = { version = "4.4.18", features = ["derive"] }
 confy = "0.6.0"
 home = "0.5.9"
+path_lookup = "0.1.5"
 serde = "1.0.195"
 serde_derive = "1.0.195"
+strum = { version = "0.26.1", features = ["derive"] }
+strum_macros = "0.26.1"
 
 [dev-dependencies]
 assertables = "7.0.1"

@@ -20,7 +20,12 @@ pub fn show_path<R: Read, W: Write>(
 
     context
         .writer
-        .write(selected_environment.path.as_bytes())
+        .write_all(
+            selected_environment
+                .expect("Could not identify active environment")
+                .path
+                .as_bytes(),
+        )
         .unwrap();
 
     Ok(())
