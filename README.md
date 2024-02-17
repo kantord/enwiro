@@ -68,3 +68,17 @@ Recipes can have a hierarchical nature. For instance, the recipe for a
 Git repository might refer to the main working tree of the Git repository,
 and serve as the "parent recipe" to recipes for creating new worktrees for
 the same Git repository.
+
+
+### Lens
+
+A lens is an activate mode in an environment. Some apps and window managers
+might use this to provide a different experience, layout or different features
+for a different part of workflow.
+
+It could be said that lenses are the `enwiro`'s interpretation of modal editing.
+
+Use cases might include:
+- use different layouts for each step of test driven development
+- different layout for rebasing, code review, editing, etc.
+- different layout based on what monitor is being used

@@ -24,6 +24,10 @@ pub mod test_utils {
         fn get_active_environment_name(&self) -> Result<String, std::io::Error> {
             Ok(self.current_environment.to_string())
         }
+
+        fn get_active_lens_name(&self) -> Result<String, std::io::Error> {
+            Ok("".to_string())
+        }
     }
 
     impl EnwiroAdapterMock {
