@@ -12,8 +12,7 @@ pub mod test_utils {
     use rstest::fixture;
 
     use crate::{
-        config::ConfigurationValues,
-        context::{CommandContext, EnwiroAdapterTrait},
+        commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues, context::CommandContext,
     };
 
     pub struct EnwiroAdapterMock {
