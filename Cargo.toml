@@ -2,6 +2,7 @@
 members = [
     "enwiro",
     "enwiro-adapter-i3wm",
+    "enwiro-cookbook-git",
 ]
 
 [profile.release]
