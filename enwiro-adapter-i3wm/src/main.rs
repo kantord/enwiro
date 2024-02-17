@@ -28,7 +28,7 @@ async fn main() -> io::Result<()> {
             if is_active_environment {
                 environment_name = focused_workspace
                     .name
-                    .replace(":", "")
+                    .replace(':', "")
                     .replace(&focused_workspace.num.to_string(), "")
                     .trim()
                     .to_string()
