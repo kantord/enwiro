@@ -16,7 +16,7 @@ pub fn show_path<R: Read, W: Write>(
     context: &mut CommandContext<R, W>,
     args: ShowPathArgs,
 ) -> Result<(), io::Error> {
-    let selected_environment = context.get_environment(args.environment_name);
+    let selected_environment = context.get_or_cook_environment(&args.environment_name);
 
     context
         .writer
@@ -37,7 +37,7 @@ mod tests {
 
     use crate::{
         commands::show_path::{show_path, ShowPathArgs},
-        test_utils::test_utils::{context_object, FakeContext},
+        test_utils::test_utilities::{context_object, FakeContext},
     };
 
     #[rstest]

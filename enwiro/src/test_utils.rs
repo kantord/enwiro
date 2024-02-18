@@ -1,5 +1,5 @@
 #[cfg(test)]
-pub mod test_utils {
+pub mod test_utilities {
 
     use std::{
         env::temp_dir,
@@ -49,7 +49,7 @@ pub mod test_utils {
                 .read_to_string(&mut output)
                 .expect("Could not read output");
 
-            return output;
+            output
         }
 
         pub fn create_mock_environment(&mut self, environment_name: &str) {

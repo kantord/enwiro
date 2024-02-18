@@ -23,7 +23,7 @@ pub fn wrap<R: Read, W: Write>(
     context: &mut CommandContext<R, W>,
     args: WrapArgs,
 ) -> Result<(), io::Error> {
-    let selected_environment = context.get_environment(args.environment_name);
+    let selected_environment = context.get_or_cook_environment(&args.environment_name);
     let environment_path: String = match selected_environment {
         Ok(environment) => environment.path,
         Err(error) => match error.kind() {

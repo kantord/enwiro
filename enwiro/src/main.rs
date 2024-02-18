@@ -4,9 +4,11 @@ mod context;
 mod environments;
 mod plugin;
 mod test_utils;
+mod client;
 
 use clap::Parser;
 
+use commands::list_all::{list_all, ListAllArgs};
 use commands::list_environments::{list_environments, ListEnvironmentsArgs};
 use commands::show_path::{show_path, ShowPathArgs};
 use commands::wrap::{wrap, WrapArgs};
@@ -19,6 +21,7 @@ use std::path::Path;
 #[derive(Parser)]
 enum EnwiroCli {
     ListEnvironments(ListEnvironmentsArgs),
+    ListAll(ListAllArgs),
     ShowPath(ShowPathArgs),
     Wrap(WrapArgs),
 }
@@ -46,6 +49,7 @@ fn main() -> Result<(), std::io::Error> {
 
     let result = match args {
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
+        EnwiroCli::ListAll(_) => list_all(&mut context_object),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
     };

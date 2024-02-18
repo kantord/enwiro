@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::{fs, io};
 
+#[derive(Debug)]
 pub struct Environment {
     // Actual path to the environment
     pub path: String,
