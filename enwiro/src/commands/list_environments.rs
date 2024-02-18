@@ -27,7 +27,7 @@ mod tests {
     use assertables::*;
     use rstest::rstest;
 
-    use crate::test_utils::test_utils::{context_object, FakeContext};
+    use crate::test_utils::test_utilities::{context_object, FakeContext};
 
     #[rstest]
     fn test_list_environments_2_examples(mut context_object: FakeContext) {

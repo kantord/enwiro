@@ -12,6 +12,7 @@ pub enum PluginKind {
 pub struct Plugin {
     pub name: String,
     pub kind: PluginKind,
+    pub executable: String,
 }
 
 pub fn get_plugins(plugin_kind: PluginKind) -> HashSet<Plugin> {
@@ -28,6 +29,7 @@ pub fn get_plugins(plugin_kind: PluginKind) -> HashSet<Plugin> {
                     .unwrap()
                     .to_string(),
                 kind: plugin_kind.clone(),
+                executable,
             });
         }
     }

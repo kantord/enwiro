@@ -70,6 +70,15 @@ and serve as the "parent recipe" to recipes for creating new worktrees for
 the same Git repository.
 
 
+### Cookbooks
+
+Cookbooks are plugins that contain recipes. You can add more recipes to your
+enwiro by installing and configuring more cookbooks.
+
+List of currently available cookbooks:
+- `enwiro-cookbook-git`: Generate environments using Git repositories
+
+
 ### Lens
 
 A lens is an activate mode in an environment. Some apps and window managers
