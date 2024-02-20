@@ -12,8 +12,8 @@ clap = { version = "4.5.1", features = ["derive"] }
 confy = "0.6.0"
 home = "0.5.9"
 path_lookup = "0.1.5"
-serde = "1.0.196"
-serde_derive = "1.0.196"
+serde = "1.0.197"
+serde_derive = "1.0.197"
 strum = { version = "0.26.1", features = ["derive"] }
 strum_macros = "0.26.1"
 
