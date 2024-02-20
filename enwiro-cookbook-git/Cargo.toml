@@ -10,8 +10,8 @@ license = "GPL-3.0-or-later"
 [dependencies]
 clap = { version = "4.5.1", features = ["derive"] }
 glob = "0.3.1"
-serde = "1.0.196"
+serde = "1.0.197"
 confy = "0.6.0"
-serde_derive = "1.0.196"
+serde_derive = "1.0.197"
 git2 = "0.18.2"
 
