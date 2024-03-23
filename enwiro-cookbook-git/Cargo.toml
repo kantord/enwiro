@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-cookbook-git"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "i3wm cookbook for git"
 license = "GPL-3.0-or-later"
