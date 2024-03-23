@@ -15,10 +15,10 @@ jobs:
           toolchain: stable
           override: true
       - name: Build
-        uses: actions-rs/cargo@e7f754b8e09f70ad8eb2c5aebf61e58e8403b210 # v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
         with:
           command: build
       - name: Test
-        uses: actions-rs/cargo@e7f754b8e09f70ad8eb2c5aebf61e58e8403b210 # v1
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
         with:
           command: test
