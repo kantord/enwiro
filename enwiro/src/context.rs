@@ -64,7 +64,11 @@ impl<R: Read, W: Write> CommandContext<R, W> {
         match self.get_environment(name) {
             Ok(env) => Ok(env),
             Err(_) => {
-                let recipe_name = name.clone().expect("Please specify a recipe name");
+                if name.is_none() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No environment could be found or cooked."));
+                }
+                let recipe_name = name.clone().unwrap();
+
                 let environment = self.cook_environment(&recipe_name).expect("Could not cook environment");
                 println!("{:?}", environment);
                 Ok(environment)
