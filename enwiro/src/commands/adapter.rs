@@ -34,8 +34,8 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             match stdout.to_string().split(':').nth(1) {
-                Some(value) => return Ok(value.to_string()),
-                None => return Ok("".to_string()),
+                Some(value) => Ok(value.to_string()),
+                None => Ok("".to_string()),
             }
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
