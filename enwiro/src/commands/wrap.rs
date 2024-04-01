@@ -16,7 +16,7 @@ pub struct WrapArgs {
     pub environment_name: Option<String>,
 
     #[clap(allow_hyphen_values = true, num_args = 0.., last=true)]
-    child_args: Option<String>,
+    child_args: Option<Vec<String>>,
 }
 
 pub fn wrap<R: Read, W: Write>(
@@ -50,8 +50,8 @@ pub fn wrap<R: Read, W: Write>(
 
     let mut child = Command::new(args.command_name)
         .args(match args.child_args {
-            Some(x) => [x.to_string()],
-            None => ["".to_string()],
+            Some(x) => x.into_iter().map(|x| x.to_string()).collect(),
+            None => vec![]
         })
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
