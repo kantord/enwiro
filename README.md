@@ -4,7 +4,7 @@ Enwiro's aims to make window management as useful and convenient as possible
 with the goal of making you more productive.
 
 The core feature of Enwiro is connecting your window manager's "workspace" (or
-similar) feature with separate [environments](#environments) that allow you to
+similar) feature with separate [environments](#environment) that allow you to
 work with different projects or workflows.
 
 Enwiro is window-manager-agnostic and relies on adapters to support different
@@ -12,7 +12,7 @@ types of window managers and operating systems. Even if your window manager is
 not currently supported, it should be simple enough to create an adapter for it.
 
 At their core, environments are simple working directories, and they might be
-generated using different plugins called [cookbooks](#cookbooks).
+generated using different plugins called [cookbooks](#cookbook).
 
 Enwiro is the successor to [i3-env](https://github.com/kantord/i3-env).
 
@@ -78,7 +78,7 @@ repository might refer to the main working tree of the Git repository, and serve
 as the "parent recipe" to recipes for creating new worktrees for the same Git
 repository.
 
-### Cookbooks
+### Cookbook
 
 Cookbooks are plugins that contain recipes. You can add more recipes to your
 enwiro by installing and configuring more cookbooks.
