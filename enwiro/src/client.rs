@@ -32,7 +32,6 @@ impl CookbookClient {
             .output()
             .expect("Failed to cook recipe");
 
-        println!("{:?}", output);
         String::from_utf8_lossy(&output.stdout).to_string().trim().to_string()
     }
 }

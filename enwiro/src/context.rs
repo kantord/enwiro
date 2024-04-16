@@ -42,16 +42,12 @@ impl<R: Read, W: Write> CommandContext<R, W> {
     pub fn cook_environment(&self, name: &str) -> Result<Environment, std::io::Error> {
         for cookbook in self.get_cookbooks() {
             let recipes = cookbook.list_recipes();
-            println!("{:?}", recipes);
             for recipe in recipes.into_iter() {
-                println!("{:?}", recipe);
                 if recipe != name {
                     continue;
                 }
                 let env_path = cookbook.cook(&recipe);
                 let target_path = Path::new(&self.config.workspaces_directory).join(name);
-                println!("env path {:?}", env_path);
-                println!("target_path {:?}", target_path);
                 symlink(Path::new(&env_path), target_path)?;
                 return Environment::get_one(&self.config.workspaces_directory, name);
             }
@@ -70,7 +66,6 @@ impl<R: Read, W: Write> CommandContext<R, W> {
                 let recipe_name = name.clone().unwrap();
 
                 let environment = self.cook_environment(&recipe_name).expect("Could not cook environment");
-                println!("{:?}", environment);
                 Ok(environment)
             }
         }
