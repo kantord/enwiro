@@ -18,6 +18,6 @@ strum = { version = "0.26.2", features = ["derive"] }
 strum_macros = "0.26.2"
 
 [dev-dependencies]
-assertables = "7.0.1"
+assertables = "8.0.0"
 rand = "0.8.5"
 rstest = "0.18.2"
