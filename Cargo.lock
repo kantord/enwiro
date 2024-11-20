@@ -77,9 +77,9 @@ dependencies = [
 
 [[package]]
 name = "assertables"
-version = "7.0.1"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c24e9d990669fbd16806bff449e4ac644fd9b1fca014760087732fe4102f131"
+checksum = "4eafcbd49342bf84989f8db445c8ce254f8c674f0016837310fa1e8f8763e703"
 
 [[package]]
 name = "autocfg"
