@@ -25,8 +25,8 @@ pub fn wrap<R: Read, W: Write>(
 ) -> Result<(), io::Error> {
     let selected_environment = context.get_or_cook_environment(&args.environment_name);
     let environment_path: String = match selected_environment {
-        Ok(environment) => environment.path,
-        Err(error) => match error.kind() {
+        Ok(ref environment) => environment.path.clone(),
+        Err(ref error) => match error.kind() {
             std::io::ErrorKind::NotFound => {
                 // shoudl be stderr write
                 context
@@ -47,6 +47,15 @@ pub fn wrap<R: Read, W: Write>(
         },
     };
     env::set_current_dir(environment_path).expect("Failed to change directory");
+
+
+    let environment_name: String = match selected_environment {
+        Ok(ref environment) => environment.name.clone(),
+        Err(_) => String::from(""),
+    };
+    unsafe {
+        env::set_var("ENWIRO_ENV", environment_name);
+    }
 
     let mut child = Command::new(args.command_name)
         .args(match args.child_args {
