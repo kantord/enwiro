@@ -24,6 +24,10 @@ Enwiro is the successor to [i3-env](https://github.com/kantord/i3-env).
 `enwiro-adapter-i3wm`. Adapters implement a set of basic features which `enwiro`
 can use in order to connect to your operating system's graphical environment.
 
+The adapter will provide `enwiro` with an environment name (based on your
+currently active desktop workspace). You can check your adapter's README to
+know how the environment name is derived.
+
 #### Currently available adapters:
 
 - `enwiro-adapter-i3wm` supports i3
@@ -50,10 +54,16 @@ adapter = "i3wm"
  <img src="environments.png" width="400" />
 </p>
 
-An `enwiro` is a local folder or a symbolic link pointing to a folder.
+An `enwiro` is a local folder or a symbolic link pointing to a folder. To define
+an environment, create a folder or a symbolic link inside your `workspaces_directory`
+(`$HOME/.enwiro_envs` by default). The name of the folder or symlink will be used
+as the environment name.
 
 An environment serves as a working directory for your applications, such as your
-terminal or your code editor.
+terminal or your code editor. To run a command inside an environment, switch to a
+desktop workspace with a name matching the name of the environment you want to use
+and run  `enwiro wrap <COMMAND> [-- [COMMAND_ARGS]...]`. If no matching environment
+is found, it will default to using your home direcory.
 
 An environment could be linked to:
 
