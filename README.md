@@ -55,6 +55,9 @@ An `enwiro` is a local folder or a symbolic link pointing to a folder.
 An environment serves as a working directory for your applications, such as your
 terminal or your code editor.
 
+An environment variable `ENWIRO_ENV` containing the `enwiro` environment name
+will also be added before runnning commands with `enwiro wrap ...`.
+
 An environment could be linked to:
 
 - Any branch of a Git repository checked out on your local computer
