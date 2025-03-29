@@ -19,5 +19,5 @@ strum_macros = "0.26.2"
 
 [dev-dependencies]
 assertables = "7.0.1"
-rand = "0.8.5"
+rand = "0.9.0"
 rstest = "0.18.2"
