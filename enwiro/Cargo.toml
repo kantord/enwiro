@@ -14,8 +14,8 @@ home = "0.5.9"
 path_lookup = "0.1.5"
 serde = "1.0.197"
 serde_derive = "1.0.197"
-strum = { version = "0.27.0", features = ["derive"] }
-strum_macros = "0.27.0"
+strum = { version = "0.26.2", features = ["derive"] }
+strum_macros = "0.26.2"
 
 [dev-dependencies]
 assertables = "7.0.1"
