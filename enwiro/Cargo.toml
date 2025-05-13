@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
-confy = "0.6.1"
+confy = "1.0.0"
 home = "0.5.9"
 path_lookup = "0.1.5"
 serde = "1.0.197"
