@@ -7,20 +7,19 @@ use crate::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    io::{Read, Write},
+    io::Write,
     os::unix::fs::symlink,
     path::Path,
 };
 
-pub struct CommandContext<R: Read, W: Write> {
+pub struct CommandContext<W: Write> {
     pub config: ConfigurationValues,
-    pub reader: R,
     pub writer: W,
     pub adapter: Box<dyn EnwiroAdapterTrait>,
 }
 
-impl<R: Read, W: Write> CommandContext<R, W> {
-    pub fn new(config: ConfigurationValues, reader: R, writer: W) -> Self {
+impl<W: Write> CommandContext<W> {
+    pub fn new(config: ConfigurationValues, writer: W) -> Self {
         let adapter: Box<dyn EnwiroAdapterTrait> = match &config.adapter {
             None => Box::new(EnwiroAdapterNone {}),
             Some(adapter_name) => Box::new(EnwiroAdapterExternal::new(adapter_name)),
@@ -28,7 +27,6 @@ impl<R: Read, W: Write> CommandContext<R, W> {
 
         Self {
             config,
-            reader,
             writer,
             adapter,
         }
@@ -60,9 +58,8 @@ impl<R: Read, W: Write> CommandContext<R, W> {
             }
         }
 
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "No recipe available to cook this environment.)",
+        Err(std::io::Error::other(
+            "No recipe available to cook this environment.",
         ))
     }
 

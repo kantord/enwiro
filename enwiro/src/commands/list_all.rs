@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use crate::context::CommandContext;
 
@@ -10,7 +10,7 @@ use crate::context::CommandContext;
 )]
 pub struct ListAllArgs {}
 
-pub fn list_all<R: Read, W: Write>(context: &mut CommandContext<R, W>) -> Result<(), io::Error> {
+pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> Result<(), io::Error> {
     for environment in context.get_all_environments()?.values() {
         context
             .writer

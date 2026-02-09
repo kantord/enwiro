@@ -4,7 +4,7 @@ pub mod test_utilities {
     use rstest::fixture;
     use std::{
         fs::create_dir,
-        io::{Cursor, Read},
+        io::{Cursor, Read as _},
         path::Path,
     };
     use tempfile::TempDir;
@@ -21,10 +21,6 @@ pub mod test_utilities {
         fn get_active_environment_name(&self) -> Result<String, std::io::Error> {
             Ok(self.current_environment.to_string())
         }
-
-        fn get_active_lens_name(&self) -> Result<String, std::io::Error> {
-            Ok("".to_string())
-        }
     }
 
     impl EnwiroAdapterMock {
@@ -36,7 +32,7 @@ pub mod test_utilities {
     }
 
     pub type FakeIO = Cursor<Vec<u8>>;
-    pub type FakeContext = CommandContext<Cursor<Vec<u8>>, Cursor<Vec<u8>>>;
+    pub type FakeContext = CommandContext<Cursor<Vec<u8>>>;
 
     impl FakeContext {
         pub fn get_output(&mut self) -> String {
@@ -65,14 +61,12 @@ pub mod test_utilities {
     #[fixture]
     pub fn context_object() -> (TempDir, FakeContext) {
         let temp_dir = TempDir::new().expect("Could not create temporary directory");
-        let reader = in_memory_buffer();
         let writer = in_memory_buffer();
         let mut config = ConfigurationValues::default();
         config.workspaces_directory = temp_dir.path().to_str().unwrap().to_string();
 
         let context = CommandContext {
             config,
-            reader,
             writer,
             adapter: Box::new(EnwiroAdapterMock::new("foobaz")),
         };

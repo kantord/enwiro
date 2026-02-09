@@ -15,7 +15,7 @@ use commands::wrap::{wrap, WrapArgs};
 use config::ConfigurationValues;
 use context::CommandContext;
 use std::fs::create_dir;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 
 #[derive(Parser)]
@@ -26,7 +26,7 @@ enum EnwiroCli {
     Wrap(WrapArgs),
 }
 
-fn ensure_can_run<R: Read, W: Write>(config: &CommandContext<R, W>) {
+fn ensure_can_run<W: Write>(config: &CommandContext<W>) {
     let environments_directory = Path::new(&config.config.workspaces_directory);
     if !environments_directory.exists() {
         create_dir(environments_directory)
@@ -43,8 +43,7 @@ fn main() -> Result<(), std::io::Error> {
         }
     };
     let mut writer = std::io::stdout();
-    let mut reader = std::io::stdin();
-    let mut context_object = CommandContext::new(config, &mut reader, &mut writer);
+    let mut context_object = CommandContext::new(config, &mut writer);
     ensure_can_run(&context_object);
 
     let result = match args {

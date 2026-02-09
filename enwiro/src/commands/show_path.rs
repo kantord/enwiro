@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use crate::CommandContext;
 
@@ -12,8 +12,8 @@ pub struct ShowPathArgs {
     pub environment_name: Option<String>,
 }
 
-pub fn show_path<R: Read, W: Write>(
-    context: &mut CommandContext<R, W>,
+pub fn show_path<W: Write>(
+    context: &mut CommandContext<W>,
     args: ShowPathArgs,
 ) -> Result<(), io::Error> {
     let selected_environment = context.get_or_cook_environment(&args.environment_name);

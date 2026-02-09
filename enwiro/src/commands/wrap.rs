@@ -2,7 +2,7 @@ use crate::CommandContext;
 
 use std::{
     env,
-    io::{self, Read, Write},
+    io::{self, Write},
     process::Command,
 };
 #[derive(clap::Args)]
@@ -19,10 +19,7 @@ pub struct WrapArgs {
     child_args: Option<Vec<String>>,
 }
 
-pub fn wrap<R: Read, W: Write>(
-    context: &mut CommandContext<R, W>,
-    args: WrapArgs,
-) -> Result<(), io::Error> {
+pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> Result<(), io::Error> {
     let selected_environment = context.get_or_cook_environment(&args.environment_name);
     let environment_path: String = match selected_environment {
         Ok(ref environment) => environment.path.clone(),

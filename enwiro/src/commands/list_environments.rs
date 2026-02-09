@@ -1,14 +1,12 @@
 use crate::{environments::Environment, CommandContext};
 
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 #[derive(clap::Args)]
 #[command(author, version, about = "List all existing environments")]
 pub struct ListEnvironmentsArgs {}
 
-pub fn list_environments<R: Read, W: Write>(
-    context: &mut CommandContext<R, W>,
-) -> Result<(), io::Error> {
+pub fn list_environments<W: Write>(context: &mut CommandContext<W>) -> Result<(), io::Error> {
     let environments = Environment::get_all(&context.config.workspaces_directory)?;
 
     for environment in environments.values() {
