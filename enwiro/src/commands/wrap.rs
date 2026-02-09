@@ -49,11 +49,9 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> Result
         Ok(ref environment) => environment.name.clone(),
         Err(_) => String::from(""),
     };
-    unsafe {
-        env::set_var("ENWIRO_ENV", environment_name);
-    }
 
     let mut child = Command::new(args.command_name)
+        .env("ENWIRO_ENV", environment_name)
         .args(match args.child_args {
             Some(x) => x.into_iter().map(|x| x.to_string()).collect(),
             None => vec![],
