@@ -30,7 +30,8 @@ mod tests {
     use crate::test_utils::test_utilities::{context_object, FakeContext};
 
     #[rstest]
-    fn test_list_environments_2_examples(mut context_object: FakeContext) {
+    fn test_list_environments_2_examples(context_object: (tempfile::TempDir, FakeContext)) {
+        let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("foobar");
         context_object.create_mock_environment("baz");
 

@@ -41,7 +41,8 @@ mod tests {
     };
 
     #[rstest]
-    fn test_show_path_when_environment_works(mut context_object: FakeContext) {
+    fn test_show_path_when_environment_works(context_object: (tempfile::TempDir, FakeContext)) {
+        let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("foobar");
         show_path(
             &mut context_object,
@@ -56,7 +57,10 @@ mod tests {
 
     #[rstest]
     #[should_panic]
-    fn test_show_path_panics_when_env_does_not_exist(mut context_object: FakeContext) {
+    fn test_show_path_panics_when_env_does_not_exist(
+        context_object: (tempfile::TempDir, FakeContext),
+    ) {
+        let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("existing_env");
         show_path(
             &mut context_object,
@@ -70,8 +74,9 @@ mod tests {
     #[rstest]
     #[should_panic]
     fn test_show_panic_when_no_env_name_is_specified_and_no_adapter_found(
-        mut context_object: FakeContext,
+        context_object: (tempfile::TempDir, FakeContext),
     ) {
+        let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("existing_env");
         show_path(
             &mut context_object,
@@ -83,7 +88,10 @@ mod tests {
     }
 
     #[rstest]
-    fn test_takes_env_name_from_adapter_when_needed(mut context_object: FakeContext) {
+    fn test_takes_env_name_from_adapter_when_needed(
+        context_object: (tempfile::TempDir, FakeContext),
+    ) {
+        let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("foobaz");
         show_path(
             &mut context_object,

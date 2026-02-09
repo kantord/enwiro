@@ -1,14 +1,13 @@
 #[cfg(test)]
 pub mod test_utilities {
 
-    use rand::RngExt as _;
     use rstest::fixture;
     use std::{
-        env::temp_dir,
         fs::create_dir,
         io::{Cursor, Read},
         path::Path,
     };
+    use tempfile::TempDir;
 
     use crate::{
         commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues, context::CommandContext,
@@ -64,20 +63,19 @@ pub mod test_utilities {
     }
 
     #[fixture]
-    pub fn context_object() -> FakeContext {
-        let temporary_directory_path =
-            temp_dir().join(rand::rng().random_range(100000000..999999999).to_string());
-        create_dir(&temporary_directory_path).expect("Could not create temporary directory");
+    pub fn context_object() -> (TempDir, FakeContext) {
+        let temp_dir = TempDir::new().expect("Could not create temporary directory");
         let reader = in_memory_buffer();
         let writer = in_memory_buffer();
         let mut config = ConfigurationValues::default();
-        config.workspaces_directory = temporary_directory_path.to_str().unwrap().to_string();
+        config.workspaces_directory = temp_dir.path().to_str().unwrap().to_string();
 
-        return CommandContext {
+        let context = CommandContext {
             config,
             reader,
             writer,
             adapter: Box::new(EnwiroAdapterMock::new("foobaz")),
         };
+        (temp_dir, context)
     }
 }
