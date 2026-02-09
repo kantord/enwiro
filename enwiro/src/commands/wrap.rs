@@ -34,7 +34,7 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> Result
                     )
                     .unwrap();
 
-                env::home_dir()
+                home::home_dir()
                     .expect("Could not determine user home directory")
                     .into_os_string()
                     .into_string()

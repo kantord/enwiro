@@ -1,5 +1,4 @@
 use serde_derive::{Deserialize, Serialize};
-use std::env;
 
 use crate::plugin::{get_plugins, PluginKind};
 
@@ -11,7 +10,7 @@ pub struct ConfigurationValues {
 
 impl ::std::default::Default for ConfigurationValues {
     fn default() -> Self {
-        let home_dir = env::home_dir().expect("User home directory not found");
+        let home_dir = home::home_dir().expect("User home directory not found");
         let default_workspaces_directory = home_dir.join(".enwiro_envs");
         let mut adapter: Option<String> = None;
         let mut available_adapters = get_plugins(PluginKind::Adapter);
