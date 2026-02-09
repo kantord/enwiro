@@ -7,8 +7,7 @@ pub mod test_utilities {
         io::{Cursor, Read},
         path::Path,
     };
-
-    use rand::Rng;
+    use rand::RngExt as _;
     use rstest::fixture;
 
     use crate::{
@@ -67,8 +66,8 @@ pub mod test_utilities {
     #[fixture]
     pub fn context_object() -> FakeContext {
         let temporary_directory_path = temp_dir().join(
-            rand::thread_rng()
-                .gen_range(100000000..999999999)
+            rand::rng()
+                .random_range(100000000..999999999)
                 .to_string(),
         );
         create_dir(&temporary_directory_path).expect("Could not create temporary directory");
