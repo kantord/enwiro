@@ -16,7 +16,7 @@ impl CookbookClient {
         let output = Command::new(&self.plugin.executable)
             .arg("list-recipes")
             .output()
-            .expect("Adapter failed to determine active environment name");
+            .expect("Cookbook failed to list recipes");
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         stdout.lines().map(|x| x.to_string()).collect()
