@@ -1,10 +1,10 @@
+mod client;
 mod commands;
 mod config;
 mod context;
 mod environments;
 mod plugin;
 mod test_utils;
-mod client;
 
 use clap::Parser;
 

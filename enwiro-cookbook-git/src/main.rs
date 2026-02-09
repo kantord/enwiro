@@ -18,7 +18,6 @@ enum EnwiroCookbookGit {
 #[derive(clap::Args)]
 pub struct ListRecipesArgs {}
 
-
 #[derive(clap::Args)]
 pub struct CookArgs {
     recipe_name: String,

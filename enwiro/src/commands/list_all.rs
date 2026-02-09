@@ -29,4 +29,3 @@ pub fn list_all<R: Read, W: Write>(context: &mut CommandContext<R, W>) -> Result
 
     Ok(())
 }
-

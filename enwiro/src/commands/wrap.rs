@@ -48,7 +48,6 @@ pub fn wrap<R: Read, W: Write>(
     };
     env::set_current_dir(environment_path).expect("Failed to change directory");
 
-
     let environment_name: String = match selected_environment {
         Ok(ref environment) => environment.name.clone(),
         Err(_) => String::from(""),
@@ -60,7 +59,7 @@ pub fn wrap<R: Read, W: Write>(
     let mut child = Command::new(args.command_name)
         .args(match args.child_args {
             Some(x) => x.into_iter().map(|x| x.to_string()).collect(),
-            None => vec![]
+            None => vec![],
         })
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

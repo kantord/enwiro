@@ -1,9 +1,16 @@
 use crate::{
+    client::CookbookClient,
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
     config::ConfigurationValues,
-    environments::Environment, plugin::{get_plugins, PluginKind}, client::CookbookClient,
+    environments::Environment,
+    plugin::{get_plugins, PluginKind},
 };
-use std::{io::{Read, Write}, collections::{HashMap, HashSet}, os::unix::fs::symlink, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    io::{Read, Write},
+    os::unix::fs::symlink,
+    path::Path,
+};
 
 pub struct CommandContext<R: Read, W: Write> {
     pub config: ConfigurationValues,
@@ -53,19 +60,30 @@ impl<R: Read, W: Write> CommandContext<R, W> {
             }
         }
 
-        Err(std::io::Error::new(std::io::ErrorKind::Other, "No recipe available to cook this environment.)"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "No recipe available to cook this environment.)",
+        ))
     }
 
-    pub fn get_or_cook_environment(&self, name: &Option<String>) -> Result<Environment, std::io::Error> {
+    pub fn get_or_cook_environment(
+        &self,
+        name: &Option<String>,
+    ) -> Result<Environment, std::io::Error> {
         match self.get_environment(name) {
             Ok(env) => Ok(env),
             Err(_) => {
                 if name.is_none() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "No environment could be found or cooked."));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "No environment could be found or cooked.",
+                    ));
                 }
                 let recipe_name = name.clone().unwrap();
 
-                let environment = self.cook_environment(&recipe_name).expect("Could not cook environment");
+                let environment = self
+                    .cook_environment(&recipe_name)
+                    .expect("Could not cook environment");
                 Ok(environment)
             }
         }

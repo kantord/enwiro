@@ -2,17 +2,14 @@ use std::process::Command;
 
 use crate::plugin::Plugin;
 
-
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct CookbookClient {
-    pub plugin: Plugin
+    pub plugin: Plugin,
 }
 
 impl CookbookClient {
     pub fn new(plugin: Plugin) -> Self {
-        Self {
-            plugin
-        }
+        Self { plugin }
     }
 
     pub fn list_recipes(&self) -> Vec<String> {
