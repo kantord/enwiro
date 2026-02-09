@@ -5,20 +5,31 @@ on:
   pull_request:
     branches: [main]
 jobs:
-  build_and_test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
-      - name: Install Rust
-        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  build_and_test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cargo_args: "--workspace"
+          - os: macos-latest
+            cargo_args: "-p enwiro -p enwiro-cookbook-git"
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
+      - uses: dtolnay/rust-toolchain@stable
       - name: Build
-        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
-        with:
-          command: build
+        run: cargo build ${{ matrix.cargo_args }}
       - name: Test
-        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
-        with:
-          command: test
+        run: cargo test ${{ matrix.cargo_args }}
