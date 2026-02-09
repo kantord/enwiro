@@ -69,9 +69,9 @@ checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
 name = "assertables"
-version = "7.0.1"
+version = "9.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c24e9d990669fbd16806bff449e4ac644fd9b1fca014760087732fe4102f131"
+checksum = "4dcd1f7f2f608b9a888a851f234086946c2ca1dfeadf1431c5082fee0942eeb6"
 
 [[package]]
 name = "bitflags"
