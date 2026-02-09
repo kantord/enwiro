@@ -56,5 +56,5 @@ fn main() -> Result<(), std::io::Error> {
 
     context_object.writer.write_all("\n".as_bytes()).unwrap();
 
-    return result;
+    result
 }

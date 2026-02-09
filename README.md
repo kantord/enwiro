@@ -63,10 +63,10 @@ An environment serves as a working directory for your applications, such as your
 terminal or your code editor. To run a command inside an environment, switch to a
 desktop workspace with a name matching the name of the environment you want to use
 and run  `enwiro wrap <COMMAND> [-- [COMMAND_ARGS]...]`. If no matching environment
-is found, it will default to using your home direcory.
+is found, it will default to using your home directory.
 
 An environment variable `ENWIRO_ENV` containing the `enwiro` environment name
-will also be added before runnning commands with `enwiro wrap ...`.
+will also be added before running commands with `enwiro wrap ...`.
 
 An environment could be linked to:
 

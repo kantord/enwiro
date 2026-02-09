@@ -17,9 +17,7 @@ pub struct Plugin {
 
 pub fn get_plugins(plugin_kind: PluginKind) -> HashSet<Plugin> {
     let mut results = HashSet::new();
-    let expected_prefix = format!("enwiro-{}-", plugin_kind.to_string())
-        .to_string()
-        .to_lowercase();
+    let expected_prefix = format!("enwiro-{}-", plugin_kind).to_lowercase();
 
     for executable in iterate_executables() {
         if executable.starts_with(&expected_prefix) {
