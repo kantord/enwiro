@@ -177,6 +177,7 @@ dependencies = [
 name = "enwiro"
 version = "0.3.3"
 dependencies = [
+ "anyhow",
  "assertables",
  "clap",
  "confy",
@@ -194,6 +195,7 @@ dependencies = [
 name = "enwiro-adapter-i3wm"
 version = "0.1.1"
 dependencies = [
+ "anyhow",
  "clap",
  "home",
  "i3ipc-types",
@@ -205,6 +207,7 @@ dependencies = [
 name = "enwiro-cookbook-git"
 version = "0.1.1"
 dependencies = [
+ "anyhow",
  "clap",
  "confy",
  "git2",

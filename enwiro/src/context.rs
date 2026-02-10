@@ -1,3 +1,5 @@
+use anyhow::{bail, Context};
+
 use crate::{
     client::CookbookClient,
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
@@ -32,10 +34,10 @@ impl<W: Write> CommandContext<W> {
         }
     }
 
-    fn get_environment(&self, name: &Option<String>) -> Result<Environment, std::io::Error> {
+    fn get_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
         let selected_environment_name = match name {
             Some(x) => x.clone(),
-            None => self.adapter.get_active_environment_name().unwrap(),
+            None => self.adapter.get_active_environment_name()?,
         };
 
         Environment::get_one(
@@ -44,49 +46,41 @@ impl<W: Write> CommandContext<W> {
         )
     }
 
-    pub fn cook_environment(&self, name: &str) -> Result<Environment, std::io::Error> {
+    pub fn cook_environment(&self, name: &str) -> anyhow::Result<Environment> {
         for cookbook in self.get_cookbooks() {
-            let recipes = cookbook.list_recipes();
+            let recipes = cookbook.list_recipes()?;
             for recipe in recipes.into_iter() {
                 if recipe != name {
                     continue;
                 }
-                let env_path = cookbook.cook(&recipe);
+                let env_path = cookbook.cook(&recipe)?;
                 let target_path = Path::new(&self.config.workspaces_directory).join(name);
                 symlink(Path::new(&env_path), target_path)?;
                 return Environment::get_one(&self.config.workspaces_directory, name);
             }
         }
 
-        Err(std::io::Error::other(
-            "No recipe available to cook this environment.",
-        ))
+        bail!("No recipe available to cook this environment.")
     }
 
-    pub fn get_or_cook_environment(
-        &self,
-        name: &Option<String>,
-    ) -> Result<Environment, std::io::Error> {
+    pub fn get_or_cook_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
         match self.get_environment(name) {
             Ok(env) => Ok(env),
             Err(_) => {
                 if name.is_none() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "No environment could be found or cooked.",
-                    ));
+                    bail!("No environment could be found or cooked.");
                 }
                 let recipe_name = name.clone().unwrap();
 
                 let environment = self
                     .cook_environment(&recipe_name)
-                    .expect("Could not cook environment");
+                    .context("Could not cook environment")?;
                 Ok(environment)
             }
         }
     }
 
-    pub fn get_all_environments(&self) -> Result<HashMap<String, Environment>, std::io::Error> {
+    pub fn get_all_environments(&self) -> anyhow::Result<HashMap<String, Environment>> {
         Environment::get_all(&self.config.workspaces_directory)
     }
 

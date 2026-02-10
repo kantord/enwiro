@@ -1,4 +1,5 @@
-use std::io::{self, Write};
+use anyhow::Context;
+use std::io::Write;
 
 use crate::context::CommandContext;
 
@@ -10,20 +11,20 @@ use crate::context::CommandContext;
 )]
 pub struct ListAllArgs {}
 
-pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> Result<(), io::Error> {
+pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()> {
     for environment in context.get_all_environments()?.values() {
         context
             .writer
             .write_all(format!("_: {}\n", environment.name).as_bytes())
-            .expect("Could not write to output");
+            .context("Could not write to output")?;
     }
 
     for cookbook in context.get_cookbooks() {
-        for line in cookbook.list_recipes() {
+        for line in cookbook.list_recipes()? {
             context
                 .writer
                 .write_all(format!("{}: {}\n", cookbook.plugin.name, line).as_bytes())
-                .expect("Could not write to output");
+                .context("Could not write to output")?;
         }
     }
 

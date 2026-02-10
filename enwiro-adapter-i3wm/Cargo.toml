@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
 home = "0.5.9"
 i3ipc-types = "0.16.0"

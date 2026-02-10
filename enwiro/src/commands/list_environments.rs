@@ -1,19 +1,21 @@
+use anyhow::Context;
+
 use crate::{environments::Environment, CommandContext};
 
-use std::io::{self, Write};
+use std::io::Write;
 
 #[derive(clap::Args)]
 #[command(author, version, about = "List all existing environments")]
 pub struct ListEnvironmentsArgs {}
 
-pub fn list_environments<W: Write>(context: &mut CommandContext<W>) -> Result<(), io::Error> {
+pub fn list_environments<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()> {
     let environments = Environment::get_all(&context.config.workspaces_directory)?;
 
     for environment in environments.values() {
         context
             .writer
             .write_all(format!("{}\n", environment.name).as_bytes())
-            .expect("Could not write to output");
+            .context("Could not write to output")?;
     }
 
     Ok(())

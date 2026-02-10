@@ -1,5 +1,6 @@
+use anyhow::{bail, Context};
 use std::collections::HashMap;
-use std::{fs, io};
+use std::fs;
 
 #[derive(Debug)]
 pub struct Environment {
@@ -11,17 +12,26 @@ pub struct Environment {
 }
 
 impl Environment {
-    pub fn get_all(source_directory: &str) -> Result<HashMap<String, Environment>, io::Error> {
+    pub fn get_all(source_directory: &str) -> anyhow::Result<HashMap<String, Environment>> {
         let mut results: HashMap<String, Environment> = HashMap::new();
         let directory_entries = fs::read_dir(source_directory)?;
 
         for directory_entry in directory_entries {
-            let path = directory_entry.unwrap().path();
-            let id = path.file_name().unwrap().to_str().unwrap().to_string();
+            let entry = directory_entry.context("Failed to read directory entry")?;
+            let path = entry.path();
+            let id = path
+                .file_name()
+                .context("Failed to get file name")?
+                .to_str()
+                .context("Failed to convert file name to string")?
+                .to_string();
 
             if path.is_dir() {
                 let new_environment = Environment {
-                    path: path.to_str().unwrap().to_string(),
+                    path: path
+                        .to_str()
+                        .context("Failed to convert path to string")?
+                        .to_string(),
                     name: id.clone(),
                 };
 
@@ -32,15 +42,12 @@ impl Environment {
         Ok(results)
     }
 
-    pub fn get_one(source_directory: &str, name: &str) -> Result<Environment, io::Error> {
+    pub fn get_one(source_directory: &str, name: &str) -> anyhow::Result<Environment> {
         let mut environments = Self::get_all(source_directory)?;
 
         match environments.remove(name) {
             Some(x) => Ok(x),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("Environment \"{}\" does not exist", name),
-            ))?,
+            None => bail!("Environment \"{}\" does not exist", name),
         }
     }
 }

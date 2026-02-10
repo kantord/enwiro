@@ -1,4 +1,5 @@
-use std::io::{self, Write};
+use anyhow::Context;
+use std::io::Write;
 
 use crate::CommandContext;
 
@@ -15,18 +16,15 @@ pub struct ShowPathArgs {
 pub fn show_path<W: Write>(
     context: &mut CommandContext<W>,
     args: ShowPathArgs,
-) -> Result<(), io::Error> {
-    let selected_environment = context.get_or_cook_environment(&args.environment_name);
+) -> anyhow::Result<()> {
+    let selected_environment = context
+        .get_or_cook_environment(&args.environment_name)
+        .context("Could not identify active environment")?;
 
     context
         .writer
-        .write_all(
-            selected_environment
-                .expect("Could not identify active environment")
-                .path
-                .as_bytes(),
-        )
-        .unwrap();
+        .write_all(selected_environment.path.as_bytes())
+        .context("Could not write to output")?;
 
     Ok(())
 }
@@ -44,47 +42,47 @@ mod tests {
     fn test_show_path_when_environment_works(context_object: (tempfile::TempDir, FakeContext)) {
         let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("foobar");
-        show_path(
+        let result = show_path(
             &mut context_object,
             ShowPathArgs {
                 environment_name: Some("foobar".to_string()),
             },
-        )
-        .unwrap();
+        );
 
+        assert!(result.is_ok());
         assert_eq!(context_object.get_output().ends_with("foobar"), true);
     }
 
     #[rstest]
-    #[should_panic]
-    fn test_show_path_panics_when_env_does_not_exist(
+    fn test_show_path_errors_when_env_does_not_exist(
         context_object: (tempfile::TempDir, FakeContext),
     ) {
         let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("existing_env");
-        show_path(
+        let result = show_path(
             &mut context_object,
             ShowPathArgs {
                 environment_name: Some("non_existing_env".to_string()),
             },
-        )
-        .unwrap();
+        );
+
+        assert!(result.is_err());
     }
 
     #[rstest]
-    #[should_panic]
-    fn test_show_panic_when_no_env_name_is_specified_and_no_adapter_found(
+    fn test_show_path_errors_when_no_env_name_is_specified_and_no_adapter_found(
         context_object: (tempfile::TempDir, FakeContext),
     ) {
         let (_temp_dir, mut context_object) = context_object;
         context_object.create_mock_environment("existing_env");
-        show_path(
+        let result = show_path(
             &mut context_object,
             ShowPathArgs {
                 environment_name: None,
             },
-        )
-        .unwrap();
+        );
+
+        assert!(result.is_err());
     }
 
     #[rstest]

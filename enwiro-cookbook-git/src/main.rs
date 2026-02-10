@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
+use anyhow::{bail, Context};
 use clap::Parser;
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
@@ -23,65 +24,74 @@ pub struct CookArgs {
     recipe_name: String,
 }
 
-fn build_repository_hashmap(config: &ConfigurationValues) -> HashMap<String, Repository> {
+fn build_repository_hashmap(
+    config: &ConfigurationValues,
+) -> anyhow::Result<HashMap<String, Repository>> {
     let mut results: HashMap<String, Repository> = HashMap::new();
     for glob_from_config in config.repo_globs.iter() {
-        glob::glob(glob_from_config)
-            .expect("Could not parse glob")
-            .for_each(|entry| {
-                if let Ok(path) = entry {
-                    if let Ok(repo) = Repository::open(path) {
-                        let repo_path_string =
-                            repo.path().to_str().unwrap().replace("/.git", "").clone();
-                        let repo_name = Path::new(&repo_path_string.to_string())
-                            .file_name()
-                            .unwrap()
-                            .to_str()
-                            .unwrap()
-                            .to_string();
+        let paths = glob::glob(glob_from_config).context("Could not parse glob")?;
+        for path in paths.flatten() {
+            if let Ok(repo) = Repository::open(path) {
+                let repo_path_string = repo
+                    .path()
+                    .to_str()
+                    .context("Failed to convert repo path to string")?
+                    .replace("/.git", "");
+                let repo_name = Path::new(&repo_path_string)
+                    .file_name()
+                    .context("Failed to get repo file name")?
+                    .to_str()
+                    .context("Failed to convert repo name to string")?
+                    .to_string();
 
-                        results.insert(repo_name, repo);
-                    }
-                }
-            });
+                results.insert(repo_name, repo);
+            }
+        }
     }
 
-    results
+    Ok(results)
 }
 
-fn list_recipes(config: &ConfigurationValues) {
-    for key in build_repository_hashmap(config).keys() {
+fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
+    for key in build_repository_hashmap(config)?.keys() {
         println!("{}", key);
     }
+    Ok(())
 }
 
 /// Cooks a recipe. It returns the path to the already existing local
 /// clone of the repository.
-fn cook(config: &ConfigurationValues, args: CookArgs) {
-    let repositories = build_repository_hashmap(config);
+fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
+    let repositories = build_repository_hashmap(config)?;
     let selected_repo = repositories.get(&args.recipe_name);
     if let Some(repo) = selected_repo {
-        println!("{}", repo.path().parent().unwrap().to_str().unwrap())
+        let parent = repo
+            .path()
+            .parent()
+            .context("Could not get parent directory of repo")?;
+        println!(
+            "{}",
+            parent
+                .to_str()
+                .context("Could not convert repo path to string")?
+        );
     } else {
-        panic!("Could not find recipe {}", args.recipe_name);
+        bail!("Could not find recipe {}", args.recipe_name);
     }
+    Ok(())
 }
 
-fn main() -> Result<(), ()> {
+fn main() -> anyhow::Result<()> {
     let args = EnwiroCookbookGit::parse();
-    let config: ConfigurationValues = match confy::load("enwiro", "cookbook-git") {
-        Ok(x) => x,
-        Err(x) => {
-            panic!("Could not load configuration: {:?}", x);
-        }
-    };
+    let config: ConfigurationValues =
+        confy::load("enwiro", "cookbook-git").context("Could not load configuration")?;
 
     match args {
         EnwiroCookbookGit::ListRecipes(_) => {
-            list_recipes(&config);
+            list_recipes(&config)?;
         }
         EnwiroCookbookGit::Cook(args) => {
-            cook(&config, args);
+            cook(&config, args)?;
         }
     };
 

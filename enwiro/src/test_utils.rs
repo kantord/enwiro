@@ -18,7 +18,7 @@ pub mod test_utilities {
     }
 
     impl EnwiroAdapterTrait for EnwiroAdapterMock {
-        fn get_active_environment_name(&self) -> Result<String, std::io::Error> {
+        fn get_active_environment_name(&self) -> anyhow::Result<String> {
             Ok(self.current_environment.to_string())
         }
     }

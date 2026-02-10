@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::process::Command;
 
 use crate::plugin::Plugin;
@@ -12,23 +13,23 @@ impl CookbookClient {
         Self { plugin }
     }
 
-    pub fn list_recipes(&self) -> Vec<String> {
+    pub fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
         let output = Command::new(&self.plugin.executable)
             .arg("list-recipes")
             .output()
-            .expect("Cookbook failed to list recipes");
+            .context("Cookbook failed to list recipes")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        stdout.lines().map(|x| x.to_string()).collect()
+        Ok(stdout.lines().map(|x| x.to_string()).collect())
     }
 
-    pub fn cook(&self, recipe: &str) -> String {
+    pub fn cook(&self, recipe: &str) -> anyhow::Result<String> {
         let output = Command::new(&self.plugin.executable)
             .arg("cook")
             .arg(recipe)
             .output()
-            .expect("Failed to cook recipe");
+            .context("Failed to cook recipe")?;
 
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 }

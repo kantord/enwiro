@@ -1,10 +1,8 @@
+use anyhow::{anyhow, Context};
+
 use crate::CommandContext;
 
-use std::{
-    env,
-    io::{self, Write},
-    process::Command,
-};
+use std::{env, io::Write, process::Command};
 #[derive(clap::Args)]
 #[command(
     author,
@@ -19,31 +17,27 @@ pub struct WrapArgs {
     child_args: Option<Vec<String>>,
 }
 
-pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> Result<(), io::Error> {
+pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow::Result<()> {
     let selected_environment = context.get_or_cook_environment(&args.environment_name);
     let environment_path: String = match selected_environment {
         Ok(ref environment) => environment.path.clone(),
-        Err(ref error) => match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                // shoudl be stderr write
-                context
-                    .writer
-                    .write_all(
-                        "No matching environment found. Falling back to home directory.\n"
-                            .as_bytes(),
-                    )
-                    .unwrap();
+        Err(_) => {
+            // shoudl be stderr write
+            context
+                .writer
+                .write_all(
+                    "No matching environment found. Falling back to home directory.\n".as_bytes(),
+                )
+                .context("Could not write to output")?;
 
-                home::home_dir()
-                    .expect("Could not determine user home directory")
-                    .into_os_string()
-                    .into_string()
-                    .unwrap()
-            }
-            _ => panic!("Could not determine environment path: {}", error),
-        },
+            home::home_dir()
+                .context("Could not determine user home directory")?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| anyhow!("Could not convert home directory path to string"))?
+        }
     };
-    env::set_current_dir(environment_path).expect("Failed to change directory");
+    env::set_current_dir(environment_path).context("Failed to change directory")?;
 
     let environment_name: String = match selected_environment {
         Ok(ref environment) => environment.name.clone(),
@@ -60,9 +54,9 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> Result
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .spawn()
-        .expect("Failed to execute command");
+        .context("Failed to execute command")?;
 
-    let _ = child.wait().expect("Command wasn't running");
+    let _ = child.wait().context("Command wasn't running")?;
 
     Ok(())
 }
