@@ -5,6 +5,9 @@ members = [
     "enwiro-cookbook-git",
 ]
 
+[workspace.package]
+repository = "https://github.com/kantord/enwiro"
+
 [profile.release]
 opt-level = 'z'     # Optimize for size
 lto = true          # Enable link-time optimization

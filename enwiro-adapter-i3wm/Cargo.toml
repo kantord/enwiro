@@ -4,6 +4,7 @@ version = "0.1.1"
 edition = "2021"
 description = "i3wm adapter for enwiro"
 license = "GPL-3.0-or-later"
+repository.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

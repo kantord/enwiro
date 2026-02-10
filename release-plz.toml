@@ -1,0 +1,3 @@
+[workspace]
+# release-plz auto-discovers all workspace members.
+# No per-package configuration needed.
