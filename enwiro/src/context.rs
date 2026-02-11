@@ -120,6 +120,28 @@ mod tests {
     }
 
     #[rstest]
+    fn test_cook_environment_finds_recipe_in_second_cookbook(
+        context_object: (tempfile::TempDir, FakeContext),
+    ) {
+        let (temp_dir, mut context_object) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.cookbooks = vec![
+            Box::new(FakeCookbook::new("npm", vec!["unrelated-project"], vec![])),
+            Box::new(FakeCookbook::new(
+                "git",
+                vec!["my-project"],
+                vec![("my-project", cooked_dir.to_str().unwrap())],
+            )),
+        ];
+
+        let env = context_object.cook_environment("my-project").unwrap();
+        assert_eq!(env.name, "my-project");
+    }
+
+    #[rstest]
     fn test_cook_environment_errors_when_no_recipe_matches(
         context_object: (tempfile::TempDir, FakeContext),
     ) {
