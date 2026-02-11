@@ -89,4 +89,20 @@ mod tests {
         assert!(output.contains("git: some-repo"));
         assert!(!output.contains("_:"));
     }
+
+    #[rstest]
+    fn test_list_all_with_multiple_cookbooks(context_object: (tempfile::TempDir, FakeContext)) {
+        let (_temp_dir, mut context_object) = context_object;
+        context_object.cookbooks = vec![
+            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
+            Box::new(FakeCookbook::new("npm", vec!["pkg-x", "pkg-y"], vec![])),
+        ];
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        assert!(output.contains("git: repo-a"));
+        assert!(output.contains("npm: pkg-x"));
+        assert!(output.contains("npm: pkg-y"));
+    }
 }
