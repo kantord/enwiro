@@ -10,7 +10,8 @@ pub mod test_utilities {
     use tempfile::TempDir;
 
     use crate::{
-        commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues, context::CommandContext,
+        client::CookbookTrait, commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues,
+        context::CommandContext,
     };
 
     pub struct EnwiroAdapterMock {
@@ -28,6 +29,42 @@ pub mod test_utilities {
             Self {
                 current_environment: current_environment.to_string(),
             }
+        }
+    }
+
+    pub struct FakeCookbook {
+        pub cookbook_name: String,
+        pub recipes: Vec<String>,
+        pub cook_results: std::collections::HashMap<String, String>,
+    }
+
+    impl FakeCookbook {
+        pub fn new(name: &str, recipes: Vec<&str>, cook_results: Vec<(&str, &str)>) -> Self {
+            Self {
+                cookbook_name: name.to_string(),
+                recipes: recipes.into_iter().map(|s| s.to_string()).collect(),
+                cook_results: cook_results
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl CookbookTrait for FakeCookbook {
+        fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
+            Ok(self.recipes.clone())
+        }
+
+        fn cook(&self, recipe: &str) -> anyhow::Result<String> {
+            self.cook_results
+                .get(recipe)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Recipe not found: {}", recipe))
+        }
+
+        fn name(&self) -> &str {
+            &self.cookbook_name
         }
     }
 
@@ -69,6 +106,7 @@ pub mod test_utilities {
             config,
             writer,
             adapter: Box::new(EnwiroAdapterMock::new("foobaz")),
+            cookbooks: vec![],
         };
         (temp_dir, context)
     }
