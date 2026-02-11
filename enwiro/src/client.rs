@@ -35,7 +35,8 @@ impl CookbookTrait for CookbookClient {
             );
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout =
+            String::from_utf8(output.stdout).context("Cookbook produced invalid UTF-8 output")?;
         Ok(stdout.lines().map(|x| x.to_string()).collect())
     }
 
@@ -56,7 +57,9 @@ impl CookbookTrait for CookbookClient {
             );
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        let stdout =
+            String::from_utf8(output.stdout).context("Cookbook produced invalid UTF-8 output")?;
+        Ok(stdout.trim().to_string())
     }
 
     fn name(&self) -> &str {
