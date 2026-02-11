@@ -54,7 +54,7 @@ adapter = "i3wm"
  <img src="environments.png" width="400" />
 </p>
 
-An `enwiro` is a local folder or a symbolic link pointing to a folder. To define
+An environment is a local folder or a symbolic link pointing to a folder. To define
 an environment, create a folder or a symbolic link inside your `workspaces_directory`
 (`$HOME/.enwiro_envs` by default). The name of the folder or symlink will be used
 as the environment name.
@@ -63,7 +63,8 @@ An environment serves as a working directory for your applications, such as your
 terminal or your code editor. To run a command inside an environment, switch to a
 desktop workspace with a name matching the name of the environment you want to use
 and run  `enwiro wrap <COMMAND> [-- [COMMAND_ARGS]...]`. If no matching environment
-is found, it will default to using your home directory.
+is found but a matching recipe exists, the environment will be created automatically.
+If no environment or recipe is found, it will default to using your home directory.
 
 An environment variable `ENWIRO_ENV` containing the `enwiro` environment name
 will also be added before running commands with `enwiro wrap ...`.

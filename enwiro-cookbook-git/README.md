@@ -10,7 +10,7 @@ cargo install enwiro-cookbook-git
 
 ## Configuration
 
-Configuration is stored in `enwiro/cookbook-git.toml` (managed by [confy](https://crates.io/crates/confy)).
+Configuration is stored in `~/.config/enwiro/cookbook-git.toml` (managed by [confy](https://crates.io/crates/confy)).
 
 ```toml
 repo_globs = ["/home/user/projects/*"]

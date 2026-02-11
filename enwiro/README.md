@@ -21,7 +21,7 @@ enwiro list-all                                # List environments and available
 
 ## Configuration
 
-Configuration is stored in `enwiro/enwiro.toml` (managed by [confy](https://crates.io/crates/confy)).
+Configuration is stored in `~/.config/enwiro/enwiro.toml` (managed by [confy](https://crates.io/crates/confy)).
 
 ```toml
 workspaces_directory = "/home/user/.enwiro_envs"
