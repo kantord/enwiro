@@ -46,6 +46,17 @@ to use `enwiro-adapter-i3wm`, set `adapter` to `i3wm`.
 adapter = "i3wm"
 ```
 
+#### Updating
+
+The most convenient way to update all enwiro-related packages at once is:
+
+```
+cargo install-update -a
+```
+
+This requires [`cargo-update`](https://crates.io/crates/cargo-update), which
+you can install with `cargo install cargo-update`.
+
 ## Concepts
 
 ### Environment
