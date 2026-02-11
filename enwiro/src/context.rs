@@ -37,18 +37,6 @@ impl<W: Write> CommandContext<W> {
         }
     }
 
-    fn get_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
-        let selected_environment_name = match name {
-            Some(x) => x.clone(),
-            None => self.adapter.get_active_environment_name()?,
-        };
-
-        Environment::get_one(
-            &self.config.workspaces_directory,
-            &selected_environment_name,
-        )
-    }
-
     pub fn cook_environment(&self, name: &str) -> anyhow::Result<Environment> {
         for cookbook in &self.cookbooks {
             let recipes = cookbook.list_recipes()?;
@@ -67,16 +55,19 @@ impl<W: Write> CommandContext<W> {
     }
 
     pub fn get_or_cook_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
-        match self.get_environment(name) {
+        let resolved_name = match name {
+            Some(n) => n.clone(),
+            None => self
+                .adapter
+                .get_active_environment_name()
+                .context("Could not determine active environment")?,
+        };
+
+        match Environment::get_one(&self.config.workspaces_directory, &resolved_name) {
             Ok(env) => Ok(env),
             Err(_) => {
-                let recipe_name = match name {
-                    Some(n) => n,
-                    None => bail!("No environment could be found or cooked."),
-                };
-
                 let environment = self
-                    .cook_environment(recipe_name)
+                    .cook_environment(&resolved_name)
                     .context("Could not cook environment")?;
                 Ok(environment)
             }
@@ -217,5 +208,27 @@ mod tests {
 
         let result = context_object.get_or_cook_environment(&None);
         assert!(result.is_err());
+    }
+
+    #[rstest]
+    fn test_get_or_cook_cooks_via_adapter_name_when_no_explicit_name(
+        context_object: (tempfile::TempDir, FakeContext),
+    ) {
+        let (temp_dir, mut context_object) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        // Adapter returns "foobaz" (the default mock value)
+        // Cookbook has a recipe for "foobaz"
+        // No explicit name passed (None) — should resolve via adapter then cook
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["foobaz"],
+            vec![("foobaz", cooked_dir.to_str().unwrap())],
+        ))];
+
+        let env = context_object.get_or_cook_environment(&None).unwrap();
+        assert_eq!(env.name, "foobaz");
     }
 }
