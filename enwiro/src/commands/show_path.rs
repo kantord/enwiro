@@ -34,8 +34,8 @@ mod tests {
     use rstest::rstest;
 
     use crate::{
-        commands::show_path::{show_path, ShowPathArgs},
-        test_utils::test_utilities::{context_object, FakeContext},
+        commands::show_path::{ShowPathArgs, show_path},
+        test_utils::test_utilities::{FakeContext, context_object},
     };
 
     #[rstest]

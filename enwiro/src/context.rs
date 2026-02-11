@@ -1,11 +1,11 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 
 use crate::{
     client::CookbookClient,
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
     config::ConfigurationValues,
     environments::Environment,
-    plugin::{get_plugins, PluginKind},
+    plugin::{PluginKind, get_plugins},
 };
 use std::{
     collections::{HashMap, HashSet},

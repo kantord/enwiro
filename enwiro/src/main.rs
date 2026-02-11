@@ -9,10 +9,10 @@ mod test_utils;
 use anyhow::Context;
 use clap::Parser;
 
-use commands::list_all::{list_all, ListAllArgs};
-use commands::list_environments::{list_environments, ListEnvironmentsArgs};
-use commands::show_path::{show_path, ShowPathArgs};
-use commands::wrap::{wrap, WrapArgs};
+use commands::list_all::{ListAllArgs, list_all};
+use commands::list_environments::{ListEnvironmentsArgs, list_environments};
+use commands::show_path::{ShowPathArgs, show_path};
+use commands::wrap::{WrapArgs, wrap};
 use config::ConfigurationValues;
 use context::CommandContext;
 use std::fs::create_dir;

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use std::process::Command;
 
 pub trait EnwiroAdapterTrait {

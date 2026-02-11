@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-use crate::{environments::Environment, CommandContext};
+use crate::{CommandContext, environments::Environment};
 
 use std::io::Write;
 
@@ -27,7 +27,7 @@ mod tests {
     use assertables::*;
     use rstest::rstest;
 
-    use crate::test_utils::test_utilities::{context_object, FakeContext};
+    use crate::test_utils::test_utilities::{FakeContext, context_object};
 
     #[rstest]
     fn test_list_environments_2_examples(context_object: (tempfile::TempDir, FakeContext)) {

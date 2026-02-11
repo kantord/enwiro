@@ -1,6 +1,6 @@
 use serde_derive::{Deserialize, Serialize};
 
-use crate::plugin::{get_plugins, PluginKind};
+use crate::plugin::{PluginKind, get_plugins};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigurationValues {

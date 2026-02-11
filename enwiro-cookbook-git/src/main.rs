@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::Parser;
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
