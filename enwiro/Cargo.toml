@@ -1,6 +1,6 @@
 [package]
 name = "enwiro"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 description = "Simplify your workflow with dedicated project environments for each workspace in your window manager"
 license = "GPL-3.0-or-later"

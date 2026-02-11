@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.2...enwiro-cookbook-git-v0.1.3) - 2026-02-11
+
+### Other
+
+- update readme
+- add prek
+- add missing readme files
+- use 2024 rust edition
+
 ## [0.1.2](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.1...enwiro-cookbook-git-v0.1.2) - 2026-02-10
 
 ### Fixed
