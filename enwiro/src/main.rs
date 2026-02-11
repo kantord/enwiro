@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
     let config: ConfigurationValues =
         confy::load("enwiro", "enwiro").context("Could not load configuration")?;
     let mut writer = std::io::stdout();
-    let mut context_object = CommandContext::new(config, &mut writer);
+    let mut context_object = CommandContext::new(config, &mut writer)?;
     ensure_can_run(&context_object)?;
 
     let result = match args {

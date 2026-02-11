@@ -17,10 +17,10 @@ pub struct CommandContext<W: Write> {
 }
 
 impl<W: Write> CommandContext<W> {
-    pub fn new(config: ConfigurationValues, writer: W) -> Self {
+    pub fn new(config: ConfigurationValues, writer: W) -> anyhow::Result<Self> {
         let adapter: Box<dyn EnwiroAdapterTrait> = match &config.adapter {
             None => Box::new(EnwiroAdapterNone {}),
-            Some(adapter_name) => Box::new(EnwiroAdapterExternal::new(adapter_name)),
+            Some(adapter_name) => Box::new(EnwiroAdapterExternal::new(adapter_name)?),
         };
 
         let plugins = get_plugins(PluginKind::Cookbook);
@@ -29,12 +29,12 @@ impl<W: Write> CommandContext<W> {
             .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
 
-        Self {
+        Ok(Self {
             config,
             writer,
             adapter,
             cookbooks,
-        }
+        })
     }
 
     pub fn cook_environment(&self, name: &str) -> anyhow::Result<Environment> {

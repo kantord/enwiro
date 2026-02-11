@@ -1,6 +1,8 @@
 use anyhow::{Context, bail};
 use std::process::Command;
 
+use crate::plugin::{PluginKind, get_plugins};
+
 pub trait EnwiroAdapterTrait {
     fn get_active_environment_name(&self) -> anyhow::Result<String>;
 }
@@ -26,10 +28,16 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
     }
 }
 impl EnwiroAdapterExternal {
-    pub fn new(adapter_name: &str) -> Self {
-        Self {
-            adapter_command: format!("enwiro-adapter-{}", adapter_name),
-        }
+    pub fn new(adapter_name: &str) -> anyhow::Result<Self> {
+        let plugins = get_plugins(PluginKind::Adapter);
+        let plugin = plugins
+            .into_iter()
+            .find(|p| p.name == adapter_name)
+            .context(format!("Adapter '{}' not found", adapter_name))?;
+
+        Ok(Self {
+            adapter_command: plugin.executable,
+        })
     }
 }
 
