@@ -18,10 +18,11 @@ pub struct WrapArgs {
 }
 
 pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow::Result<()> {
-    let selected_environment = context.get_or_cook_environment(&args.environment_name);
-    let environment_path: String = match selected_environment {
-        Ok(ref environment) => environment.path.clone(),
-        Err(_) => {
+    let selected_environment = context.get_or_cook_environment(&args.environment_name).ok();
+
+    let environment_path: String = match &selected_environment {
+        Some(environment) => environment.path.clone(),
+        None => {
             eprintln!("No matching environment found. Falling back to home directory.");
 
             home::home_dir()
@@ -33,9 +34,9 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     };
     env::set_current_dir(environment_path).context("Failed to change directory")?;
 
-    let environment_name: String = match selected_environment {
-        Ok(ref environment) => environment.name.clone(),
-        Err(_) => String::from(""),
+    let environment_name: String = match &selected_environment {
+        Some(environment) => environment.name.clone(),
+        None => String::from(""),
     };
 
     let mut child = Command::new(args.command_name)

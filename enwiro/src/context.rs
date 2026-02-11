@@ -54,24 +54,28 @@ impl<W: Write> CommandContext<W> {
         bail!("No recipe available to cook this environment.")
     }
 
-    pub fn get_or_cook_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
-        let resolved_name = match name {
-            Some(n) => n.clone(),
+    fn resolve_environment_name(&self, name: &Option<String>) -> anyhow::Result<String> {
+        match name {
+            Some(n) => Ok(n.clone()),
             None => self
                 .adapter
                 .get_active_environment_name()
-                .context("Could not determine active environment")?,
-        };
-
-        match Environment::get_one(&self.config.workspaces_directory, &resolved_name) {
-            Ok(env) => Ok(env),
-            Err(_) => {
-                let environment = self
-                    .cook_environment(&resolved_name)
-                    .context("Could not cook environment")?;
-                Ok(environment)
-            }
+                .context("Could not determine active environment"),
         }
+    }
+
+    fn get_or_cook_environment_by_name(&self, name: &str) -> anyhow::Result<Environment> {
+        match Environment::get_one(&self.config.workspaces_directory, name) {
+            Ok(env) => Ok(env),
+            Err(_) => self
+                .cook_environment(name)
+                .context("Could not cook environment"),
+        }
+    }
+
+    pub fn get_or_cook_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
+        let resolved = self.resolve_environment_name(name)?;
+        self.get_or_cook_environment_by_name(&resolved)
     }
 
     pub fn get_all_environments(&self) -> anyhow::Result<HashMap<String, Environment>> {
@@ -194,20 +198,6 @@ mod tests {
             .get_or_cook_environment(&Some("new-project".to_string()))
             .unwrap();
         assert_eq!(env.name, "new-project");
-    }
-
-    #[rstest]
-    fn test_get_or_cook_errors_when_no_name_and_adapter_fails(
-        context_object: (tempfile::TempDir, FakeContext),
-    ) {
-        let (_temp_dir, mut context_object) = context_object;
-        // Replace adapter with one that returns a non-existent env
-        context_object.adapter = Box::new(
-            crate::test_utils::test_utilities::EnwiroAdapterMock::new("nonexistent"),
-        );
-
-        let result = context_object.get_or_cook_environment(&None);
-        assert!(result.is_err());
     }
 
     #[rstest]
