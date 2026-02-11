@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.3...enwiro-adapter-i3wm-v0.1.4) - 2026-02-11
+
+### Other
+
+- add note about PATH on i3
+
 ## [0.1.3](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.2...enwiro-adapter-i3wm-v0.1.3) - 2026-02-11
 
 ### Other
