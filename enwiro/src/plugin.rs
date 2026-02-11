@@ -1,6 +1,5 @@
 use std::collections::HashSet;
-
-use path_lookup::iterate_executables;
+use std::path::PathBuf;
 
 #[derive(strum_macros::Display, Hash, Eq, PartialEq, Clone, Debug)]
 pub enum PluginKind {
@@ -15,22 +14,66 @@ pub struct Plugin {
     pub executable: String,
 }
 
+pub fn get_search_directories() -> Vec<PathBuf> {
+    let mut dirs = vec![];
+
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path) {
+            dirs.push(dir);
+        }
+    }
+
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        dirs.push(parent.to_path_buf());
+    }
+
+    dirs
+}
+
 pub fn get_plugins(plugin_kind: PluginKind) -> HashSet<Plugin> {
     let mut results = HashSet::new();
     let expected_prefix = format!("enwiro-{}-", plugin_kind).to_lowercase();
 
-    for executable in iterate_executables() {
-        if executable.starts_with(&expected_prefix) {
-            results.insert(Plugin {
-                name: executable
-                    .strip_prefix(&expected_prefix)
-                    .unwrap()
-                    .to_string(),
-                kind: plugin_kind.clone(),
-                executable,
-            });
+    for dir in get_search_directories() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if let Some(plugin_name) = name.strip_prefix(&expected_prefix) {
+                results.insert(Plugin {
+                    name: plugin_name.to_string(),
+                    kind: plugin_kind.clone(),
+                    executable: name.to_string(),
+                });
+            }
         }
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_search_directories_includes_exe_parent() {
+        let dirs = get_search_directories();
+        let exe_dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(
+            dirs.contains(&exe_dir),
+            "exe dir {:?} should be in search directories, but got {:?}",
+            exe_dir,
+            dirs
+        );
+    }
 }
