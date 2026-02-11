@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "enwiro",
     "enwiro-adapter-i3wm",
+    "enwiro-cookbook-chezmoi",
     "enwiro-cookbook-git",
 ]
 

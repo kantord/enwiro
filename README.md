@@ -110,4 +110,5 @@ enwiro by installing and configuring more cookbooks.
 
 List of currently available cookbooks:
 
+- `enwiro-cookbook-chezmoi`: Use your chezmoi source directory as an environment
 - `enwiro-cookbook-git`: Generate environments using Git repositories
