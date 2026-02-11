@@ -1,7 +1,7 @@
 [package]
 name = "enwiro-adapter-i3wm"
 version = "0.1.2"
-edition = "2021"
+edition = "2024"
 description = "i3wm adapter for enwiro"
 license = "GPL-3.0-or-later"
 repository.workspace = true
