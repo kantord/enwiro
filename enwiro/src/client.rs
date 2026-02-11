@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
 use std::process::Command;
 
 use crate::plugin::Plugin;
@@ -26,6 +26,15 @@ impl CookbookTrait for CookbookClient {
             .output()
             .context("Cookbook failed to list recipes")?;
 
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "Cookbook '{}' failed to list recipes: {}",
+                self.plugin.name,
+                stderr
+            );
+        }
+
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(stdout.lines().map(|x| x.to_string()).collect())
     }
@@ -36,6 +45,16 @@ impl CookbookTrait for CookbookClient {
             .arg(recipe)
             .output()
             .context("Failed to cook recipe")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "Cookbook '{}' failed to cook '{}': {}",
+                self.plugin.name,
+                recipe,
+                stderr
+            );
+        }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
