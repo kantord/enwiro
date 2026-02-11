@@ -22,13 +22,7 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     let environment_path: String = match selected_environment {
         Ok(ref environment) => environment.path.clone(),
         Err(_) => {
-            // should be stderr write
-            context
-                .writer
-                .write_all(
-                    "No matching environment found. Falling back to home directory.\n".as_bytes(),
-                )
-                .context("Could not write to output")?;
+            eprintln!("No matching environment found. Falling back to home directory.");
 
             home::home_dir()
                 .context("Could not determine user home directory")?
