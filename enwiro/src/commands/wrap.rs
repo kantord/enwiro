@@ -22,7 +22,7 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     let environment_path: String = match selected_environment {
         Ok(ref environment) => environment.path.clone(),
         Err(_) => {
-            // shoudl be stderr write
+            // should be stderr write
             context
                 .writer
                 .write_all(
