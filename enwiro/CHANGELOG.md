@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/kantord/enwiro/compare/enwiro-v0.3.4...enwiro-v0.3.5) - 2026-02-11
+
+### Fixed
+
+- cook environment from adapter name when no explicit name is given
+- reject invalid UTF-8 from cookbook subprocess output
+- check subprocess exit status in CookbookClient
+- write error mesage to stderr, not stdout
+
+### Other
+
+- update readme
+- split name resolution from environment lookup internally
+- test multiple cookbooks
+- replace unwrap anti-pattern with match in get_or_cook_environment
+- make more things testable through traits
+- add prek
+- add missing readme files
+- fix typo
+- use 2024 rust edition
+
 ## [0.3.4](https://github.com/kantord/enwiro/compare/enwiro-v0.3.3...enwiro-v0.3.4) - 2026-02-10
 
 ### Added
