@@ -70,13 +70,13 @@ impl<W: Write> CommandContext<W> {
         match self.get_environment(name) {
             Ok(env) => Ok(env),
             Err(_) => {
-                if name.is_none() {
-                    bail!("No environment could be found or cooked.");
-                }
-                let recipe_name = name.clone().unwrap();
+                let recipe_name = match name {
+                    Some(n) => n,
+                    None => bail!("No environment could be found or cooked."),
+                };
 
                 let environment = self
-                    .cook_environment(&recipe_name)
+                    .cook_environment(recipe_name)
                     .context("Could not cook environment")?;
                 Ok(environment)
             }
