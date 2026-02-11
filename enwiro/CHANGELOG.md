@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6](https://github.com/kantord/enwiro/compare/enwiro-v0.3.5...enwiro-v0.3.6) - 2026-02-11
+
+### Fixed
+
+- resolve plugin executables by full path
+- avoid need for PATH customization in i3 config
+
 ## [0.3.5](https://github.com/kantord/enwiro/compare/enwiro-v0.3.4...enwiro-v0.3.5) - 2026-02-11
 
 ### Fixed
