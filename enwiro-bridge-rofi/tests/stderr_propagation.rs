@@ -14,12 +14,12 @@ fn test_activate_propagates_child_stderr() {
     std::fs::set_permissions(&fake_enwiro, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     // Run the bridge binary with ROFI_RETV=1 (selection mode)
-    // and PATH set so it finds our fake enwiro
+    // and ENWIRO_BIN set so it uses our fake enwiro
     let bridge = env!("CARGO_BIN_EXE_enwiro-bridge-rofi");
     let output = Command::new(bridge)
         .arg("test-selection")
         .env("ROFI_RETV", "1")
-        .env("PATH", dir.path())
+        .env("ENWIRO_BIN", &fake_enwiro)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -40,7 +40,7 @@ fn test_activate_propagates_child_stderr() {
 
 #[test]
 fn test_empty_selection_does_not_call_enwiro() {
-    // PATH points to an empty dir — no enwiro binary exists.
+    // ENWIRO_BIN points to a nonexistent path.
     // If the bridge incorrectly tries to spawn enwiro, it will fail
     // and exit with an error. If it correctly skips the empty selection,
     // it exits successfully.
@@ -50,7 +50,7 @@ fn test_empty_selection_does_not_call_enwiro() {
     let output = Command::new(bridge)
         .arg("")
         .env("ROFI_RETV", "1")
-        .env("PATH", dir.path())
+        .env("ENWIRO_BIN", dir.path().join("nonexistent"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

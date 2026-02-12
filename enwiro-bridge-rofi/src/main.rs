@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn enwiro_bin() -> anyhow::Result<PathBuf> {
+    if let Ok(path) = env::var("ENWIRO_BIN") {
+        return Ok(PathBuf::from(path));
+    }
     let exe = env::current_exe().context("could not determine own executable path")?;
     let dir = exe.parent().context("executable has no parent directory")?;
     Ok(dir.join("enwiro"))
