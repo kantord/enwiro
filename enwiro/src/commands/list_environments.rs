@@ -27,11 +27,13 @@ mod tests {
     use assertables::*;
     use rstest::rstest;
 
-    use crate::test_utils::test_utilities::{FakeContext, context_object};
+    use crate::test_utils::test_utilities::{AdapterLog, FakeContext, context_object};
 
     #[rstest]
-    fn test_list_environments_2_examples(context_object: (tempfile::TempDir, FakeContext)) {
-        let (_temp_dir, mut context_object) = context_object;
+    fn test_list_environments_2_examples(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+    ) {
+        let (_temp_dir, mut context_object, _) = context_object;
         context_object.create_mock_environment("foobar");
         context_object.create_mock_environment("baz");
 

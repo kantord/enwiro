@@ -77,6 +77,11 @@ and run  `enwiro wrap <COMMAND> [-- [COMMAND_ARGS]...]`. If no matching environm
 is found but a matching recipe exists, the environment will be created automatically.
 If no environment or recipe is found, it will default to using your home directory.
 
+You can also use `enwiro activate <NAME>` to switch to (or create) a workspace for
+a given environment. This is the complement to `enwiro wrap`: while `wrap` runs a
+command inside an environment, `activate` selects which environment is active in
+your desktop.
+
 An environment variable `ENWIRO_ENV` containing the `enwiro` environment name
 will also be added before running commands with `enwiro wrap ...`.
 
@@ -112,3 +117,13 @@ List of currently available cookbooks:
 
 - `enwiro-cookbook-chezmoi`: Use your chezmoi source directory as an environment
 - `enwiro-cookbook-git`: Generate environments using Git repositories
+
+### Bridge
+
+Bridges provide close integration between enwiro and other applications. A bridge
+translates between enwiro and an external tool's interface, acting as glue that
+connects the two.
+
+List of currently available bridges:
+
+- `enwiro-bridge-rofi`: Browse and activate environments from [rofi](https://github.com/davatorium/rofi)

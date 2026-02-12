@@ -9,18 +9,29 @@ pub mod test_utilities {
     };
     use tempfile::TempDir;
 
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use crate::{
         client::CookbookTrait, commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues,
         context::CommandContext,
     };
 
+    pub type AdapterLog = Rc<RefCell<Vec<String>>>;
+
     pub struct EnwiroAdapterMock {
         pub current_environment: String,
+        pub activated: AdapterLog,
     }
 
     impl EnwiroAdapterTrait for EnwiroAdapterMock {
         fn get_active_environment_name(&self) -> anyhow::Result<String> {
             Ok(self.current_environment.to_string())
+        }
+
+        fn activate(&self, name: &str) -> anyhow::Result<()> {
+            self.activated.borrow_mut().push(name.to_string());
+            Ok(())
         }
     }
 
@@ -28,6 +39,7 @@ pub mod test_utilities {
         pub fn new(current_environment: &str) -> Self {
             Self {
                 current_environment: current_environment.to_string(),
+                activated: Rc::new(RefCell::new(vec![])),
             }
         }
     }
@@ -96,18 +108,21 @@ pub mod test_utilities {
     }
 
     #[fixture]
-    pub fn context_object() -> (TempDir, FakeContext) {
+    pub fn context_object() -> (TempDir, FakeContext, AdapterLog) {
         let temp_dir = TempDir::new().expect("Could not create temporary directory");
         let writer = in_memory_buffer();
         let mut config = ConfigurationValues::default();
         config.workspaces_directory = temp_dir.path().to_str().unwrap().to_string();
 
+        let mock = EnwiroAdapterMock::new("foobaz");
+        let activated = mock.activated.clone();
+
         let context = CommandContext {
             config,
             writer,
-            adapter: Box::new(EnwiroAdapterMock::new("foobaz")),
+            adapter: Box::new(mock),
             cookbooks: vec![],
         };
-        (temp_dir, context)
+        (temp_dir, context, activated)
     }
 }

@@ -9,6 +9,7 @@ mod test_utils;
 use anyhow::Context;
 use clap::Parser;
 
+use commands::activate::{ActivateArgs, activate};
 use commands::list_all::{ListAllArgs, list_all};
 use commands::list_environments::{ListEnvironmentsArgs, list_environments};
 use commands::show_path::{ShowPathArgs, show_path};
@@ -21,6 +22,7 @@ use std::path::Path;
 
 #[derive(Parser)]
 enum EnwiroCli {
+    Activate(ActivateArgs),
     ListEnvironments(ListEnvironmentsArgs),
     ListAll(ListAllArgs),
     ShowPath(ShowPathArgs),
@@ -46,6 +48,7 @@ fn main() -> anyhow::Result<()> {
     ensure_can_run(&context_object)?;
 
     let result = match args {
+        EnwiroCli::Activate(args) => activate(&mut context_object, args),
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
         EnwiroCli::ListAll(_) => list_all(&mut context_object),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),

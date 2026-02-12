@@ -13,6 +13,7 @@ cargo install enwiro
 ## Usage
 
 ```
+enwiro activate <NAME>                         # Activate (switch to) an environment's workspace
 enwiro wrap <COMMAND> [-- [COMMAND_ARGS]...]   # Run a command inside an environment
 enwiro show-path [ENVIRONMENT_NAME]            # Show the path of an environment
 enwiro list-environments                       # List all existing environments

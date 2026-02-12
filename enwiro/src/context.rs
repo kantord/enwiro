@@ -88,13 +88,15 @@ mod tests {
     use rstest::rstest;
     use std::fs;
 
-    use crate::test_utils::test_utilities::{FakeContext, FakeCookbook, context_object};
+    use crate::test_utils::test_utilities::{
+        AdapterLog, FakeContext, FakeCookbook, context_object,
+    };
 
     #[rstest]
     fn test_cook_environment_creates_symlink_for_matching_recipe(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (temp_dir, mut context_object) = context_object;
+        let (temp_dir, mut context_object, _) = context_object;
 
         // Create a real directory that the cookbook will "cook" (point to)
         let cooked_dir = temp_dir.path().join("cooked-target");
@@ -116,9 +118,9 @@ mod tests {
 
     #[rstest]
     fn test_cook_environment_finds_recipe_in_second_cookbook(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (temp_dir, mut context_object) = context_object;
+        let (temp_dir, mut context_object, _) = context_object;
 
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
@@ -138,9 +140,9 @@ mod tests {
 
     #[rstest]
     fn test_cook_environment_errors_when_no_recipe_matches(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (_temp_dir, mut context_object) = context_object;
+        let (_temp_dir, mut context_object, _) = context_object;
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["other-project"],
@@ -159,9 +161,9 @@ mod tests {
 
     #[rstest]
     fn test_cook_environment_errors_when_no_cookbooks(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (_temp_dir, context_object) = context_object;
+        let (_temp_dir, context_object, _) = context_object;
 
         let result = context_object.cook_environment("anything");
         assert!(result.is_err());
@@ -169,9 +171,9 @@ mod tests {
 
     #[rstest]
     fn test_get_or_cook_returns_existing_environment(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (_temp_dir, mut context_object) = context_object;
+        let (_temp_dir, mut context_object, _) = context_object;
         context_object.create_mock_environment("my-env");
 
         let env = context_object
@@ -181,8 +183,10 @@ mod tests {
     }
 
     #[rstest]
-    fn test_get_or_cook_falls_back_to_cooking(context_object: (tempfile::TempDir, FakeContext)) {
-        let (temp_dir, mut context_object) = context_object;
+    fn test_get_or_cook_falls_back_to_cooking(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+    ) {
+        let (temp_dir, mut context_object, _) = context_object;
 
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
@@ -202,9 +206,9 @@ mod tests {
 
     #[rstest]
     fn test_get_or_cook_cooks_via_adapter_name_when_no_explicit_name(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (temp_dir, mut context_object) = context_object;
+        let (temp_dir, mut context_object, _) = context_object;
 
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();

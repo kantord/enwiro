@@ -1,0 +1,13 @@
+[package]
+name = "enwiro-bridge-rofi"
+version = "0.1.0"
+edition = "2024"
+description = "Rofi bridge for enwiro"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

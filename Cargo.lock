@@ -203,6 +203,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "enwiro-bridge-rofi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+]
+
+[[package]]
 name = "enwiro-cookbook-chezmoi"
 version = "0.1.0"
 dependencies = [

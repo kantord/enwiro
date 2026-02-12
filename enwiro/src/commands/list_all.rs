@@ -36,13 +36,15 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    use crate::test_utils::test_utilities::{FakeContext, FakeCookbook, context_object};
+    use crate::test_utils::test_utilities::{
+        AdapterLog, FakeContext, FakeCookbook, context_object,
+    };
 
     #[rstest]
     fn test_list_all_shows_environments_and_recipes(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (_temp_dir, mut context_object) = context_object;
+        let (_temp_dir, mut context_object, _) = context_object;
         context_object.create_mock_environment("my-env");
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
@@ -59,8 +61,10 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_with_no_cookbooks(context_object: (tempfile::TempDir, FakeContext)) {
-        let (_temp_dir, mut context_object) = context_object;
+    fn test_list_all_with_no_cookbooks(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+    ) {
+        let (_temp_dir, mut context_object, _) = context_object;
         context_object.create_mock_environment("env-a");
         context_object.create_mock_environment("env-b");
 
@@ -74,9 +78,9 @@ mod tests {
 
     #[rstest]
     fn test_list_all_with_no_environments_but_has_recipes(
-        context_object: (tempfile::TempDir, FakeContext),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
     ) {
-        let (_temp_dir, mut context_object) = context_object;
+        let (_temp_dir, mut context_object, _) = context_object;
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["some-repo"],
@@ -91,8 +95,10 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_with_multiple_cookbooks(context_object: (tempfile::TempDir, FakeContext)) {
-        let (_temp_dir, mut context_object) = context_object;
+    fn test_list_all_with_multiple_cookbooks(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+    ) {
+        let (_temp_dir, mut context_object, _) = context_object;
         context_object.cookbooks = vec![
             Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
             Box::new(FakeCookbook::new("npm", vec!["pkg-x", "pkg-y"], vec![])),
