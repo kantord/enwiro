@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.6"
+version = "0.3.7"
 dependencies = [
  "anyhow",
  "assertables",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-i3wm"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
