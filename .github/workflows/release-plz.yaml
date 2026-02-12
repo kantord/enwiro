@@ -32,8 +32,24 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # Publish crates individually, skipping ones already on crates.io.
+      # This works around release-plz's gix slotmap overflow during index
+      # polling (GitoxideLabs/gitoxide#1788).
+      # NOTE: This does not publish in dependency order. If workspace crates
+      # start depending on each other, this step needs to be updated to
+      # respect the dependency graph.
       - name: Publish to crates.io
-        run: cargo publish --workspace
+        run: |
+          for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | .name'); do
+            echo "Publishing $pkg..."
+            cargo publish -p "$pkg" 2>&1 | tee /tmp/publish.log && continue
+            if grep -q 'already exists on crates.io' /tmp/publish.log; then
+              echo "$pkg already published, skipping."
+            else
+              echo "$pkg failed to publish."
+              exit 1
+            fi
+          done
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
