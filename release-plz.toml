@@ -1,3 +1,6 @@
 [workspace]
-# release-plz auto-discovers all workspace members.
-# No per-package configuration needed.
+# Disable release-plz's built-in cargo publish to work around a gitoxide
+# slotmap overflow bug (GitoxideLabs/gitoxide#1788) that crashes during
+# index polling. Publishing is handled separately via `cargo publish
+# --workspace` in the CI workflow.
+publish = false
