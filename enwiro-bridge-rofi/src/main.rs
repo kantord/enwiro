@@ -1,10 +1,17 @@
 use anyhow::Context;
 use std::collections::HashSet;
 use std::env;
+use std::path::PathBuf;
 use std::process::Command;
 
+fn enwiro_bin() -> anyhow::Result<PathBuf> {
+    let exe = env::current_exe().context("could not determine own executable path")?;
+    let dir = exe.parent().context("executable has no parent directory")?;
+    Ok(dir.join("enwiro"))
+}
+
 fn list_entries() -> anyhow::Result<()> {
-    let output = Command::new("enwiro")
+    let output = Command::new(enwiro_bin()?)
         .arg("list-all")
         .output()
         .context("Failed to run enwiro list-all")?;
@@ -40,7 +47,7 @@ fn activate_selection(selection: &str) -> anyhow::Result<()> {
     // in the background (e.g. cooking an environment from a git recipe may
     // take a while). The child becomes a short-lived zombie until this
     // process exits, at which point init reaps it.
-    Command::new("enwiro")
+    Command::new(enwiro_bin()?)
         .arg("activate")
         .arg(selection)
         .stdin(std::process::Stdio::null())
