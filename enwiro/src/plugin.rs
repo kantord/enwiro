@@ -38,12 +38,16 @@ pub fn find_plugins_in_directory(dir: &Path, plugin_kind: &PluginKind) -> HashSe
 
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(_) => return results,
+        Err(e) => {
+            tracing::debug!(dir = ?dir, "Could not read plugin directory: {}", e);
+            return results;
+        }
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         if let Some(plugin_name) = name.strip_prefix(&expected_prefix) {
+            tracing::debug!(name = %plugin_name, path = %entry.path().display(), "Found plugin");
             results.insert(Plugin {
                 name: plugin_name.to_string(),
                 kind: plugin_kind.clone(),
@@ -60,6 +64,7 @@ pub fn get_plugins(plugin_kind: PluginKind) -> HashSet<Plugin> {
     for dir in get_search_directories() {
         results.extend(find_plugins_in_directory(&dir, &plugin_kind));
     }
+    tracing::debug!(count = results.len(), kind = %plugin_kind, "Plugin discovery complete");
     results
 }
 

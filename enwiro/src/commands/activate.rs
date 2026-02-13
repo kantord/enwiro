@@ -30,7 +30,7 @@ pub fn activate<W: Write>(
             "Could not set up environment '{}': {}",
             args.name, e
         ));
-        eprintln!("Warning: could not set up environment: {}", e);
+        tracing::warn!(error = %e, "Could not set up environment");
     }
 
     Ok(())

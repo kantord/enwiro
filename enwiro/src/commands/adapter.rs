@@ -14,6 +14,7 @@ pub struct EnwiroAdapterExternal {
 
 impl EnwiroAdapterTrait for EnwiroAdapterExternal {
     fn get_active_environment_name(&self) -> anyhow::Result<String> {
+        tracing::debug!("Querying adapter for active environment");
         let output = Command::new(&self.adapter_command)
             .arg("get-active-workspace-id")
             .output()
@@ -29,6 +30,7 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
     }
 
     fn activate(&self, name: &str) -> anyhow::Result<()> {
+        tracing::debug!(name = %name, "Activating workspace via adapter");
         let output = Command::new(&self.adapter_command)
             .arg("activate")
             .arg(name)

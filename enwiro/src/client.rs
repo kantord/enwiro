@@ -21,6 +21,7 @@ impl CookbookClient {
 
 impl CookbookTrait for CookbookClient {
     fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
+        tracing::debug!(cookbook = %self.plugin.name, "Listing recipes from cookbook");
         let output = Command::new(&self.plugin.executable)
             .arg("list-recipes")
             .output()
@@ -28,6 +29,7 @@ impl CookbookTrait for CookbookClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(cookbook = %self.plugin.name, %stderr, "Cookbook failed to list recipes");
             bail!(
                 "Cookbook '{}' failed to list recipes: {}",
                 self.plugin.name,
@@ -41,6 +43,7 @@ impl CookbookTrait for CookbookClient {
     }
 
     fn cook(&self, recipe: &str) -> anyhow::Result<String> {
+        tracing::debug!(cookbook = %self.plugin.name, recipe = %recipe, "Cooking recipe");
         let output = Command::new(&self.plugin.executable)
             .arg("cook")
             .arg(recipe)
@@ -49,6 +52,7 @@ impl CookbookTrait for CookbookClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(cookbook = %self.plugin.name, recipe = %recipe, %stderr, "Cookbook failed to cook recipe");
             bail!(
                 "Cookbook '{}' failed to cook '{}': {}",
                 self.plugin.name,

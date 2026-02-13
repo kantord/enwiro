@@ -21,8 +21,14 @@ pub struct CommandContext<W: Write> {
 impl<W: Write> CommandContext<W> {
     pub fn new(config: ConfigurationValues, writer: W) -> anyhow::Result<Self> {
         let adapter: Box<dyn EnwiroAdapterTrait> = match &config.adapter {
-            None => Box::new(EnwiroAdapterNone {}),
-            Some(adapter_name) => Box::new(EnwiroAdapterExternal::new(adapter_name)?),
+            None => {
+                tracing::debug!("No adapter configured");
+                Box::new(EnwiroAdapterNone {})
+            }
+            Some(adapter_name) => {
+                tracing::debug!(adapter = %adapter_name, "Using adapter");
+                Box::new(EnwiroAdapterExternal::new(adapter_name)?)
+            }
         };
 
         let plugins = get_plugins(PluginKind::Cookbook);
@@ -30,6 +36,8 @@ impl<W: Write> CommandContext<W> {
             .into_iter()
             .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
+
+        tracing::debug!(count = cookbooks.len(), "Cookbooks loaded");
 
         let notifier: Box<dyn Notifier> = Box::new(DesktopNotifier);
 
@@ -51,6 +59,7 @@ impl<W: Write> CommandContext<W> {
                 }
                 let env_path = cookbook.cook(&recipe)?;
                 let target_path = Path::new(&self.config.workspaces_directory).join(name);
+                tracing::info!(name = %name, target = %env_path, "Creating environment symlink");
                 symlink(Path::new(&env_path), target_path)?;
                 self.notifier
                     .notify_success(&format!("Created environment: {}", name));
@@ -58,6 +67,7 @@ impl<W: Write> CommandContext<W> {
             }
         }
 
+        tracing::warn!(name = %name, "No recipe available to cook environment");
         bail!("No recipe available to cook this environment.")
     }
 
