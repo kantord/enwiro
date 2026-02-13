@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.6...enwiro-adapter-i3wm-v0.1.7) - 2026-02-13
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.1.6](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.5...enwiro-adapter-i3wm-v0.1.6) - 2026-02-13
 
 ### Added
