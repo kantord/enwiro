@@ -13,7 +13,7 @@ members = [
 repository = "https://github.com/kantord/enwiro"
 
 [workspace.dependencies]
-enwiro-logging = { path = "enwiro-logging" }
+enwiro-logging = { path = "enwiro-logging", version = "0.1.0" }
 home = "0.5.9"
 tracing = "0.1"
 tracing-appender = "0.2"
