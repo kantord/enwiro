@@ -67,7 +67,7 @@ impl<W: Write> CommandContext<W> {
             }
         }
 
-        tracing::warn!(name = %name, "No recipe available to cook environment");
+        tracing::error!(name = %name, "No recipe available to cook environment");
         bail!("No recipe available to cook this environment.")
     }
 

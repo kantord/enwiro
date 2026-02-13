@@ -2,7 +2,6 @@ use anyhow::Context;
 use clap::Parser;
 use i3ipc_types::reply::Workspace;
 use tokio_i3ipc::I3;
-
 #[derive(Parser)]
 enum EnwiroAdapterI3WmCLI {
     GetActiveWorkspaceId(GetActiveWorkspaceIdArgs),
@@ -28,6 +27,7 @@ async fn run_i3_command(i3: &mut I3, command: String) -> anyhow::Result<()> {
         && !outcome.success
     {
         let msg = outcome.error.as_deref().unwrap_or("unknown error");
+        tracing::error!(error = %msg, "i3 command failed");
         anyhow::bail!("i3 command failed: {}", msg);
     }
     Ok(())
@@ -43,28 +43,34 @@ fn extract_environment_name(workspace: &Workspace) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let _guard = enwiro_logging::init_logging("enwiro-adapter-i3wm.log");
+
     let args = EnwiroAdapterI3WmCLI::parse();
 
     match args {
         EnwiroAdapterI3WmCLI::GetActiveWorkspaceId(_) => {
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
+            tracing::debug!(count = workspaces.len(), "Retrieved workspaces");
             let focused_workspace = workspaces
                 .into_iter()
                 .find(|workspace| workspace.focused)
                 .context("No active workspace. This should never happen.")?;
             let environment_name = extract_environment_name(&focused_workspace);
+            tracing::debug!(name = %environment_name, "Extracted environment name");
             print!("{}", environment_name);
         }
         EnwiroAdapterI3WmCLI::Activate(args) => {
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
+            tracing::debug!(count = workspaces.len(), name = %args.name, "Activating environment");
 
             // Check if a workspace with this environment name already exists
             if let Some(existing) = workspaces
                 .iter()
                 .find(|ws| extract_environment_name(ws) == args.name)
             {
+                tracing::info!(workspace = %existing.name, "Found existing workspace");
                 run_i3_command(&mut i3, build_workspace_command(&existing.name)).await?;
             } else {
                 // Find the lowest unused workspace number
@@ -76,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 let workspace_name = format!("{}: {}", free_num, args.name);
+                tracing::info!(workspace = %workspace_name, num = free_num, "Creating new workspace");
                 run_i3_command(&mut i3, build_workspace_command(&workspace_name)).await?;
             }
         }

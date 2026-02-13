@@ -1,0 +1,12 @@
+[package]
+name = "enwiro-logging"
+version = "0.1.0"
+edition = "2024"
+description = "Shared logging setup for enwiro binaries"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+home.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

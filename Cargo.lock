@@ -422,6 +422,7 @@ dependencies = [
  "assertables",
  "clap",
  "confy",
+ "enwiro-logging",
  "home",
  "notify-rust",
  "rstest",
@@ -431,8 +432,6 @@ dependencies = [
  "strum_macros",
  "tempfile",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -441,10 +440,11 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
- "home",
+ "enwiro-logging",
  "i3ipc-types",
  "tokio",
  "tokio-i3ipc",
+ "tracing",
 ]
 
 [[package]]
@@ -452,7 +452,9 @@ name = "enwiro-bridge-rofi"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "enwiro-logging",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -461,6 +463,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "enwiro-logging",
+ "tracing",
 ]
 
 [[package]]
@@ -470,10 +474,21 @@ dependencies = [
  "anyhow",
  "clap",
  "confy",
+ "enwiro-logging",
  "git2",
  "glob",
  "serde",
  "serde_derive",
+ "tracing",
+]
+
+[[package]]
+name = "enwiro-logging"
+version = "0.1.0"
+dependencies = [
+ "home",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -3,17 +3,20 @@ use std::collections::HashSet;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
-
 fn enwiro_bin() -> anyhow::Result<PathBuf> {
     if let Ok(path) = env::var("ENWIRO_BIN") {
+        tracing::debug!(path = %path, "Using ENWIRO_BIN env var");
         return Ok(PathBuf::from(path));
     }
     let exe = env::current_exe().context("could not determine own executable path")?;
     let dir = exe.parent().context("executable has no parent directory")?;
-    Ok(dir.join("enwiro"))
+    let bin = dir.join("enwiro");
+    tracing::debug!(path = %bin.display(), "Resolved enwiro binary from exe parent");
+    Ok(bin)
 }
 
 fn list_entries() -> anyhow::Result<()> {
+    tracing::debug!("Listing entries via enwiro list-all");
     let output = Command::new(enwiro_bin()?)
         .arg("list-all")
         .output()
@@ -21,6 +24,7 @@ fn list_entries() -> anyhow::Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(%stderr, "enwiro list-all failed");
         anyhow::bail!("enwiro list-all failed: {}", stderr);
     }
 
@@ -45,6 +49,7 @@ fn list_entries() -> anyhow::Result<()> {
 }
 
 fn activate_selection(selection: &str) -> anyhow::Result<()> {
+    tracing::debug!(selection = %selection, "Activating selection");
     // We intentionally spawn without calling .wait(). This lets the bridge
     // exit immediately so rofi can close, while enwiro activate continues
     // in the background (e.g. cooking an environment from a git recipe may
@@ -63,8 +68,12 @@ fn activate_selection(selection: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let _guard = enwiro_logging::init_logging("enwiro-bridge-rofi.log");
+
     let rofi_retv = env::var("ROFI_RETV").unwrap_or_else(|_| "0".to_string());
     let args: Vec<String> = env::args().collect();
+
+    tracing::debug!(rofi_retv = %rofi_retv, "Bridge invoked");
 
     match rofi_retv.as_str() {
         "0" => list_entries()?,

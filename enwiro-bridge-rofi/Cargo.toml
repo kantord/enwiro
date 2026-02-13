@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
+enwiro-logging.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

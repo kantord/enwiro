@@ -9,3 +9,5 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
+enwiro-logging.workspace = true
+tracing.workspace = true
