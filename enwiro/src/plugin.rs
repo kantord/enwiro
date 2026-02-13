@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(strum_macros::Display, Hash, Eq, PartialEq, Clone, Debug)]
@@ -47,6 +48,13 @@ pub fn find_plugins_in_directory(dir: &Path, plugin_kind: &PluginKind) -> HashSe
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
         if let Some(plugin_name) = name.strip_prefix(&expected_prefix) {
+            let is_executable = entry
+                .metadata()
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false);
+            if !is_executable {
+                continue;
+            }
             tracing::debug!(name = %plugin_name, path = %entry.path().display(), "Found plugin");
             results.insert(Plugin {
                 name: plugin_name.to_string(),
@@ -90,13 +98,33 @@ mod tests {
     }
 
     #[test]
-    fn test_find_plugins_returns_full_path_as_executable() {
+    fn test_find_plugins_skips_non_executable_files() {
         let temp_dir = tempfile::tempdir().unwrap();
+
+        // Non-executable file with matching prefix (e.g. a .d dependency file)
         fs::write(
-            temp_dir.path().join("enwiro-cookbook-fakeplugin"),
-            "#!/bin/sh\n",
+            temp_dir.path().join("enwiro-cookbook-fakeplugin.d"),
+            "dependency info\n",
         )
         .unwrap();
+
+        let plugins = find_plugins_in_directory(temp_dir.path(), &PluginKind::Cookbook);
+        assert_eq!(
+            plugins.len(),
+            0,
+            "non-executable files should not be picked up as plugins, but got {:?}",
+            plugins
+        );
+    }
+
+    #[test]
+    fn test_find_plugins_returns_full_path_as_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let plugin_path = temp_dir.path().join("enwiro-cookbook-fakeplugin");
+        fs::write(&plugin_path, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&plugin_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let plugins = find_plugins_in_directory(temp_dir.path(), &PluginKind::Cookbook);
         assert_eq!(plugins.len(), 1);
