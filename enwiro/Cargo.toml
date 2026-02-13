@@ -12,15 +12,14 @@ repository.workspace = true
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
 confy = "2.0.0"
-home = "0.5.9"
+enwiro-logging.workspace = true
+home.workspace = true
 serde = "1.0.197"
 serde_derive = "1.0.197"
 strum = { version = "0.27.0", features = ["derive"] }
 strum_macros = "0.27.0"
 notify-rust = "4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
+tracing.workspace = true
 
 [dev-dependencies]
 assertables = "9.0.0"

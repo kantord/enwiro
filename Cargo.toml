@@ -6,10 +6,18 @@ members = [
     "enwiro-bridge-rofi",
     "enwiro-cookbook-chezmoi",
     "enwiro-cookbook-git",
+    "enwiro-logging",
 ]
 
 [workspace.package]
 repository = "https://github.com/kantord/enwiro"
+
+[workspace.dependencies]
+enwiro-logging = { path = "enwiro-logging" }
+home = "0.5.9"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
 
 [profile.release]
 opt-level = 'z'     # Optimize for size

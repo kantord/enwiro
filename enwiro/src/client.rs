@@ -29,7 +29,7 @@ impl CookbookTrait for CookbookClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(cookbook = %self.plugin.name, %stderr, "Cookbook failed to list recipes");
+            tracing::error!(cookbook = %self.plugin.name, %stderr, "Cookbook failed to list recipes");
             bail!(
                 "Cookbook '{}' failed to list recipes: {}",
                 self.plugin.name,
@@ -52,7 +52,7 @@ impl CookbookTrait for CookbookClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(cookbook = %self.plugin.name, recipe = %recipe, %stderr, "Cookbook failed to cook recipe");
+            tracing::error!(cookbook = %self.plugin.name, recipe = %recipe, %stderr, "Cookbook failed to cook recipe");
             bail!(
                 "Cookbook '{}' failed to cook '{}': {}",
                 self.plugin.name,
