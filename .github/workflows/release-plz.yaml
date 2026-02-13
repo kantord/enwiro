@@ -40,9 +40,12 @@ jobs:
       # respect the dependency graph.
       - name: Publish to crates.io
         run: |
+          set -o pipefail
           for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | .name'); do
             echo "Publishing $pkg..."
-            cargo publish -p "$pkg" 2>&1 | tee /tmp/publish.log && continue
+            if cargo publish -p "$pkg" 2>&1 | tee /tmp/publish.log; then
+              continue
+            fi
             if grep -q 'already exists on crates.io' /tmp/publish.log; then
               echo "$pkg already published, skipping."
             else
