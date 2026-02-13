@@ -48,12 +48,20 @@ fn build_repository_hashmap(
                 // Discover worktrees and add them as repo_name@worktree_name
                 if let Ok(worktrees) = repo.worktrees() {
                     for wt_name in worktrees.iter().flatten() {
-                        if let Ok(wt) = repo.find_worktree(wt_name)
-                            && let Ok(wt_repo) = Repository::open(wt.path())
-                        {
-                            let compound_name = format!("{}@{}", repo_name, wt_name);
-                            tracing::debug!(name = %compound_name, "Found git worktree");
-                            results.insert(compound_name, wt_repo);
+                        match repo.find_worktree(wt_name) {
+                            Ok(wt) => match Repository::open(wt.path()) {
+                                Ok(wt_repo) => {
+                                    let compound_name = format!("{}@{}", repo_name, wt_name);
+                                    tracing::debug!(name = %compound_name, "Found git worktree");
+                                    results.insert(compound_name, wt_repo);
+                                }
+                                Err(e) => {
+                                    tracing::debug!(worktree = %wt_name, error = %e, "Failed to open worktree as repository");
+                                }
+                            },
+                            Err(e) => {
+                                tracing::debug!(worktree = %wt_name, error = %e, "Failed to find worktree");
+                            }
                         }
                     }
                 }
