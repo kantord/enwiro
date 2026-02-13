@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.10](https://github.com/kantord/enwiro/compare/enwiro-v0.3.9...enwiro-v0.3.10) - 2026-02-13
+
+### Added
+
+- add logging
+
+### Fixed
+
+- avoid picking up non-executables as plugins
+
 ## [0.3.9](https://github.com/kantord/enwiro/compare/enwiro-v0.3.8...enwiro-v0.3.9) - 2026-02-13
 
 ### Added
