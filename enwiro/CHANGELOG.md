@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9](https://github.com/kantord/enwiro/compare/enwiro-v0.3.8...enwiro-v0.3.9) - 2026-02-13
+
+### Added
+
+- add notification
+
 ## [0.3.8](https://github.com/kantord/enwiro/compare/enwiro-v0.3.7...enwiro-v0.3.8) - 2026-02-12
 
 ### Fixed
