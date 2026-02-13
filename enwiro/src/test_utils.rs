@@ -14,10 +14,33 @@ pub mod test_utilities {
 
     use crate::{
         client::CookbookTrait, commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues,
-        context::CommandContext,
+        context::CommandContext, notifier::Notifier,
     };
 
     pub type AdapterLog = Rc<RefCell<Vec<String>>>;
+    pub type NotificationLog = Rc<RefCell<Vec<String>>>;
+
+    pub struct MockNotifier {
+        pub log: NotificationLog,
+    }
+
+    impl MockNotifier {
+        pub fn new() -> Self {
+            Self {
+                log: Rc::new(RefCell::new(vec![])),
+            }
+        }
+    }
+
+    impl Notifier for MockNotifier {
+        fn notify_success(&self, message: &str) {
+            self.log.borrow_mut().push(format!("SUCCESS: {}", message));
+        }
+
+        fn notify_error(&self, message: &str) {
+            self.log.borrow_mut().push(format!("ERROR: {}", message));
+        }
+    }
 
     pub struct EnwiroAdapterMock {
         pub current_environment: String,
@@ -108,7 +131,7 @@ pub mod test_utilities {
     }
 
     #[fixture]
-    pub fn context_object() -> (TempDir, FakeContext, AdapterLog) {
+    pub fn context_object() -> (TempDir, FakeContext, AdapterLog, NotificationLog) {
         let temp_dir = TempDir::new().expect("Could not create temporary directory");
         let writer = in_memory_buffer();
         let mut config = ConfigurationValues::default();
@@ -117,12 +140,16 @@ pub mod test_utilities {
         let mock = EnwiroAdapterMock::new("foobaz");
         let activated = mock.activated.clone();
 
+        let mock_notifier = MockNotifier::new();
+        let notifications = mock_notifier.log.clone();
+
         let context = CommandContext {
             config,
             writer,
             adapter: Box::new(mock),
+            notifier: Box::new(mock_notifier),
             cookbooks: vec![],
         };
-        (temp_dir, context, activated)
+        (temp_dir, context, activated, notifications)
     }
 }

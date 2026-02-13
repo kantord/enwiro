@@ -127,3 +127,15 @@ connects the two.
 List of currently available bridges:
 
 - `enwiro-bridge-rofi`: Browse and activate environments from [rofi](https://github.com/davatorium/rofi)
+
+### Notifications
+
+Enwiro sends desktop notifications for important events using the system's
+notification service (via [notify-rust](https://crates.io/crates/notify-rust)):
+
+- **Environment creation**: when a new environment is cooked from a recipe
+- **Errors**: when workspace activation or environment setup fails
+
+This is especially useful when enwiro is triggered from a keybinding or bridge
+where there is no terminal to show output. If the notification service is
+unavailable, error messages fall back to stderr.
