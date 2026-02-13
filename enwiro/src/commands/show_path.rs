@@ -35,14 +35,14 @@ mod tests {
 
     use crate::{
         commands::show_path::{ShowPathArgs, show_path},
-        test_utils::test_utilities::{AdapterLog, FakeContext, context_object},
+        test_utils::test_utilities::{AdapterLog, FakeContext, NotificationLog, context_object},
     };
 
     #[rstest]
     fn test_show_path_when_environment_works(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _) = context_object;
+        let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("foobar");
         let result = show_path(
             &mut context_object,
@@ -57,9 +57,9 @@ mod tests {
 
     #[rstest]
     fn test_show_path_errors_when_env_does_not_exist(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _) = context_object;
+        let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("existing_env");
         let result = show_path(
             &mut context_object,
@@ -73,9 +73,9 @@ mod tests {
 
     #[rstest]
     fn test_show_path_errors_when_no_env_name_is_specified_and_no_adapter_found(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _) = context_object;
+        let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("existing_env");
         let result = show_path(
             &mut context_object,
@@ -89,9 +89,9 @@ mod tests {
 
     #[rstest]
     fn test_takes_env_name_from_adapter_when_needed(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _) = context_object;
+        let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("foobaz");
         show_path(
             &mut context_object,

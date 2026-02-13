@@ -5,6 +5,7 @@ use crate::{
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
     config::ConfigurationValues,
     environments::Environment,
+    notifier::{DesktopNotifier, Notifier},
     plugin::{PluginKind, get_plugins},
 };
 use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path};
@@ -13,6 +14,7 @@ pub struct CommandContext<W: Write> {
     pub config: ConfigurationValues,
     pub writer: W,
     pub adapter: Box<dyn EnwiroAdapterTrait>,
+    pub notifier: Box<dyn Notifier>,
     pub cookbooks: Vec<Box<dyn CookbookTrait>>,
 }
 
@@ -29,10 +31,13 @@ impl<W: Write> CommandContext<W> {
             .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
 
+        let notifier: Box<dyn Notifier> = Box::new(DesktopNotifier);
+
         Ok(Self {
             config,
             writer,
             adapter,
+            notifier,
             cookbooks,
         })
     }
@@ -47,6 +52,8 @@ impl<W: Write> CommandContext<W> {
                 let env_path = cookbook.cook(&recipe)?;
                 let target_path = Path::new(&self.config.workspaces_directory).join(name);
                 symlink(Path::new(&env_path), target_path)?;
+                self.notifier
+                    .notify_success(&format!("Created environment: {}", name));
                 return Environment::get_one(&self.config.workspaces_directory, name);
             }
         }
@@ -89,14 +96,14 @@ mod tests {
     use std::fs;
 
     use crate::test_utils::test_utilities::{
-        AdapterLog, FakeContext, FakeCookbook, context_object,
+        AdapterLog, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
 
     #[rstest]
     fn test_cook_environment_creates_symlink_for_matching_recipe(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (temp_dir, mut context_object, _) = context_object;
+        let (temp_dir, mut context_object, _, _) = context_object;
 
         // Create a real directory that the cookbook will "cook" (point to)
         let cooked_dir = temp_dir.path().join("cooked-target");
@@ -118,9 +125,9 @@ mod tests {
 
     #[rstest]
     fn test_cook_environment_finds_recipe_in_second_cookbook(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (temp_dir, mut context_object, _) = context_object;
+        let (temp_dir, mut context_object, _, _) = context_object;
 
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
@@ -140,9 +147,9 @@ mod tests {
 
     #[rstest]
     fn test_cook_environment_errors_when_no_recipe_matches(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _) = context_object;
+        let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["other-project"],
@@ -161,9 +168,9 @@ mod tests {
 
     #[rstest]
     fn test_cook_environment_errors_when_no_cookbooks(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, context_object, _) = context_object;
+        let (_temp_dir, context_object, _, _) = context_object;
 
         let result = context_object.cook_environment("anything");
         assert!(result.is_err());
@@ -171,9 +178,9 @@ mod tests {
 
     #[rstest]
     fn test_get_or_cook_returns_existing_environment(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _) = context_object;
+        let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("my-env");
 
         let env = context_object
@@ -184,9 +191,9 @@ mod tests {
 
     #[rstest]
     fn test_get_or_cook_falls_back_to_cooking(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (temp_dir, mut context_object, _) = context_object;
+        let (temp_dir, mut context_object, _, _) = context_object;
 
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
@@ -206,9 +213,9 @@ mod tests {
 
     #[rstest]
     fn test_get_or_cook_cooks_via_adapter_name_when_no_explicit_name(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog),
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (temp_dir, mut context_object, _) = context_object;
+        let (temp_dir, mut context_object, _, _) = context_object;
 
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
@@ -224,5 +231,48 @@ mod tests {
 
         let env = context_object.get_or_cook_environment(&None).unwrap();
         assert_eq!(env.name, "foobaz");
+    }
+
+    #[rstest]
+    fn test_cook_environment_sends_notification(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, notifications) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project", cooked_dir.to_str().unwrap())],
+        ))];
+
+        let result = context_object.cook_environment("my-project");
+        assert!(result.is_ok());
+
+        let logs = notifications.borrow();
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].starts_with("SUCCESS:"));
+        assert!(logs[0].contains("my-project"));
+    }
+
+    #[rstest]
+    fn test_cook_environment_no_notification_on_failure(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, notifications) = context_object;
+
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["other-project"],
+            vec![],
+        ))];
+
+        let result = context_object.cook_environment("my-project");
+        assert!(result.is_err());
+
+        let logs = notifications.borrow();
+        assert_eq!(logs.len(), 0);
     }
 }

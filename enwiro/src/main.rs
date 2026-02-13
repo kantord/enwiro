@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod context;
 mod environments;
+mod notifier;
 mod plugin;
 mod test_utils;
 
