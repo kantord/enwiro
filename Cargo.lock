@@ -479,6 +479,7 @@ dependencies = [
  "glob",
  "serde",
  "serde_derive",
+ "tempfile",
  "tracing",
 ]
 
