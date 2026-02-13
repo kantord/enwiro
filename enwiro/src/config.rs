@@ -18,6 +18,11 @@ impl ::std::default::Default for ConfigurationValues {
             adapter = Some(available_adapters.drain().next().unwrap().name);
         }
 
+        match &adapter {
+            Some(name) => tracing::info!(adapter = %name, "Auto-selected adapter"),
+            None => tracing::debug!("No adapter auto-selected"),
+        }
+
         Self {
             workspaces_directory: default_workspaces_directory.to_str().unwrap().to_string(),
             adapter,

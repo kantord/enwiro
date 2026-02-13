@@ -18,12 +18,18 @@ pub struct WrapArgs {
 }
 
 pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow::Result<()> {
-    let selected_environment = context.get_or_cook_environment(&args.environment_name).ok();
+    let selected_environment = match context.get_or_cook_environment(&args.environment_name) {
+        Ok(env) => Some(env),
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not resolve environment");
+            None
+        }
+    };
 
     let environment_path: String = match &selected_environment {
         Some(environment) => environment.path.clone(),
         None => {
-            eprintln!("No matching environment found. Falling back to home directory.");
+            tracing::warn!("No matching environment found, falling back to home directory");
 
             home::home_dir()
                 .context("Could not determine user home directory")?
@@ -51,7 +57,8 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
         .spawn()
         .context("Failed to execute command")?;
 
-    let _ = child.wait().context("Command wasn't running")?;
+    let status = child.wait().context("Command wasn't running")?;
+    tracing::debug!(exit_code = ?status.code(), "Child process exited");
 
     Ok(())
 }
