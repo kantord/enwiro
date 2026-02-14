@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "assertables",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-git"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
