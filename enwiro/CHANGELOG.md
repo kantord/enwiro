@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13](https://github.com/kantord/enwiro/compare/enwiro-v0.3.12...enwiro-v0.3.13) - 2026-02-14
+
+### Added
+
+- *(enwiro)* add background daemon for recipe caching
+
 ## [0.3.12](https://github.com/kantord/enwiro/compare/enwiro-v0.3.11...enwiro-v0.3.12) - 2026-02-14
 
 ### Fixed
