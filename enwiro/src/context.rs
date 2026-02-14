@@ -58,12 +58,13 @@ impl<W: Write> CommandContext<W> {
                     continue;
                 }
                 let env_path = cookbook.cook(&recipe)?;
-                let target_path = Path::new(&self.config.workspaces_directory).join(name);
+                let flat_name = name.replace('/', "-");
+                let target_path = Path::new(&self.config.workspaces_directory).join(&flat_name);
                 tracing::info!(name = %name, target = %env_path, "Creating environment symlink");
                 symlink(Path::new(&env_path), target_path)?;
                 self.notifier
                     .notify_success(&format!("Created environment: {}", name));
-                return Environment::get_one(&self.config.workspaces_directory, name);
+                return Environment::get_one(&self.config.workspaces_directory, &flat_name);
             }
         }
 
@@ -82,7 +83,8 @@ impl<W: Write> CommandContext<W> {
     }
 
     fn get_or_cook_environment_by_name(&self, name: &str) -> anyhow::Result<Environment> {
-        match Environment::get_one(&self.config.workspaces_directory, name) {
+        let flat_name = name.replace('/', "-");
+        match Environment::get_one(&self.config.workspaces_directory, &flat_name) {
             Ok(env) => Ok(env),
             Err(_) => self
                 .cook_environment(name)
@@ -131,6 +133,64 @@ mod tests {
         // Verify symlink was created
         let link_path = temp_dir.path().join("my-project");
         assert!(link_path.is_symlink());
+    }
+
+    #[rstest]
+    fn test_cook_environment_with_slash_in_name(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        let recipe_name = "my-project@feature/my-thing";
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec![recipe_name],
+            vec![(recipe_name, cooked_dir.to_str().unwrap())],
+        ))];
+
+        let env = context_object.cook_environment(recipe_name).unwrap();
+        assert_eq!(env.name, "my-project@feature-my-thing");
+
+        // Verify symlink was created (not nested due to the slash)
+        assert!(
+            temp_dir.path().read_dir().unwrap().any(|entry| {
+                let entry = entry.unwrap();
+                entry.path().is_symlink()
+            }),
+            "A symlink should exist in the workspaces directory"
+        );
+    }
+
+    #[rstest]
+    fn test_get_or_cook_finds_existing_environment_with_slash_in_name(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        let recipe_name = "my-project@feature/my-thing";
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec![recipe_name],
+            vec![(recipe_name, cooked_dir.to_str().unwrap())],
+        ))];
+
+        // First call creates the environment
+        let env1 = context_object
+            .get_or_cook_environment(&Some(recipe_name.to_string()))
+            .unwrap();
+
+        // Second call should find the existing environment, not try to cook again
+        let env2 = context_object
+            .get_or_cook_environment(&Some(recipe_name.to_string()))
+            .unwrap();
+
+        assert_eq!(env1.name, env2.name);
     }
 
     #[rstest]
