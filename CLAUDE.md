@@ -48,7 +48,7 @@ enwiro (core CLI)
 
 ### Key Traits (in core)
 
-- `CookbookTrait`: `list_recipes()` → `Vec<String>`, `cook(&str)` → `String` (path)
+- `CookbookTrait`: `list_recipes()` → `Vec<Recipe>` (name + optional description), `cook(&str)` → `String` (path)
 - `EnwiroAdapterTrait`: `get_active_environment_name()`, `activate(name)`
 - `Notifier`: desktop notifications for success/error events
 

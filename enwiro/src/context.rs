@@ -56,10 +56,10 @@ impl<W: Write> CommandContext<W> {
         for cookbook in &self.cookbooks {
             let recipes = cookbook.list_recipes()?;
             for recipe in recipes.into_iter() {
-                if recipe != name {
+                if recipe.name != name {
                     continue;
                 }
-                let env_path = cookbook.cook(&recipe)?;
+                let env_path = cookbook.cook(&recipe.name)?;
                 let flat_name = name.replace('/', "-");
                 let target_path = Path::new(&self.config.workspaces_directory).join(&flat_name);
                 tracing::info!(name = %name, target = %env_path, "Creating environment symlink");

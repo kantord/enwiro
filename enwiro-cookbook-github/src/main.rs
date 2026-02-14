@@ -274,7 +274,8 @@ fn list_recipes() -> anyhow::Result<()> {
 
     let prs = search_prs(&repo_names)?;
     for pr in prs {
-        println!("{}#{}", pr.repo, pr.number);
+        let safe_title = pr.title.replace(['\t', '\n', '\0', '\x1f'], " ");
+        println!("{}#{}\t{}", pr.repo, pr.number, safe_title);
     }
     Ok(())
 }

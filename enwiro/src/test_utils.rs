@@ -13,8 +13,11 @@ pub mod test_utilities {
     use std::rc::Rc;
 
     use crate::{
-        client::CookbookTrait, commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues,
-        context::CommandContext, notifier::Notifier,
+        client::{CookbookTrait, Recipe},
+        commands::adapter::EnwiroAdapterTrait,
+        config::ConfigurationValues,
+        context::CommandContext,
+        notifier::Notifier,
     };
 
     pub type AdapterLog = Rc<RefCell<Vec<String>>>;
@@ -69,7 +72,7 @@ pub mod test_utilities {
 
     pub struct FakeCookbook {
         pub cookbook_name: String,
-        pub recipes: Vec<String>,
+        pub recipes: Vec<Recipe>,
         pub cook_results: std::collections::HashMap<String, String>,
     }
 
@@ -77,7 +80,28 @@ pub mod test_utilities {
         pub fn new(name: &str, recipes: Vec<&str>, cook_results: Vec<(&str, &str)>) -> Self {
             Self {
                 cookbook_name: name.to_string(),
-                recipes: recipes.into_iter().map(|s| s.to_string()).collect(),
+                recipes: recipes.into_iter().map(|s| Recipe::new(s)).collect(),
+                cook_results: cook_results
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            }
+        }
+
+        pub fn new_with_descriptions(
+            name: &str,
+            recipes: Vec<(&str, Option<&str>)>,
+            cook_results: Vec<(&str, &str)>,
+        ) -> Self {
+            Self {
+                cookbook_name: name.to_string(),
+                recipes: recipes
+                    .into_iter()
+                    .map(|(n, d)| match d {
+                        Some(desc) => Recipe::with_description(n, desc),
+                        None => Recipe::new(n),
+                    })
+                    .collect(),
                 cook_results: cook_results
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -91,7 +115,7 @@ pub mod test_utilities {
     }
 
     impl CookbookTrait for FailingCookbook {
-        fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
+        fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>> {
             anyhow::bail!("simulated failure")
         }
 
@@ -105,7 +129,7 @@ pub mod test_utilities {
     }
 
     impl CookbookTrait for FakeCookbook {
-        fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
+        fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>> {
             Ok(self.recipes.clone())
         }
 
