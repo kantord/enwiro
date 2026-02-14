@@ -2,6 +2,7 @@ mod client;
 mod commands;
 mod config;
 mod context;
+mod daemon;
 mod environments;
 mod notifier;
 mod plugin;
@@ -27,6 +28,9 @@ enum EnwiroCli {
     ListAll(ListAllArgs),
     ShowPath(ShowPathArgs),
     Wrap(WrapArgs),
+    /// Internal: background daemon for recipe caching
+    #[command(hide = true)]
+    Daemon,
 }
 
 fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
@@ -40,9 +44,16 @@ fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    let args = EnwiroCli::parse();
+
+    // Daemon subcommand runs independently — it manages its own plugin discovery
+    if matches!(args, EnwiroCli::Daemon) {
+        let _guard = enwiro_logging::init_logging("enwiro-daemon.log");
+        return daemon::run_daemon();
+    }
+
     let _guard = enwiro_logging::init_logging("enwiro.log");
 
-    let args = EnwiroCli::parse();
     let config: ConfigurationValues =
         confy::load("enwiro", "enwiro").context("Could not load configuration")?;
     let mut writer = std::io::stdout();
@@ -55,6 +66,7 @@ fn main() -> anyhow::Result<()> {
         EnwiroCli::ListAll(_) => list_all(&mut context_object),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
+        EnwiroCli::Daemon => unreachable!(),
     };
 
     context_object

@@ -8,7 +8,7 @@ use crate::{
     notifier::{DesktopNotifier, Notifier},
     plugin::{PluginKind, get_plugins},
 };
-use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path};
+use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, path::PathBuf};
 
 pub struct CommandContext<W: Write> {
     pub config: ConfigurationValues,
@@ -16,6 +16,7 @@ pub struct CommandContext<W: Write> {
     pub adapter: Box<dyn EnwiroAdapterTrait>,
     pub notifier: Box<dyn Notifier>,
     pub cookbooks: Vec<Box<dyn CookbookTrait>>,
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl<W: Write> CommandContext<W> {
@@ -47,6 +48,7 @@ impl<W: Write> CommandContext<W> {
             adapter,
             notifier,
             cookbooks,
+            cache_dir: None,
         })
     }
 

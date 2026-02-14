@@ -86,6 +86,24 @@ pub mod test_utilities {
         }
     }
 
+    pub struct FailingCookbook {
+        pub cookbook_name: String,
+    }
+
+    impl CookbookTrait for FailingCookbook {
+        fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("simulated failure")
+        }
+
+        fn cook(&self, _recipe: &str) -> anyhow::Result<String> {
+            anyhow::bail!("simulated failure")
+        }
+
+        fn name(&self) -> &str {
+            &self.cookbook_name
+        }
+    }
+
     impl CookbookTrait for FakeCookbook {
         fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
             Ok(self.recipes.clone())
@@ -149,6 +167,7 @@ pub mod test_utilities {
             adapter: Box::new(mock),
             notifier: Box::new(mock_notifier),
             cookbooks: vec![],
+            cache_dir: Some(temp_dir.path().join("daemon")),
         };
         (temp_dir, context, activated, notifications)
     }

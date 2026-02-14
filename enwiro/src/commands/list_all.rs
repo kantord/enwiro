@@ -2,6 +2,7 @@ use anyhow::Context;
 use std::io::Write;
 
 use crate::context::CommandContext;
+use crate::daemon;
 
 #[derive(clap::Args)]
 #[command(
@@ -12,6 +13,7 @@ use crate::context::CommandContext;
 pub struct ListAllArgs {}
 
 pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()> {
+    // 1. Always list environments (instant — local directory listing)
     for environment in context.get_all_environments()?.values() {
         context
             .writer
@@ -19,12 +21,54 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
             .context("Could not write to output")?;
     }
 
-    for cookbook in &context.cookbooks {
-        for line in cookbook.list_recipes()? {
+    // 2. Resolve runtime directory (test-injectable via cache_dir)
+    let runtime_dir = match &context.cache_dir {
+        Some(dir) => dir.clone(),
+        None => daemon::runtime_dir()?,
+    };
+
+    // 3. Ensure daemon is running (spawns if needed; skip in test mode)
+    if context.cache_dir.is_none() {
+        match daemon::ensure_daemon_running(&runtime_dir) {
+            Ok(true) => {
+                tracing::info!("Started background recipe cache daemon");
+                context
+                    .notifier
+                    .notify_success("Recipe cache daemon started");
+            }
+            Ok(false) => {
+                tracing::debug!("Daemon already running");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not ensure daemon is running");
+            }
+        }
+    }
+
+    // 4. Read from cache if available, otherwise synchronous fallback
+    match daemon::read_cached_recipes(&runtime_dir) {
+        Ok(Some(cached)) => {
+            let _ = daemon::touch_heartbeat(&runtime_dir);
             context
                 .writer
-                .write_all(format!("{}: {}\n", cookbook.name(), line).as_bytes())
-                .context("Could not write to output")?;
+                .write_all(cached.as_bytes())
+                .context("Could not write cached recipes to output")?;
+        }
+        Ok(None) => {
+            tracing::debug!("No cache available, falling back to synchronous recipe collection");
+            let recipes = daemon::collect_all_recipes(&context.cookbooks);
+            context
+                .writer
+                .write_all(recipes.as_bytes())
+                .context("Could not write recipes to output")?;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not read cache, falling back to sync");
+            let recipes = daemon::collect_all_recipes(&context.cookbooks);
+            context
+                .writer
+                .write_all(recipes.as_bytes())
+                .context("Could not write recipes to output")?;
         }
     }
 
@@ -110,5 +154,49 @@ mod tests {
         assert!(output.contains("git: repo-a"));
         assert!(output.contains("npm: pkg-x"));
         assert!(output.contains("npm: pkg-y"));
+    }
+
+    #[rstest]
+    fn test_list_all_reads_from_cache_when_available(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        let cache_dir = context_object.cache_dir.clone().unwrap();
+
+        // Pre-populate cache
+        daemon::write_cache_atomic(&cache_dir, "git: cached-repo\n").unwrap();
+
+        // No cookbooks — if it falls back to sync, output would be empty
+        context_object.cookbooks = vec![];
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("git: cached-repo"),
+            "Should read from cache, got: {}",
+            output
+        );
+    }
+
+    #[rstest]
+    fn test_list_all_falls_back_to_sync_when_no_cache(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["sync-repo"],
+            vec![],
+        ))];
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("git: sync-repo"),
+            "Should fall back to sync, got: {}",
+            output
+        );
     }
 }
