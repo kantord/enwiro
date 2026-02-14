@@ -15,6 +15,25 @@ fn enwiro_bin() -> anyhow::Result<PathBuf> {
     Ok(bin)
 }
 
+/// Format raw `enwiro list-all` output into rofi script-mode entries.
+/// Deduplicates by name and formats as tab-separated columns with rofi metadata.
+fn format_entries(input: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for line in input.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((source, name)) = line.split_once(": ")
+            && seen.insert(name.to_string())
+        {
+            entries.push(format!("{}\t{}\0info\x1f{}", source, name, source));
+        }
+    }
+    entries
+}
+
 fn list_entries() -> anyhow::Result<()> {
     tracing::debug!("Listing entries via enwiro list-all");
     let output = Command::new(enwiro_bin()?)
@@ -29,20 +48,8 @@ fn list_entries() -> anyhow::Result<()> {
     }
 
     let stdout = String::from_utf8(output.stdout)?;
-
-    // Deduplicate by name — an environment may appear both as an existing
-    // environment ("_: name") and as a recipe ("cookbook: name").
-    let mut seen = HashSet::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some((source, name)) = line.split_once(": ")
-            && seen.insert(name.to_string())
-        {
-            println!("{}\0info\x1f{}", name, source);
-        }
+    for entry in format_entries(&stdout) {
+        println!("{}", entry);
     }
 
     Ok(())
@@ -65,6 +72,74 @@ fn activate_selection(selection: &str) -> anyhow::Result<()> {
         .context("Failed to spawn enwiro activate")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_entries_columns() {
+        let input = "git: my-project\n";
+        let entries = format_entries(input);
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].starts_with("git\tmy-project"),
+            "Expected tab-separated columns, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_rofi_metadata() {
+        let input = "git: my-project\n";
+        let entries = format_entries(input);
+        assert!(
+            entries[0].contains("\0info\x1fgit"),
+            "Expected rofi info metadata, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_deduplicates_by_name() {
+        let input = "_: my-project\ngit: my-project\n";
+        let entries = format_entries(input);
+        assert_eq!(
+            entries.len(),
+            1,
+            "Duplicate names should be deduplicated: {:?}",
+            entries
+        );
+    }
+
+    #[test]
+    fn test_format_entries_keeps_first_source_on_duplicate() {
+        let input = "_: my-project\ngit: my-project\n";
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("_\tmy-project"),
+            "First occurrence should win, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_skips_empty_lines() {
+        let input = "\n  \ngit: my-project\n\n";
+        let entries = format_entries(input);
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_format_entries_multiple_recipes() {
+        let input = "git: project-a\nchezmoi: chezmoi\ngit: project-b\n";
+        let entries = format_entries(input);
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].starts_with("git\tproject-a"));
+        assert!(entries[1].starts_with("chezmoi\tchezmoi"));
+        assert!(entries[2].starts_with("git\tproject-b"));
+    }
 }
 
 fn main() -> anyhow::Result<()> {
