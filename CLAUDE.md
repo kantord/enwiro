@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Development Setup
+
+See `CONTRIBUTING.md` for full development environment setup, including how to switch between local dev builds and crates.io releases using `just install-dev` / `just install-release`.
+
 ## Build & Test Commands
 
 ```bash
