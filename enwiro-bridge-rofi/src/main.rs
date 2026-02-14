@@ -55,8 +55,17 @@ fn list_entries() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Strip the source column prefix from a rofi selection.
+/// Rofi passes back "source\tname" but enwiro expects just "name".
+fn extract_recipe_name(selection: &str) -> &str {
+    selection
+        .split_once('\t')
+        .map_or(selection, |(_, name)| name)
+}
+
 fn activate_selection(selection: &str) -> anyhow::Result<()> {
-    tracing::debug!(selection = %selection, "Activating selection");
+    let recipe_name = extract_recipe_name(selection);
+    tracing::debug!(selection = %selection, recipe = %recipe_name, "Activating selection");
     // We intentionally spawn without calling .wait(). This lets the bridge
     // exit immediately so rofi can close, while enwiro activate continues
     // in the background (e.g. cooking an environment from a git recipe may
@@ -64,7 +73,7 @@ fn activate_selection(selection: &str) -> anyhow::Result<()> {
     // process exits, at which point init reaps it.
     Command::new(enwiro_bin()?)
         .arg("activate")
-        .arg(selection)
+        .arg(recipe_name)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
@@ -129,6 +138,16 @@ mod tests {
         let input = "\n  \ngit: my-project\n\n";
         let entries = format_entries(input);
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_recipe_name_strips_source_column() {
+        assert_eq!(extract_recipe_name("git\tmy-project"), "my-project");
+    }
+
+    #[test]
+    fn test_extract_recipe_name_without_tab() {
+        assert_eq!(extract_recipe_name("my-project"), "my-project");
     }
 
     #[test]
