@@ -3,8 +3,30 @@ use std::process::Command;
 
 use crate::plugin::Plugin;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recipe {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+impl Recipe {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+        }
+    }
+
+    pub fn with_description(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: Some(description.into()),
+        }
+    }
+}
+
 pub trait CookbookTrait {
-    fn list_recipes(&self) -> anyhow::Result<Vec<String>>;
+    fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>>;
     fn cook(&self, recipe: &str) -> anyhow::Result<String>;
     fn name(&self) -> &str;
 }
@@ -20,7 +42,7 @@ impl CookbookClient {
 }
 
 impl CookbookTrait for CookbookClient {
-    fn list_recipes(&self) -> anyhow::Result<Vec<String>> {
+    fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>> {
         tracing::debug!(cookbook = %self.plugin.name, "Listing recipes from cookbook");
         let output = Command::new(&self.plugin.executable)
             .arg("list-recipes")
@@ -39,7 +61,13 @@ impl CookbookTrait for CookbookClient {
 
         let stdout =
             String::from_utf8(output.stdout).context("Cookbook produced invalid UTF-8 output")?;
-        Ok(stdout.lines().map(|x| x.to_string()).collect())
+        Ok(stdout
+            .lines()
+            .map(|line| match line.split_once('\t') {
+                Some((name, desc)) => Recipe::with_description(name, desc),
+                None => Recipe::new(line),
+            })
+            .collect())
     }
 
     fn cook(&self, recipe: &str) -> anyhow::Result<String> {

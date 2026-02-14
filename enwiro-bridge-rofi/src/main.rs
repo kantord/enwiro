@@ -25,10 +25,17 @@ fn format_entries(input: &str) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        if let Some((source, name)) = line.split_once(": ")
-            && seen.insert(name.to_string())
-        {
-            entries.push(format!("{}\t{}\0info\x1f{}", source, name, source));
+        if let Some((source, rest)) = line.split_once(": ") {
+            let (name, description) = match rest.split_once('\t') {
+                Some((n, d)) => (n, d),
+                None => (rest, ""),
+            };
+            if seen.insert(name.to_string()) {
+                entries.push(format!(
+                    "{}\t{}\t{}\0info\x1f{}",
+                    source, name, description, source
+                ));
+            }
         }
     }
     entries
@@ -55,12 +62,15 @@ fn list_entries() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Strip the source column prefix from a rofi selection.
-/// Rofi passes back "source\tname" but enwiro expects just "name".
+/// Strip the source and description columns from a rofi selection.
+/// Rofi passes back "source\tname\tdescription" but enwiro expects just "name".
 fn extract_recipe_name(selection: &str) -> &str {
-    selection
+    let after_source = selection
         .split_once('\t')
-        .map_or(selection, |(_, name)| name)
+        .map_or(selection, |(_, rest)| rest);
+    after_source
+        .split_once('\t')
+        .map_or(after_source, |(name, _)| name)
 }
 
 fn activate_selection(selection: &str) -> anyhow::Result<()> {
@@ -93,7 +103,7 @@ mod tests {
         let entries = format_entries(input);
         assert_eq!(entries.len(), 1);
         assert!(
-            entries[0].starts_with("git\tmy-project"),
+            entries[0].starts_with("git\tmy-project\t"),
             "Expected tab-separated columns, got: {}",
             entries[0]
         );
@@ -142,7 +152,15 @@ mod tests {
 
     #[test]
     fn test_extract_recipe_name_strips_source_column() {
-        assert_eq!(extract_recipe_name("git\tmy-project"), "my-project");
+        assert_eq!(extract_recipe_name("git\tmy-project\t"), "my-project");
+    }
+
+    #[test]
+    fn test_extract_recipe_name_strips_description_column() {
+        assert_eq!(
+            extract_recipe_name("github\towner/repo#42\tFix auth bug"),
+            "owner/repo#42"
+        );
     }
 
     #[test]
@@ -155,9 +173,44 @@ mod tests {
         let input = "git: project-a\nchezmoi: chezmoi\ngit: project-b\n";
         let entries = format_entries(input);
         assert_eq!(entries.len(), 3);
-        assert!(entries[0].starts_with("git\tproject-a"));
-        assert!(entries[1].starts_with("chezmoi\tchezmoi"));
-        assert!(entries[2].starts_with("git\tproject-b"));
+        assert!(entries[0].starts_with("git\tproject-a\t"));
+        assert!(entries[1].starts_with("chezmoi\tchezmoi\t"));
+        assert!(entries[2].starts_with("git\tproject-b\t"));
+    }
+
+    #[test]
+    fn test_format_entries_with_description() {
+        let input = "github: owner/repo#42\tFix auth bug\n";
+        let entries = format_entries(input);
+        assert_eq!(entries.len(), 1);
+        assert!(
+            entries[0].starts_with("github\towner/repo#42\tFix auth bug"),
+            "Expected description in third column, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_without_description_has_empty_column() {
+        let input = "git: my-project\n";
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("git\tmy-project\t\0"),
+            "Expected empty description column, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_deduplicates_by_name_ignoring_description() {
+        let input = "_: foo\ngit: foo\tsome description\n";
+        let entries = format_entries(input);
+        assert_eq!(
+            entries.len(),
+            1,
+            "Should deduplicate by name: {:?}",
+            entries
+        );
     }
 }
 

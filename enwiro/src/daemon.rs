@@ -141,8 +141,16 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
     for cookbook in cookbooks {
         match cookbook.list_recipes() {
             Ok(recipes) => {
-                for line in recipes {
-                    output.push_str(&format!("{}: {}\n", cookbook.name(), line));
+                for recipe in recipes {
+                    match &recipe.description {
+                        Some(desc) => output.push_str(&format!(
+                            "{}: {}\t{}\n",
+                            cookbook.name(),
+                            recipe.name,
+                            desc
+                        )),
+                        None => output.push_str(&format!("{}: {}\n", cookbook.name(), recipe.name)),
+                    }
                 }
             }
             Err(e) => {
@@ -222,6 +230,28 @@ pub fn run_daemon() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::test_utils::test_utilities::{FailingCookbook, FakeCookbook};
+
+    #[test]
+    fn test_collect_all_recipes_includes_description() {
+        let cookbooks: Vec<Box<dyn CookbookTrait>> =
+            vec![Box::new(FakeCookbook::new_with_descriptions(
+                "github",
+                vec![("owner/repo#42", Some("Fix auth bug"))],
+                vec![],
+            ))];
+        let output = collect_all_recipes(&cookbooks);
+        assert_eq!(output, "github: owner/repo#42\tFix auth bug\n");
+    }
+
+    #[test]
+    fn test_collect_all_recipes_omits_tab_when_no_description() {
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(
+            FakeCookbook::new_with_descriptions("git", vec![("repo-a", None)], vec![]),
+        )];
+        let output = collect_all_recipes(&cookbooks);
+        assert_eq!(output, "git: repo-a\n");
+        assert!(!output.contains('\t'));
+    }
 
     #[test]
     fn test_collect_all_recipes_formats_output() {
