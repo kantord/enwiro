@@ -55,7 +55,7 @@ fn short_path_hash(path: &Path) -> String {
 
 fn default_worktree_dir() -> anyhow::Result<PathBuf> {
     let base = dirs::data_dir().context("Could not determine data directory (is $HOME set?)")?;
-    Ok(base.join("enwiro").join("pr-worktrees"))
+    Ok(base.join("enwiro").join("worktrees").join("pr"))
 }
 
 fn worktree_base_dir(config: &ConfigurationValues) -> anyhow::Result<PathBuf> {
@@ -260,8 +260,8 @@ fn search_prs(repos: &[String]) -> anyhow::Result<Vec<PrInfo>> {
     let prs = parse_search_response(&stdout)?;
 
     if prs.len() >= 100 {
-        tracing::warn!(
-            "GitHub search returned 100 results (the maximum). Some PRs may be missing."
+        eprintln!(
+            "Warning: GitHub search returned 100 results (the maximum). Some PRs may be missing."
         );
     }
 
@@ -454,6 +454,13 @@ mod tests {
         assert_eq!(prs[0].repo, "kantord/enwiro");
         assert_eq!(prs[1].number, 99);
         assert_eq!(prs[1].repo, "expressjs/express");
+    }
+
+    #[test]
+    fn test_parse_graphql_response_empty_nodes() {
+        let json = r#"{"data": {"search": {"nodes": []}}}"#;
+        let prs = parse_search_response(json).unwrap();
+        assert!(prs.is_empty());
     }
 
     #[test]
