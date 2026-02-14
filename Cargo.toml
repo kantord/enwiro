@@ -6,6 +6,7 @@ members = [
     "enwiro-bridge-rofi",
     "enwiro-cookbook-chezmoi",
     "enwiro-cookbook-git",
+    "enwiro-cookbook-github",
     "enwiro-logging",
 ]
 

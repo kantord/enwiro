@@ -1,0 +1,25 @@
+[package]
+name = "enwiro-cookbook-github"
+version = "0.1.0"
+edition = "2024"
+description = "GitHub PR cookbook for enwiro"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5.4", features = ["derive"] }
+serde = "1.0.197"
+serde_derive = "1.0.197"
+serde_json = "1"
+confy = "2.0.0"
+enwiro-logging.workspace = true
+tracing.workspace = true
+dirs = "6"
+sha2 = "0.10"
+git2 = "0.20.0"
+glob = "0.3.1"
+chrono = "0.4.43"
+
+[dev-dependencies]
+tempfile = "3"
