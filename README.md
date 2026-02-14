@@ -117,6 +117,7 @@ List of currently available cookbooks:
 
 - `enwiro-cookbook-chezmoi`: Use your chezmoi source directory as an environment
 - `enwiro-cookbook-git`: Generate environments using Git repositories
+- `enwiro-cookbook-github`: Discover repositories from GitHub using the GraphQL API
 
 ### Bridge
 
@@ -127,6 +128,21 @@ connects the two.
 List of currently available bridges:
 
 - `enwiro-bridge-rofi`: Browse and activate environments from [rofi](https://github.com/davatorium/rofi)
+
+### Background Recipe Caching
+
+When you run `enwiro list-all` (or use it via a bridge like rofi), a background
+daemon is automatically spawned to keep recipe listings cached. This avoids
+blocking the UI on slow cookbook plugins (e.g., GitHub API calls).
+
+- The daemon starts automatically on first use — no manual setup needed
+- A desktop notification is shown when the daemon starts for the first time
+- Recipes are refreshed every 5 minutes in the background
+- The daemon exits automatically after 1 hour of inactivity
+- If the cache is unavailable, `list-all` falls back to fetching recipes synchronously
+
+Runtime files are stored in `$XDG_RUNTIME_DIR/enwiro/` (or `$XDG_CACHE_HOME/enwiro/run/`
+as fallback).
 
 ### Notifications
 

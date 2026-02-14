@@ -20,8 +20,12 @@ strum = { version = "0.27.0", features = ["derive"] }
 strum_macros = "0.27.0"
 notify-rust = "4"
 tracing.workspace = true
+dirs = "6"
+libc = "0.2"
+signal-hook = "0.3"
 
 [dev-dependencies]
 assertables = "9.0.0"
+filetime = "0.2"
 rstest = "0.26.0"
 tempfile = "3.25.0"

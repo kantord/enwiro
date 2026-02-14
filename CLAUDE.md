@@ -36,6 +36,7 @@ Plugins communicate via subprocess: core calls `<plugin> list-recipes` and `<plu
 enwiro (core CLI)
 ├── calls → enwiro-cookbook-git     (discovers git repos/branches as recipes)
 ├── calls → enwiro-cookbook-chezmoi (chezmoi source dir as recipe)
+├── calls → enwiro-cookbook-github  (discovers GitHub repos via GraphQL API)
 ├── calls → enwiro-adapter-i3wm   (i3 workspace integration)
 ├── calls → enwiro-bridge-rofi    (rofi launcher UI)
 └── uses  → enwiro-logging        (shared library, workspace dependency)
@@ -47,7 +48,19 @@ enwiro (core CLI)
 - `EnwiroAdapterTrait`: `get_active_environment_name()`, `activate(name)`
 - `Notifier`: desktop notifications for success/error events
 
-`CommandContext<W>` holds config, adapter, cookbooks, notifier, and a generic writer (real stdout or `Cursor<Vec<u8>>` in tests).
+`CommandContext<W>` holds config, adapter, cookbooks, notifier, a generic writer (real stdout or `Cursor<Vec<u8>>` in tests), and `cache_dir: Option<PathBuf>` (set to a tempdir in tests to isolate from the real daemon).
+
+### Background Recipe Cache Daemon
+
+`list-all` pre-caches recipe listings via a self-managing background daemon to avoid blocking the UI on slow cookbook plugins (e.g., GitHub API calls). All logic lives in `enwiro/src/daemon.rs`.
+
+- **Auto-start**: `list-all` calls `ensure_daemon_running()` which spawns `enwiro daemon` (hidden subcommand) if no daemon is running
+- **Auto-exit**: daemon exits after 1 hour of inactivity (no `list-all` calls touching the heartbeat file)
+- **Refresh**: every 5 minutes, the daemon re-discovers plugins and writes `recipes.cache` atomically
+- **Staleness**: cache older than 5min 30s is treated as missing — `list-all` falls back to synchronous collection
+- **Runtime files** in `$XDG_RUNTIME_DIR/enwiro/` (fallback `$XDG_CACHE_HOME/enwiro/run/`): `daemon.pid`, `recipes.cache`, `heartbeat`
+- **PID liveness**: checked via `libc::kill(pid, 0)`; stale PID files are handled gracefully
+- **Signals**: SIGTERM, SIGINT, SIGHUP cause clean shutdown (PID file removed)
 
 ### Git Cookbook (most complex crate)
 
@@ -63,7 +76,7 @@ Recipe names use `@` separator: `repo-name@branch-name`. Slashes in branch names
 
 ## Testing Patterns
 
-- `rstest` fixtures for the core crate (see `enwiro/src/test_utils.rs` for mocks: `FakeCookbook`, `EnwiroAdapterMock`, `MockNotifier`)
+- `rstest` fixtures for the core crate (see `enwiro/src/test_utils.rs` for mocks: `FakeCookbook`, `FailingCookbook`, `EnwiroAdapterMock`, `MockNotifier`)
 - `tempfile::TempDir` for filesystem tests
 - Git cookbook tests create real git repos with `git2` and verify worktree creation
 - TDD workflow: write failing test first, then implement the fix
