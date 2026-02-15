@@ -59,14 +59,21 @@ impl<W: Write> CommandContext<W> {
         // Check the cache to avoid calling list_recipes() on every cookbook
         // (which can be slow for API-based cookbooks like GitHub)
         match self.find_recipe_in_cache(name) {
-            Some(Some(cookbook_name)) => {
+            Some(Some((cached_cookbook, cached_description))) => {
                 // Cache hit: cook directly via the right cookbook
-                if let Some(cookbook) = self.cookbooks.iter().find(|c| c.name() == cookbook_name) {
-                    tracing::debug!(name = %name, cookbook = %cookbook_name, "Found recipe in cache");
+                if let Some(cookbook) = self.cookbooks.iter().find(|c| c.name() == cached_cookbook)
+                {
+                    tracing::debug!(name = %name, cookbook = %cached_cookbook, "Found recipe in cache");
                     let env_path = cookbook.cook(name)?;
+                    let flat_name = name.replace('/', "-");
+                    self.save_cook_metadata(
+                        &flat_name,
+                        &cached_cookbook,
+                        cached_description.as_deref(),
+                    );
                     return self.create_environment_symlink(name, &env_path);
                 }
-                tracing::warn!(name = %name, cookbook = %cookbook_name, "Cache references cookbook not found in plugins");
+                tracing::warn!(name = %name, cookbook = %cached_cookbook, "Cache references cookbook not found in plugins");
             }
             Some(None) => {
                 // Cache is fresh but recipe not in it — fall through to slow path
@@ -86,6 +93,8 @@ impl<W: Write> CommandContext<W> {
                     continue;
                 }
                 let env_path = cookbook.cook(&recipe.name)?;
+                let flat_name = name.replace('/', "-");
+                self.save_cook_metadata(&flat_name, cookbook.name(), recipe.description.as_deref());
                 return self.create_environment_symlink(name, &env_path);
             }
         }
@@ -96,10 +105,10 @@ impl<W: Write> CommandContext<W> {
 
     /// Look up a recipe in the daemon cache.
     /// Returns:
-    /// - `Some(Some(cookbook_name))` — cache is fresh and recipe was found
+    /// - `Some(Some((cookbook, description)))` — cache is fresh and recipe was found
     /// - `Some(None)` — cache is fresh but recipe is NOT in it
     /// - `None` — no cache available (missing, stale, or error)
-    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<Option<String>> {
+    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<Option<(String, Option<String>)>> {
         let runtime_dir = match &self.cache_dir {
             Some(dir) => dir.clone(),
             None => daemon::runtime_dir().ok()?,
@@ -108,13 +117,29 @@ impl<W: Write> CommandContext<W> {
         // Cache format: "cookbook: recipe\tdescription\n" (see daemon::collect_all_recipes)
         for line in cached.lines() {
             if let Some((cookbook_name, rest)) = line.split_once(": ") {
-                let name = rest.split_once('\t').map_or(rest, |(n, _)| n);
+                let (name, description) = match rest.split_once('\t') {
+                    Some((n, d)) => (n, Some(d.to_string())),
+                    None => (rest, None),
+                };
                 if name == recipe_name {
-                    return Some(Some(cookbook_name.to_string()));
+                    return Some(Some((cookbook_name.to_string(), description)));
                 }
             }
         }
         Some(None) // cache exists but recipe not found
+    }
+
+    fn save_cook_metadata(&self, env_name: &str, cookbook: &str, description: Option<&str>) {
+        let path = match &self.stats_path {
+            Some(p) => p.clone(),
+            None => {
+                let Some(p) = crate::usage_stats::stats_path() else {
+                    return;
+                };
+                p
+            }
+        };
+        crate::usage_stats::record_cook_metadata(&path, env_name, cookbook, description);
     }
 
     fn create_environment_symlink(
@@ -471,6 +496,60 @@ mod tests {
             !err_debug.contains("simulated failure"),
             "Should not have called cook_environment, but got: {}",
             err_debug
+        );
+    }
+
+    #[rstest]
+    fn test_cook_environment_saves_cookbook_to_stats(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project", cooked_dir.to_str().unwrap())],
+        ))];
+
+        context_object.cook_environment("my-project").unwrap();
+
+        let stats_path = context_object.stats_path.as_ref().unwrap();
+        let stats = crate::usage_stats::load_stats(stats_path);
+        assert_eq!(stats.envs["my-project"].cookbook.as_deref(), Some("git"),);
+    }
+
+    #[rstest]
+    fn test_cook_environment_stats_keyed_by_flat_name(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new_with_descriptions(
+            "github",
+            vec![("owner/repo#42", Some("Fix auth bug"))],
+            vec![("owner/repo#42", cooked_dir.to_str().unwrap())],
+        ))];
+
+        context_object.cook_environment("owner/repo#42").unwrap();
+
+        // Stats should be keyed by the flat name (slashes → dashes) so that
+        // list_all can look up descriptions by Environment.name
+        let stats_path = context_object.stats_path.as_ref().unwrap();
+        let stats = crate::usage_stats::load_stats(stats_path);
+        assert!(
+            stats.envs.contains_key("owner-repo#42"),
+            "Stats should be keyed by flat name, got keys: {:?}",
+            stats.envs.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            stats.envs["owner-repo#42"].description.as_deref(),
+            Some("Fix auth bug"),
         );
     }
 

@@ -8,6 +8,10 @@ use std::{fs, io};
 pub struct EnvStats {
     pub last_activated: i64,
     pub activation_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookbook: Option<String>,
 }
 
 /// Per-environment usage statistics.
@@ -16,7 +20,7 @@ pub struct UsageStats {
     pub envs: HashMap<String, EnvStats>,
 }
 
-fn stats_path() -> Option<PathBuf> {
+pub fn stats_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("enwiro").join("usage-stats.json"))
 }
 
@@ -66,6 +70,22 @@ fn record_activation_to(path: &Path, env_name: &str) {
     let entry = stats.envs.entry(env_name.to_string()).or_default();
     entry.last_activated = now_timestamp();
     entry.activation_count += 1;
+    if let Err(e) = save_stats(path, &stats) {
+        tracing::warn!(error = %e, "Could not save usage stats");
+    }
+}
+
+/// Save cookbook and description metadata for an environment. Best-effort.
+pub fn record_cook_metadata(
+    path: &Path,
+    env_name: &str,
+    cookbook: &str,
+    description: Option<&str>,
+) {
+    let mut stats = load_stats(path);
+    let entry = stats.envs.entry(env_name.to_string()).or_default();
+    entry.cookbook = Some(cookbook.to_string());
+    entry.description = description.map(|s| s.to_string());
     if let Err(e) = save_stats(path, &stats) {
         tracing::warn!(error = %e, "Could not save usage stats");
     }
@@ -137,6 +157,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now,
             activation_count: 10,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 40.0).abs() < 0.01);
     }
@@ -147,6 +168,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now - 604801, // >1 week
             activation_count: 10,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 2.5).abs() < 0.01);
     }
@@ -160,6 +182,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now - 3599,
             activation_count: count,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 40.0).abs() < 0.01);
 
@@ -167,6 +190,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now - 3600,
             activation_count: count,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 20.0).abs() < 0.01);
 
@@ -174,6 +198,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now - 86399,
             activation_count: count,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 20.0).abs() < 0.01);
 
@@ -181,6 +206,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now - 86400,
             activation_count: count,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 5.0).abs() < 0.01);
 
@@ -188,6 +214,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now - 604799,
             activation_count: count,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 5.0).abs() < 0.01);
 
@@ -195,6 +222,7 @@ mod tests {
         let stats = EnvStats {
             last_activated: now - 604800,
             activation_count: count,
+            ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 2.5).abs() < 0.01);
     }

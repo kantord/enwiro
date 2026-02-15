@@ -33,7 +33,7 @@ pub fn activate<W: Write>(
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
-    crate::usage_stats::record_activation(&args.name);
+    crate::usage_stats::record_activation(&args.name.replace('/', "-"));
 
     Ok(())
 }

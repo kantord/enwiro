@@ -37,9 +37,17 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
             .then_with(|| a.name.cmp(&b.name))
     });
     for env in &envs {
+        let line = match stats
+            .envs
+            .get(&env.name)
+            .and_then(|s| s.description.as_deref())
+        {
+            Some(desc) => format!("_: {}\t{}\n", env.name, desc),
+            None => format!("_: {}\n", env.name),
+        };
         context
             .writer
-            .write_all(format!("_: {}\n", env.name).as_bytes())
+            .write_all(line.as_bytes())
             .context("Could not write to output")?;
     }
 
@@ -220,6 +228,7 @@ mod tests {
                     crate::usage_stats::EnvStats {
                         last_activated: now,
                         activation_count: 50,
+                        ..Default::default()
                     },
                 ),
                 (
@@ -227,6 +236,7 @@ mod tests {
                     crate::usage_stats::EnvStats {
                         last_activated: now - 700_000,
                         activation_count: 2,
+                        ..Default::default()
                     },
                 ),
             ]
@@ -241,6 +251,39 @@ mod tests {
         assert_eq!(env_lines[0], "_: often-used");
         assert_eq!(env_lines[1], "_: rarely-used");
         assert_eq!(env_lines[2], "_: never-used");
+    }
+
+    #[rstest]
+    fn test_list_all_shows_description_for_environments(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("owner-repo#42");
+
+        let stats_path = context_object.stats_path.as_ref().unwrap();
+        let now = crate::usage_stats::now_timestamp();
+        let stats = crate::usage_stats::UsageStats {
+            envs: [(
+                "owner-repo#42".to_string(),
+                crate::usage_stats::EnvStats {
+                    last_activated: now,
+                    activation_count: 1,
+                    description: Some("Fix auth bug".to_string()),
+                    cookbook: Some("github".to_string()),
+                },
+            )]
+            .into(),
+        };
+        std::fs::write(stats_path, serde_json::to_string(&stats).unwrap()).unwrap();
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("_: owner-repo#42\tFix auth bug"),
+            "Expected description in environment listing, got: {}",
+            output
+        );
     }
 
     #[rstest]
