@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.4...enwiro-bridge-rofi-v0.1.5) - 2026-02-15
+
+### Added
+
+- add optional description field to recipes
+
 ## [0.1.4](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.3...enwiro-bridge-rofi-v0.1.4) - 2026-02-14
 
 ### Fixed

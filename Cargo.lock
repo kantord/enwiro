@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "assertables",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-rofi"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "enwiro-logging",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-github"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
