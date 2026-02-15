@@ -18,6 +18,7 @@ pub struct CommandContext<W: Write> {
     pub notifier: Box<dyn Notifier>,
     pub cookbooks: Vec<Box<dyn CookbookTrait>>,
     pub cache_dir: Option<PathBuf>,
+    pub stats_path: Option<PathBuf>,
 }
 
 impl<W: Write> CommandContext<W> {
@@ -50,6 +51,7 @@ impl<W: Write> CommandContext<W> {
             notifier,
             cookbooks,
             cache_dir: None,
+            stats_path: None,
         })
     }
 

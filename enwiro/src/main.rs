@@ -7,6 +7,7 @@ mod environments;
 mod notifier;
 mod plugin;
 mod test_utils;
+mod usage_stats;
 
 use anyhow::Context;
 use clap::Parser;

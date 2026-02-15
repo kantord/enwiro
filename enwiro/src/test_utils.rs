@@ -192,6 +192,7 @@ pub mod test_utilities {
             notifier: Box::new(mock_notifier),
             cookbooks: vec![],
             cache_dir: Some(temp_dir.path().join("daemon")),
+            stats_path: Some(temp_dir.path().join("usage-stats.json")),
         };
         (temp_dir, context, activated, notifications)
     }
