@@ -1,5 +1,6 @@
 use anyhow::Context;
 use std::io::Write;
+use std::path::Path;
 
 use crate::context::CommandContext;
 
@@ -33,7 +34,13 @@ pub fn activate<W: Write>(
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
-    crate::usage_stats::record_activation(&args.name.replace('/', "-"));
+    let flat_name = args.name.replace('/', "-");
+    let env_dir = Path::new(&context.config.workspaces_directory).join(&flat_name);
+    if env_dir.is_dir() && !env_dir.is_symlink() {
+        crate::usage_stats::record_activation_per_env(&env_dir);
+    } else {
+        crate::usage_stats::record_activation(&flat_name);
+    }
 
     Ok(())
 }
@@ -87,9 +94,11 @@ mod tests {
         );
         assert!(result.is_ok());
 
-        // Verify environment was cooked (symlink created)
-        let link_path = temp_dir.path().join("new-project");
-        assert!(link_path.is_symlink());
+        // Verify environment was cooked (directory with inner symlink)
+        let env_dir = temp_dir.path().join("new-project");
+        assert!(env_dir.is_dir());
+        let inner_link = env_dir.join("new-project");
+        assert!(inner_link.is_symlink());
     }
 
     #[rstest]

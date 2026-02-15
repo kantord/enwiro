@@ -75,19 +75,44 @@ fn record_activation_to(path: &Path, env_name: &str) {
     }
 }
 
-/// Save cookbook and description metadata for an environment. Best-effort.
-pub fn record_cook_metadata(
-    path: &Path,
-    env_name: &str,
-    cookbook: &str,
-    description: Option<&str>,
-) {
-    let mut stats = load_stats(path);
-    let entry = stats.envs.entry(env_name.to_string()).or_default();
-    entry.cookbook = Some(cookbook.to_string());
-    entry.description = description.map(|s| s.to_string());
-    if let Err(e) = save_stats(path, &stats) {
-        tracing::warn!(error = %e, "Could not save usage stats");
+/// Load per-environment metadata from its meta.json file.
+/// Returns default (empty) metadata on any error.
+pub fn load_env_meta(env_dir: &Path) -> EnvStats {
+    let meta_path = env_dir.join("meta.json");
+    fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Save per-environment metadata atomically (write tmp + rename).
+fn save_env_meta(env_dir: &Path, meta: &EnvStats) -> io::Result<()> {
+    let meta_path = env_dir.join("meta.json");
+    let tmp = meta_path.with_extension("tmp");
+    fs::write(&tmp, serde_json::to_string(meta)?)?;
+    fs::rename(&tmp, &meta_path)?;
+    Ok(())
+}
+
+/// Record activation in per-env meta.json. Best-effort.
+pub fn record_activation_per_env(env_dir: &Path) {
+    let mut meta = load_env_meta(env_dir);
+    meta.last_activated = now_timestamp();
+    meta.activation_count += 1;
+    if let Err(e) = save_env_meta(env_dir, &meta) {
+        tracing::warn!(error = %e, "Could not save environment metadata");
+    }
+}
+
+/// Save cookbook and description metadata in per-env meta.json. Best-effort.
+pub fn record_cook_metadata_per_env(env_dir: &Path, cookbook: &str, description: Option<&str>) {
+    let mut meta = load_env_meta(env_dir);
+    meta.cookbook = Some(cookbook.to_string());
+    if let Some(d) = description {
+        meta.description = Some(d.to_string());
+    }
+    if let Err(e) = save_env_meta(env_dir, &meta) {
+        tracing::warn!(error = %e, "Could not save environment metadata");
     }
 }
 
@@ -225,6 +250,68 @@ mod tests {
             ..Default::default()
         };
         assert!((frecency_score(&stats, now) - 2.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_per_env_record_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_activation_per_env(&env_dir);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.activation_count, 1);
+        assert!(meta.last_activated > 0);
+    }
+
+    #[test]
+    fn test_per_env_record_activation_increments() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_activation_per_env(&env_dir);
+        record_activation_per_env(&env_dir);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.activation_count, 2);
+    }
+
+    #[test]
+    fn test_per_env_record_cook_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_cook_metadata_per_env(&env_dir, "github", Some("Fix auth bug"));
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.cookbook, Some("github".to_string()));
+        assert_eq!(meta.description, Some("Fix auth bug".to_string()));
+    }
+
+    #[test]
+    fn test_per_env_load_missing_dir_returns_default() {
+        let meta = load_env_meta(Path::new("/nonexistent/env/dir"));
+        assert_eq!(meta.activation_count, 0);
+        assert_eq!(meta.description, None);
+    }
+
+    #[test]
+    fn test_per_env_metadata_preserves_activation_on_cook() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_activation_per_env(&env_dir);
+        record_activation_per_env(&env_dir);
+        record_cook_metadata_per_env(&env_dir, "git", Some("My project"));
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.activation_count, 2);
+        assert_eq!(meta.cookbook, Some("git".to_string()));
+        assert_eq!(meta.description, Some("My project".to_string()));
     }
 
     #[test]
