@@ -1,8 +1,11 @@
 use anyhow::Context;
+use std::collections::HashMap;
 use std::io::Write;
+use std::path::Path;
 
 use crate::context::CommandContext;
 use crate::daemon;
+use crate::usage_stats::EnvStats;
 
 #[derive(clap::Args)]
 #[command(
@@ -15,19 +18,33 @@ pub struct ListAllArgs {}
 pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()> {
     // 1. Always list environments (instant — local directory listing), sorted by frecency
     let mut envs: Vec<_> = context.get_all_environments()?.into_values().collect();
-    let stats = match &context.stats_path {
-        Some(path) => crate::usage_stats::load_stats(path),
-        None => crate::usage_stats::load_stats_default(),
-    };
+
+    // Build per-env metadata from colocated meta.json files
+    let mut meta_map: HashMap<String, EnvStats> = HashMap::new();
+    for env in &envs {
+        let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        if meta.activation_count > 0 || meta.description.is_some() {
+            meta_map.insert(env.name.clone(), meta);
+        }
+    }
+    // Legacy fallback: check centralized stats for envs without per-env metadata
+    let legacy_stats = crate::usage_stats::load_stats_default();
+    for env in &envs {
+        if !meta_map.contains_key(&env.name)
+            && let Some(s) = legacy_stats.envs.get(&env.name)
+        {
+            meta_map.insert(env.name.clone(), s.clone());
+        }
+    }
+
     let now = crate::usage_stats::now_timestamp();
     envs.sort_by(|a, b| {
-        let score_a = stats
-            .envs
+        let score_a = meta_map
             .get(&a.name)
             .map(|s| crate::usage_stats::frecency_score(s, now))
             .unwrap_or(0.0);
-        let score_b = stats
-            .envs
+        let score_b = meta_map
             .get(&b.name)
             .map(|s| crate::usage_stats::frecency_score(s, now))
             .unwrap_or(0.0);
@@ -37,8 +54,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
             .then_with(|| a.name.cmp(&b.name))
     });
     for env in &envs {
-        let line = match stats
-            .envs
+        let line = match meta_map
             .get(&env.name)
             .and_then(|s| s.description.as_deref())
         {
@@ -213,36 +229,35 @@ mod tests {
     fn test_list_all_sorts_environments_by_frecency(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _, _) = context_object;
+        let (temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("rarely-used");
         context_object.create_mock_environment("often-used");
         context_object.create_mock_environment("never-used");
 
-        // Write stats giving "often-used" a high score and "rarely-used" a low score
-        let stats_path = context_object.stats_path.as_ref().unwrap();
+        // Write per-env meta.json giving "often-used" a high score and "rarely-used" a low score
         let now = crate::usage_stats::now_timestamp();
-        let stats = crate::usage_stats::UsageStats {
-            envs: [
-                (
-                    "often-used".to_string(),
-                    crate::usage_stats::EnvStats {
-                        last_activated: now,
-                        activation_count: 50,
-                        ..Default::default()
-                    },
-                ),
-                (
-                    "rarely-used".to_string(),
-                    crate::usage_stats::EnvStats {
-                        last_activated: now - 700_000,
-                        activation_count: 2,
-                        ..Default::default()
-                    },
-                ),
-            ]
-            .into(),
+        let often_meta = crate::usage_stats::EnvStats {
+            last_activated: now,
+            activation_count: 50,
+            ..Default::default()
         };
-        std::fs::write(stats_path, serde_json::to_string(&stats).unwrap()).unwrap();
+        let rarely_meta = crate::usage_stats::EnvStats {
+            last_activated: now - 700_000,
+            activation_count: 2,
+            ..Default::default()
+        };
+        let often_dir = temp_dir.path().join("often-used");
+        let rarely_dir = temp_dir.path().join("rarely-used");
+        std::fs::write(
+            often_dir.join("meta.json"),
+            serde_json::to_string(&often_meta).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            rarely_dir.join("meta.json"),
+            serde_json::to_string(&rarely_meta).unwrap(),
+        )
+        .unwrap();
 
         list_all(&mut context_object).unwrap();
 
@@ -257,24 +272,23 @@ mod tests {
     fn test_list_all_shows_description_for_environments(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (_temp_dir, mut context_object, _, _) = context_object;
+        let (temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("owner-repo#42");
 
-        let stats_path = context_object.stats_path.as_ref().unwrap();
+        // Write per-env meta.json with description
         let now = crate::usage_stats::now_timestamp();
-        let stats = crate::usage_stats::UsageStats {
-            envs: [(
-                "owner-repo#42".to_string(),
-                crate::usage_stats::EnvStats {
-                    last_activated: now,
-                    activation_count: 1,
-                    description: Some("Fix auth bug".to_string()),
-                    cookbook: Some("github".to_string()),
-                },
-            )]
-            .into(),
+        let meta = crate::usage_stats::EnvStats {
+            last_activated: now,
+            activation_count: 1,
+            description: Some("Fix auth bug".to_string()),
+            cookbook: Some("github".to_string()),
         };
-        std::fs::write(stats_path, serde_json::to_string(&stats).unwrap()).unwrap();
+        let env_dir = temp_dir.path().join("owner-repo#42");
+        std::fs::write(
+            env_dir.join("meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
 
         list_all(&mut context_object).unwrap();
 

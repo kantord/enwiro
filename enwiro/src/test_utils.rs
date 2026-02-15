@@ -161,9 +161,13 @@ pub mod test_utilities {
         }
 
         pub fn create_mock_environment(&mut self, environment_name: &str) {
-            let environment_directory =
-                Path::new(&self.config.workspaces_directory).join(environment_name);
-            create_dir(environment_directory).expect("Could not create directory");
+            let env_dir = Path::new(&self.config.workspaces_directory).join(environment_name);
+            create_dir(&env_dir).expect("Could not create env directory");
+            let target_dir = env_dir.join(".target");
+            create_dir(&target_dir).expect("Could not create target directory");
+            let inner_symlink = env_dir.join(environment_name);
+            std::os::unix::fs::symlink(&target_dir, &inner_symlink)
+                .expect("Could not create inner symlink");
         }
     }
 
@@ -192,7 +196,6 @@ pub mod test_utilities {
             notifier: Box::new(mock_notifier),
             cookbooks: vec![],
             cache_dir: Some(temp_dir.path().join("daemon")),
-            stats_path: Some(temp_dir.path().join("usage-stats.json")),
         };
         (temp_dir, context, activated, notifications)
     }

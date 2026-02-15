@@ -18,7 +18,6 @@ pub struct CommandContext<W: Write> {
     pub notifier: Box<dyn Notifier>,
     pub cookbooks: Vec<Box<dyn CookbookTrait>>,
     pub cache_dir: Option<PathBuf>,
-    pub stats_path: Option<PathBuf>,
 }
 
 impl<W: Write> CommandContext<W> {
@@ -51,7 +50,6 @@ impl<W: Write> CommandContext<W> {
             notifier,
             cookbooks,
             cache_dir: None,
-            stats_path: None,
         })
     }
 
@@ -65,13 +63,14 @@ impl<W: Write> CommandContext<W> {
                 {
                     tracing::debug!(name = %name, cookbook = %cached_cookbook, "Found recipe in cache");
                     let env_path = cookbook.cook(name)?;
+                    let env = self.create_environment_symlink(name, &env_path)?;
                     let flat_name = name.replace('/', "-");
                     self.save_cook_metadata(
                         &flat_name,
                         &cached_cookbook,
                         cached_description.as_deref(),
                     );
-                    return self.create_environment_symlink(name, &env_path);
+                    return Ok(env);
                 }
                 tracing::warn!(name = %name, cookbook = %cached_cookbook, "Cache references cookbook not found in plugins");
             }
@@ -93,9 +92,10 @@ impl<W: Write> CommandContext<W> {
                     continue;
                 }
                 let env_path = cookbook.cook(&recipe.name)?;
+                let env = self.create_environment_symlink(name, &env_path)?;
                 let flat_name = name.replace('/', "-");
                 self.save_cook_metadata(&flat_name, cookbook.name(), recipe.description.as_deref());
-                return self.create_environment_symlink(name, &env_path);
+                return Ok(env);
             }
         }
 
@@ -130,16 +130,8 @@ impl<W: Write> CommandContext<W> {
     }
 
     fn save_cook_metadata(&self, env_name: &str, cookbook: &str, description: Option<&str>) {
-        let path = match &self.stats_path {
-            Some(p) => p.clone(),
-            None => {
-                let Some(p) = crate::usage_stats::stats_path() else {
-                    return;
-                };
-                p
-            }
-        };
-        crate::usage_stats::record_cook_metadata(&path, env_name, cookbook, description);
+        let env_dir = Path::new(&self.config.workspaces_directory).join(env_name);
+        crate::usage_stats::record_cook_metadata_per_env(&env_dir, cookbook, description);
     }
 
     fn create_environment_symlink(
@@ -148,9 +140,14 @@ impl<W: Write> CommandContext<W> {
         env_path: &str,
     ) -> anyhow::Result<Environment> {
         let flat_name = name.replace('/', "-");
-        let target_path = Path::new(&self.config.workspaces_directory).join(&flat_name);
+        let env_dir = Path::new(&self.config.workspaces_directory).join(&flat_name);
+        std::fs::create_dir_all(&env_dir)?;
+        let inner_symlink = env_dir.join(&flat_name);
         tracing::info!(name = %name, target = %env_path, "Creating environment symlink");
-        symlink(Path::new(env_path), target_path)?;
+        if inner_symlink.is_symlink() || inner_symlink.exists() {
+            std::fs::remove_file(&inner_symlink)?;
+        }
+        symlink(Path::new(env_path), &inner_symlink)?;
         self.notifier
             .notify_success(&format!("Created environment: {}", name));
         Environment::get_one(&self.config.workspaces_directory, &flat_name)
@@ -211,9 +208,11 @@ mod tests {
         let env = context_object.cook_environment("my-project").unwrap();
         assert_eq!(env.name, "my-project");
 
-        // Verify symlink was created
-        let link_path = temp_dir.path().join("my-project");
-        assert!(link_path.is_symlink());
+        // Verify directory with inner symlink was created
+        let env_dir = temp_dir.path().join("my-project");
+        assert!(env_dir.is_dir());
+        let inner_link = env_dir.join("my-project");
+        assert!(inner_link.is_symlink());
     }
 
     #[rstest]
@@ -235,14 +234,11 @@ mod tests {
         let env = context_object.cook_environment(recipe_name).unwrap();
         assert_eq!(env.name, "my-project@feature-my-thing");
 
-        // Verify symlink was created (not nested due to the slash)
-        assert!(
-            temp_dir.path().read_dir().unwrap().any(|entry| {
-                let entry = entry.unwrap();
-                entry.path().is_symlink()
-            }),
-            "A symlink should exist in the workspaces directory"
-        );
+        // Verify directory with inner symlink was created
+        let env_dir = temp_dir.path().join("my-project@feature-my-thing");
+        assert!(env_dir.is_dir());
+        let inner_link = env_dir.join("my-project@feature-my-thing");
+        assert!(inner_link.is_symlink());
     }
 
     #[rstest]
@@ -516,9 +512,9 @@ mod tests {
 
         context_object.cook_environment("my-project").unwrap();
 
-        let stats_path = context_object.stats_path.as_ref().unwrap();
-        let stats = crate::usage_stats::load_stats(stats_path);
-        assert_eq!(stats.envs["my-project"].cookbook.as_deref(), Some("git"),);
+        let env_dir = temp_dir.path().join("my-project");
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(meta.cookbook.as_deref(), Some("git"));
     }
 
     #[rstest]
@@ -538,19 +534,15 @@ mod tests {
 
         context_object.cook_environment("owner/repo#42").unwrap();
 
-        // Stats should be keyed by the flat name (slashes → dashes) so that
-        // list_all can look up descriptions by Environment.name
-        let stats_path = context_object.stats_path.as_ref().unwrap();
-        let stats = crate::usage_stats::load_stats(stats_path);
+        // Meta should be stored in the flat-named env directory
+        let env_dir = temp_dir.path().join("owner-repo#42");
         assert!(
-            stats.envs.contains_key("owner-repo#42"),
-            "Stats should be keyed by flat name, got keys: {:?}",
-            stats.envs.keys().collect::<Vec<_>>()
+            env_dir.is_dir(),
+            "Env directory should exist with flat name"
         );
-        assert_eq!(
-            stats.envs["owner-repo#42"].description.as_deref(),
-            Some("Fix auth bug"),
-        );
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(meta.description.as_deref(), Some("Fix auth bug"));
+        assert_eq!(meta.cookbook.as_deref(), Some("github"));
     }
 
     #[rstest]

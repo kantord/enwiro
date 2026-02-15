@@ -26,7 +26,13 @@ impl Environment {
                 .context("Failed to convert file name to string")?
                 .to_string();
 
-            if path.is_dir() {
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            if metadata.file_type().is_symlink() && path.is_dir() {
+                // Legacy bare symlink pointing to a directory
                 let new_environment = Environment {
                     path: path
                         .to_str()
@@ -34,8 +40,20 @@ impl Environment {
                         .to_string(),
                     name: id.clone(),
                 };
-
-                results.insert(id.clone(), new_environment);
+                results.insert(id, new_environment);
+            } else if metadata.file_type().is_dir() {
+                // New format: directory containing inner same-named symlink
+                let inner_path = path.join(&id);
+                if inner_path.is_symlink() {
+                    let new_environment = Environment {
+                        path: inner_path
+                            .to_str()
+                            .context("Failed to convert inner path to string")?
+                            .to_string(),
+                        name: id.clone(),
+                    };
+                    results.insert(id, new_environment);
+                }
             }
         }
 
