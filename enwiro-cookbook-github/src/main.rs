@@ -142,11 +142,11 @@ fn discover_github_repos() -> anyhow::Result<Vec<RepoConfig>> {
     discover_github_repos_from_config(&git_config)
 }
 
-/// Parse a recipe name like "owner/repo#123" into ("owner/repo", 123).
+/// Parse a recipe name like "repo#123" into ("repo", 123).
 fn parse_recipe_name(name: &str) -> anyhow::Result<(&str, u64)> {
     let (repo, number_str) = name
         .rsplit_once('#')
-        .context("Recipe name must contain '#' (expected format: owner/repo#123)")?;
+        .context("Recipe name must contain '#' (expected format: repo#123)")?;
     let number = number_str
         .parse::<u64>()
         .with_context(|| format!("Invalid PR number: {}", number_str))?;
@@ -203,11 +203,19 @@ fn parse_search_response(json: &str) -> anyhow::Result<Vec<PrInfo>> {
         .search
         .nodes
         .into_iter()
-        .map(|node| PrInfo {
-            number: node.number,
-            title: node.title,
-            head_ref_name: node.head_ref_name,
-            repo: node.repository.name_with_owner,
+        .map(|node| {
+            let repo = node
+                .repository
+                .name_with_owner
+                .rsplit_once('/')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or(node.repository.name_with_owner);
+            PrInfo {
+                number: node.number,
+                title: node.title,
+                head_ref_name: node.head_ref_name,
+                repo,
+            }
         })
         .collect())
 }
@@ -284,9 +292,24 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     let (repo_str, pr_number) = parse_recipe_name(&args.recipe_name)?;
 
     let repos = discover_github_repos()?;
-    let repo_config = repos
+    let matching: Vec<_> = repos
         .iter()
-        .find(|r| r.repo == repo_str)
+        .filter(|r| {
+            r.repo
+                .rsplit_once('/')
+                .map(|(_, name)| name)
+                .unwrap_or(&r.repo)
+                == repo_str
+        })
+        .collect();
+    anyhow::ensure!(
+        matching.len() <= 1,
+        "Ambiguous repo name '{}': matches {} configured repos. Use a more specific name.",
+        repo_str,
+        matching.len()
+    );
+    let repo_config = matching
+        .first()
         .with_context(|| format!("No configured repo matching '{}'", repo_str))?;
 
     anyhow::ensure!(
@@ -297,10 +320,18 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
 
     let wt_base = worktree_base_dir(config)?;
     let path_hash = short_path_hash(&repo_config.local_path);
-    let repo_name = repo_str.replace('/', "-");
-    let wt_path = wt_base
-        .join(format!("{}-{}", repo_name, path_hash))
+    // Check old worktree path format (owner-repo-{hash}) for backward compatibility
+    let old_repo_name = repo_config.repo.replace('/', "-");
+    let old_wt_path = wt_base
+        .join(format!("{}-{}", old_repo_name, path_hash))
         .join(format!("pr-{}", pr_number));
+    let wt_path = if old_wt_path.exists() {
+        old_wt_path
+    } else {
+        wt_base
+            .join(format!("{}-{}", repo_str, path_hash))
+            .join(format!("pr-{}", pr_number))
+    };
 
     // If worktree already exists, just return the path
     if wt_path.exists() {
@@ -367,27 +398,27 @@ mod tests {
 
     #[test]
     fn test_parse_recipe_name_valid() {
-        let (repo, number) = parse_recipe_name("kantord/enwiro#42").unwrap();
-        assert_eq!(repo, "kantord/enwiro");
+        let (repo, number) = parse_recipe_name("enwiro#42").unwrap();
+        assert_eq!(repo, "enwiro");
         assert_eq!(number, 42);
     }
 
     #[test]
     fn test_parse_recipe_name_large_number() {
-        let (repo, number) = parse_recipe_name("vercel/next.js#12345").unwrap();
-        assert_eq!(repo, "vercel/next.js");
+        let (repo, number) = parse_recipe_name("next.js#12345").unwrap();
+        assert_eq!(repo, "next.js");
         assert_eq!(number, 12345);
     }
 
     #[test]
     fn test_parse_recipe_name_no_hash() {
-        let result = parse_recipe_name("kantord/enwiro");
+        let result = parse_recipe_name("enwiro");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_parse_recipe_name_invalid_number() {
-        let result = parse_recipe_name("kantord/enwiro#abc");
+        let result = parse_recipe_name("enwiro#abc");
         assert!(result.is_err());
     }
 
@@ -452,9 +483,9 @@ mod tests {
         assert_eq!(prs[0].number, 42);
         assert_eq!(prs[0].title, "Fix the thing");
         assert_eq!(prs[0].head_ref_name, "fix-thing");
-        assert_eq!(prs[0].repo, "kantord/enwiro");
+        assert_eq!(prs[0].repo, "enwiro");
         assert_eq!(prs[1].number, 99);
-        assert_eq!(prs[1].repo, "expressjs/express");
+        assert_eq!(prs[1].repo, "express");
     }
 
     #[test]
