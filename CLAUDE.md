@@ -22,7 +22,16 @@ macOS CI only builds: `enwiro`, `enwiro-cookbook-git`, `enwiro-bridge-rofi` (no 
 
 ## Architecture
 
-Enwiro connects window manager workspaces to project environments. An environment is a symlink in `~/.enwiro_envs/` pointing to a working directory.
+Enwiro connects window manager workspaces to project environments. An environment is a directory in `~/.enwiro_envs/` containing a same-named symlink pointing to the working directory, plus a `meta.json` file for colocated metadata:
+
+```
+~/.enwiro_envs/
+  my-project/
+    my-project → /home/user/code/my-project   # symlink (named to match env for shell status bars)
+    meta.json                                  # per-env metadata (frecency stats, description, cookbook)
+```
+
+Legacy bare symlinks (pre-directory format) are still discovered for backward compatibility. The inner symlink uses the environment name so that shell status bars (e.g., zsh prompt showing current directory) display the correct project name.
 
 ### Plugin System
 
@@ -54,6 +63,10 @@ enwiro (core CLI)
 
 `CommandContext<W>` holds config, adapter, cookbooks, notifier, a generic writer (real stdout or `Cursor<Vec<u8>>` in tests), and `cache_dir: Option<PathBuf>` (set to a tempdir in tests to isolate from the real daemon).
 
+### Per-Environment Metadata
+
+Each environment directory contains a `meta.json` file (`EnvStats` struct in `enwiro/src/usage_stats.rs`) storing frecency stats (activation count, last activated timestamp), cookbook origin, and description. Functions: `load_env_meta`, `record_activation_per_env`, `record_cook_metadata_per_env`. Legacy centralized `usage-stats.json` is checked as fallback for unmigrated environments.
+
 ### Background Recipe Cache Daemon
 
 `list-all` pre-caches recipe listings via a self-managing background daemon to avoid blocking the UI on slow cookbook plugins (e.g., GitHub API calls). All logic lives in `enwiro/src/daemon.rs`.
@@ -77,6 +90,10 @@ Single-file implementation in `enwiro-cookbook-git/src/main.rs`. Recipe discover
 5. Enwiro-managed worktrees (prefixed `enwiro-`) are hidden from discovery to keep branch recipes stable
 
 Recipe names use `@` separator: `repo-name@branch-name`. Slashes in branch names are flattened with hash suffix for filesystem paths.
+
+### GitHub Cookbook
+
+Implementation in `enwiro-cookbook-github/src/main.rs`. Discovers GitHub issues/PRs via GraphQL API and creates worktree-based environments. Recipe names use `repo#number` format (e.g., `SeaGOAT#1015`) — the owner prefix is stripped to stay consistent with the git cookbook's naming.
 
 ## Testing Patterns
 
