@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.1...enwiro-cookbook-github-v0.1.2) - 2026-02-15
+
+### Added
+
+- *(enwiro-cookbook-github)* drop owner prefix from recipe names
+
 ## [0.1.1](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.0...enwiro-cookbook-github-v0.1.1) - 2026-02-15
 
 ### Added
