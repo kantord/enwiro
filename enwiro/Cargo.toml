@@ -16,6 +16,7 @@ enwiro-logging.workspace = true
 home.workspace = true
 serde = "1.0.197"
 serde_derive = "1.0.197"
+serde_json = "1"
 strum = { version = "0.27.0", features = ["derive"] }
 strum_macros = "0.27.0"
 notify-rust = "4"

@@ -13,11 +13,33 @@ use crate::daemon;
 pub struct ListAllArgs {}
 
 pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()> {
-    // 1. Always list environments (instant — local directory listing)
-    for environment in context.get_all_environments()?.values() {
+    // 1. Always list environments (instant — local directory listing), sorted by frecency
+    let mut envs: Vec<_> = context.get_all_environments()?.into_values().collect();
+    let stats = match &context.stats_path {
+        Some(path) => crate::usage_stats::load_stats(path),
+        None => crate::usage_stats::load_stats_default(),
+    };
+    let now = crate::usage_stats::now_timestamp();
+    envs.sort_by(|a, b| {
+        let score_a = stats
+            .envs
+            .get(&a.name)
+            .map(|s| crate::usage_stats::frecency_score(s, now))
+            .unwrap_or(0.0);
+        let score_b = stats
+            .envs
+            .get(&b.name)
+            .map(|s| crate::usage_stats::frecency_score(s, now))
+            .unwrap_or(0.0);
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    for env in &envs {
         context
             .writer
-            .write_all(format!("_: {}\n", environment.name).as_bytes())
+            .write_all(format!("_: {}\n", env.name).as_bytes())
             .context("Could not write to output")?;
     }
 
@@ -177,6 +199,48 @@ mod tests {
             "Should read from cache, got: {}",
             output
         );
+    }
+
+    #[rstest]
+    fn test_list_all_sorts_environments_by_frecency(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("rarely-used");
+        context_object.create_mock_environment("often-used");
+        context_object.create_mock_environment("never-used");
+
+        // Write stats giving "often-used" a high score and "rarely-used" a low score
+        let stats_path = context_object.stats_path.as_ref().unwrap();
+        let now = crate::usage_stats::now_timestamp();
+        let stats = crate::usage_stats::UsageStats {
+            envs: [
+                (
+                    "often-used".to_string(),
+                    crate::usage_stats::EnvStats {
+                        last_activated: now,
+                        activation_count: 50,
+                    },
+                ),
+                (
+                    "rarely-used".to_string(),
+                    crate::usage_stats::EnvStats {
+                        last_activated: now - 700_000,
+                        activation_count: 2,
+                    },
+                ),
+            ]
+            .into(),
+        };
+        std::fs::write(stats_path, serde_json::to_string(&stats).unwrap()).unwrap();
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        let env_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("_: ")).collect();
+        assert_eq!(env_lines[0], "_: often-used");
+        assert_eq!(env_lines[1], "_: rarely-used");
+        assert_eq!(env_lines[2], "_: never-used");
     }
 
     #[rstest]
