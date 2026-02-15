@@ -4,6 +4,7 @@ use crate::{
     client::{CookbookClient, CookbookTrait},
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
     config::ConfigurationValues,
+    daemon,
     environments::Environment,
     notifier::{DesktopNotifier, Notifier},
     plugin::{PluginKind, get_plugins},
@@ -53,6 +54,29 @@ impl<W: Write> CommandContext<W> {
     }
 
     pub fn cook_environment(&self, name: &str) -> anyhow::Result<Environment> {
+        // Check the cache to avoid calling list_recipes() on every cookbook
+        // (which can be slow for API-based cookbooks like GitHub)
+        match self.find_recipe_in_cache(name) {
+            Some(Some(cookbook_name)) => {
+                // Cache hit: cook directly via the right cookbook
+                if let Some(cookbook) = self.cookbooks.iter().find(|c| c.name() == cookbook_name) {
+                    tracing::debug!(name = %name, cookbook = %cookbook_name, "Found recipe in cache");
+                    let env_path = cookbook.cook(name)?;
+                    return self.create_environment_symlink(name, &env_path);
+                }
+                tracing::warn!(name = %name, cookbook = %cookbook_name, "Cache references cookbook not found in plugins");
+            }
+            Some(None) => {
+                // Cache is fresh but recipe not in it — fall through to slow path
+                // in case the cache is slightly stale (up to CACHE_MAX_AGE)
+                tracing::debug!(name = %name, "Recipe not found in cache, falling back to slow path");
+            }
+            None => {
+                // No cache available — fall through to slow path
+            }
+        }
+
+        // Fallback: iterate cookbooks and call list_recipes()
         for cookbook in &self.cookbooks {
             let recipes = cookbook.list_recipes()?;
             for recipe in recipes.into_iter() {
@@ -60,18 +84,49 @@ impl<W: Write> CommandContext<W> {
                     continue;
                 }
                 let env_path = cookbook.cook(&recipe.name)?;
-                let flat_name = name.replace('/', "-");
-                let target_path = Path::new(&self.config.workspaces_directory).join(&flat_name);
-                tracing::info!(name = %name, target = %env_path, "Creating environment symlink");
-                symlink(Path::new(&env_path), target_path)?;
-                self.notifier
-                    .notify_success(&format!("Created environment: {}", name));
-                return Environment::get_one(&self.config.workspaces_directory, &flat_name);
+                return self.create_environment_symlink(name, &env_path);
             }
         }
 
         tracing::error!(name = %name, "No recipe available to cook environment");
         bail!("No recipe available to cook this environment.")
+    }
+
+    /// Look up a recipe in the daemon cache.
+    /// Returns:
+    /// - `Some(Some(cookbook_name))` — cache is fresh and recipe was found
+    /// - `Some(None)` — cache is fresh but recipe is NOT in it
+    /// - `None` — no cache available (missing, stale, or error)
+    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<Option<String>> {
+        let runtime_dir = match &self.cache_dir {
+            Some(dir) => dir.clone(),
+            None => daemon::runtime_dir().ok()?,
+        };
+        let cached = daemon::read_cached_recipes(&runtime_dir).ok()??;
+        // Cache format: "cookbook: recipe\tdescription\n" (see daemon::collect_all_recipes)
+        for line in cached.lines() {
+            if let Some((cookbook_name, rest)) = line.split_once(": ") {
+                let name = rest.split_once('\t').map_or(rest, |(n, _)| n);
+                if name == recipe_name {
+                    return Some(Some(cookbook_name.to_string()));
+                }
+            }
+        }
+        Some(None) // cache exists but recipe not found
+    }
+
+    fn create_environment_symlink(
+        &self,
+        name: &str,
+        env_path: &str,
+    ) -> anyhow::Result<Environment> {
+        let flat_name = name.replace('/', "-");
+        let target_path = Path::new(&self.config.workspaces_directory).join(&flat_name);
+        tracing::info!(name = %name, target = %env_path, "Creating environment symlink");
+        symlink(Path::new(env_path), target_path)?;
+        self.notifier
+            .notify_success(&format!("Created environment: {}", name));
+        Environment::get_one(&self.config.workspaces_directory, &flat_name)
     }
 
     fn resolve_environment_name(&self, name: &Option<String>) -> anyhow::Result<String> {
@@ -84,19 +139,16 @@ impl<W: Write> CommandContext<W> {
         }
     }
 
-    fn get_or_cook_environment_by_name(&self, name: &str) -> anyhow::Result<Environment> {
-        let flat_name = name.replace('/', "-");
-        match Environment::get_one(&self.config.workspaces_directory, &flat_name) {
-            Ok(env) => Ok(env),
-            Err(_) => self
-                .cook_environment(name)
-                .context("Could not cook environment"),
-        }
-    }
-
     pub fn get_or_cook_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
         let resolved = self.resolve_environment_name(name)?;
-        self.get_or_cook_environment_by_name(&resolved)
+        let flat_name = resolved.replace('/', "-");
+        match Environment::get_one(&self.config.workspaces_directory, &flat_name) {
+            Ok(env) => Ok(env),
+            Err(_) if name.is_some() => self
+                .cook_environment(&resolved)
+                .context("Could not cook environment"),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn get_all_environments(&self) -> anyhow::Result<HashMap<String, Environment>> {
@@ -110,7 +162,7 @@ mod tests {
     use std::fs;
 
     use crate::test_utils::test_utilities::{
-        AdapterLog, FakeContext, FakeCookbook, NotificationLog, context_object,
+        AdapterLog, FailingCookbook, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
 
     #[rstest]
@@ -249,6 +301,118 @@ mod tests {
     }
 
     #[rstest]
+    fn test_cook_environment_uses_cache_to_skip_slow_cookbooks(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        // Write a cache that knows about the recipe
+        let cache_dir = context_object.cache_dir.as_ref().unwrap();
+        fs::create_dir_all(cache_dir).unwrap();
+        fs::write(cache_dir.join("recipes.cache"), "git: my-project\n").unwrap();
+
+        // FailingCookbook simulates a slow cookbook (like GitHub) that would
+        // block or error if list_recipes() is called. The working cookbook is second.
+        context_object.cookbooks = vec![
+            Box::new(FailingCookbook {
+                cookbook_name: "github".into(),
+            }),
+            Box::new(FakeCookbook::new(
+                "git",
+                vec!["my-project"],
+                vec![("my-project", cooked_dir.to_str().unwrap())],
+            )),
+        ];
+
+        // With the cache available, cook_environment should find the recipe
+        // without calling list_recipes() on the failing cookbook
+        let env = context_object.cook_environment("my-project").unwrap();
+        assert_eq!(env.name, "my-project");
+    }
+
+    #[rstest]
+    fn test_cook_environment_falls_through_when_recipe_not_in_cache(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        // Write a fresh cache that does NOT contain the requested recipe
+        let cache_dir = context_object.cache_dir.as_ref().unwrap();
+        fs::create_dir_all(cache_dir).unwrap();
+        fs::write(cache_dir.join("recipes.cache"), "git: other-project\n").unwrap();
+
+        // The recipe isn't in the cache, but the cookbook has it.
+        // cook_environment should fall through to the slow path and find it.
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["new-branch"],
+            vec![("new-branch", cooked_dir.to_str().unwrap())],
+        ))];
+
+        let env = context_object.cook_environment("new-branch").unwrap();
+        assert_eq!(env.name, "new-branch");
+    }
+
+    #[rstest]
+    fn test_cook_environment_cache_hit_with_description(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        // Cache entry has a tab-separated description
+        let cache_dir = context_object.cache_dir.as_ref().unwrap();
+        fs::create_dir_all(cache_dir).unwrap();
+        fs::write(
+            cache_dir.join("recipes.cache"),
+            "github: owner/repo#42\tFix auth bug\n",
+        )
+        .unwrap();
+
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "github",
+            vec!["owner/repo#42"],
+            vec![("owner/repo#42", cooked_dir.to_str().unwrap())],
+        ))];
+
+        let env = context_object.cook_environment("owner/repo#42").unwrap();
+        assert_eq!(env.name, "owner-repo#42");
+    }
+
+    #[rstest]
+    fn test_cook_environment_falls_through_when_cached_cookbook_missing(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        // Cache says recipe belongs to "npm" cookbook, but only "git" is installed
+        let cache_dir = context_object.cache_dir.as_ref().unwrap();
+        fs::create_dir_all(cache_dir).unwrap();
+        fs::write(cache_dir.join("recipes.cache"), "npm: my-project\n").unwrap();
+
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project", cooked_dir.to_str().unwrap())],
+        ))];
+
+        // Should fall through to slow path and find it via git cookbook
+        let env = context_object.cook_environment("my-project").unwrap();
+        assert_eq!(env.name, "my-project");
+    }
+
+    #[rstest]
     fn test_get_or_cook_returns_existing_environment(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
@@ -284,25 +448,28 @@ mod tests {
     }
 
     #[rstest]
-    fn test_get_or_cook_cooks_via_adapter_name_when_no_explicit_name(
+    fn test_get_or_cook_does_not_cook_when_name_from_adapter(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        let (temp_dir, mut context_object, _, _) = context_object;
+        let (_temp_dir, mut context_object, _, _) = context_object;
 
-        let cooked_dir = temp_dir.path().join("cooked-target");
-        fs::create_dir(&cooked_dir).unwrap();
+        // No matching environment for "foobaz" (adapter's workspace name).
+        // FailingCookbook would error if cook_environment tries list_recipes().
+        context_object.cookbooks = vec![Box::new(FailingCookbook {
+            cookbook_name: "github".into(),
+        })];
 
-        // Adapter returns "foobaz" (the default mock value)
-        // Cookbook has a recipe for "foobaz"
-        // No explicit name passed (None) — should resolve via adapter then cook
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["foobaz"],
-            vec![("foobaz", cooked_dir.to_str().unwrap())],
-        ))];
-
-        let env = context_object.get_or_cook_environment(&None).unwrap();
-        assert_eq!(env.name, "foobaz");
+        // Name is None → resolved from adapter → should not try to cook
+        let result = context_object.get_or_cook_environment(&None);
+        assert!(result.is_err());
+        // Error should NOT be from FailingCookbook ("simulated failure").
+        // Use Debug format to see the full anyhow error chain.
+        let err_debug = format!("{:?}", result.unwrap_err());
+        assert!(
+            !err_debug.contains("simulated failure"),
+            "Should not have called cook_environment, but got: {}",
+            err_debug
+        );
     }
 
     #[rstest]
