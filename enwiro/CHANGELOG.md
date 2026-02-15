@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.14](https://github.com/kantord/enwiro/compare/enwiro-v0.3.13...enwiro-v0.3.14) - 2026-02-15
+
+### Added
+
+- add optional description field to recipes
+
+### Fixed
+
+- fix performance issues in wrap command
+
 ## [0.3.13](https://github.com/kantord/enwiro/compare/enwiro-v0.3.12...enwiro-v0.3.13) - 2026-02-14
 
 ### Added
