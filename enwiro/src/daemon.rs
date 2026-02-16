@@ -31,7 +31,7 @@ pub fn write_cache_atomic(runtime_dir: &Path, content: &str) -> anyhow::Result<(
 }
 
 /// Maximum age for a cache file to be considered valid (refresh interval + 30s buffer).
-const CACHE_MAX_AGE: Duration = Duration::from_secs(330); // 5min + 30s
+const CACHE_MAX_AGE: Duration = Duration::from_secs(70); // 40s + 30s
 
 /// Read the cached recipes. Returns None if cache doesn't exist or is stale.
 pub fn read_cached_recipes(runtime_dir: &Path) -> anyhow::Result<Option<String>> {
@@ -53,7 +53,7 @@ pub fn read_cached_recipes(runtime_dir: &Path) -> anyhow::Result<Option<String>>
     Ok(Some(content))
 }
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(3600); // 1 hour
+const IDLE_TIMEOUT: Duration = Duration::from_secs(10800); // 3 hours
 
 /// Touch the heartbeat file to indicate the daemon's output is being consumed.
 pub fn touch_heartbeat(runtime_dir: &Path) -> anyhow::Result<()> {
@@ -81,7 +81,7 @@ fn check_idle_with_timeout(runtime_dir: &Path, timeout: Duration) -> bool {
     }
 }
 
-/// Check if the daemon has been idle (no heartbeat touch) for longer than 1 hour.
+/// Check if the daemon has been idle (no heartbeat touch) for longer than 3 hours.
 pub fn check_idle(runtime_dir: &Path) -> bool {
     check_idle_with_timeout(runtime_dir, IDLE_TIMEOUT)
 }
@@ -165,7 +165,7 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
     output
 }
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+const REFRESH_INTERVAL: Duration = Duration::from_secs(40);
 
 /// Entry point for the daemon. Called when `enwiro daemon` is invoked.
 pub fn run_daemon() -> anyhow::Result<()> {
@@ -340,12 +340,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         touch_heartbeat(dir.path()).unwrap();
         let past = filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+            std::time::SystemTime::now() - std::time::Duration::from_secs(14400),
         );
         filetime::set_file_mtime(dir.path().join("heartbeat"), past).unwrap();
         assert!(check_idle_with_timeout(
             dir.path(),
-            std::time::Duration::from_secs(3600)
+            std::time::Duration::from_secs(10800)
         ));
     }
 
@@ -378,7 +378,7 @@ mod tests {
     fn test_read_cache_returns_none_when_stale() {
         let dir = tempfile::tempdir().unwrap();
         write_cache_atomic(dir.path(), "git: old-repo\n").unwrap();
-        // Backdate cache to 10 minutes ago (older than REFRESH_INTERVAL + 30s)
+        // Backdate cache to 10 minutes ago (older than 40s + 30s staleness threshold)
         let past = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - std::time::Duration::from_secs(600),
         );
