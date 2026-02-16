@@ -62,7 +62,7 @@ you can install with `cargo install cargo-update`.
 ### Environment
 
 <p align="center">
- <img src="environments.png" width="400" />
+ <img src="environment.png" width="400" />
 </p>
 
 An environment is a local folder or a symbolic link pointing to a folder. To define
@@ -94,7 +94,7 @@ An environment could be linked to:
 ### Recipe
 
 <p align="center">
- <img src="recipes.png" width="400" />
+ <img src="recipe.png" width="400" />
 </p>
 
 Recipes are automatically generated blueprints for environments.
@@ -109,6 +109,10 @@ as the "parent recipe" to recipes for creating new worktrees for the same Git
 repository.
 
 ### Cookbook
+
+<p align="center">
+ <img src="cookbook.png" width="400" />
+</p>
 
 Cookbooks are plugins that contain recipes. You can add more recipes to your
 enwiro by installing and configuring more cookbooks.
