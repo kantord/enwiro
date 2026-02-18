@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.6...enwiro-cookbook-git-v0.1.7) - 2026-02-18
+
+### Fixed
+
+- show HEAD branch as a recipe in git cookbook
+
+### Other
+
+- *(cookbook-git)* update documentation
+
 ## [0.1.6](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.5...enwiro-cookbook-git-v0.1.6) - 2026-02-14
 
 ### Added
