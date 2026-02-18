@@ -203,11 +203,6 @@ fn build_repository_hashmap(
                 // checked-out branch would fail.
                 let mut checked_out_branches: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
-                if let Ok(head) = repo.head()
-                    && let Some(name) = head.shorthand()
-                {
-                    checked_out_branches.insert(name.to_string());
-                }
                 if let Ok(worktrees) = repo.worktrees() {
                     for wt_name in worktrees.iter().flatten() {
                         // Skip enwiro-managed worktrees — their branches
@@ -645,14 +640,14 @@ mod tests {
     }
 
     #[test]
-    fn test_head_branch_not_listed_as_recipe() {
+    fn test_head_branch_listed_as_recipe() {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
         fs::create_dir(&repo_path).unwrap();
         let repo = create_repo_with_commit(&repo_path);
 
         // HEAD points to "master" (or "main" depending on git config).
-        // Create another branch so there's something to list.
+        // Create another branch so there's something else to list.
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         repo.branch("feature-x", &head, false).unwrap();
 
@@ -661,11 +656,11 @@ mod tests {
         let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
         let recipes = build_repository_hashmap(&config).unwrap();
 
-        // The HEAD branch should NOT appear as a branch recipe (it's already the main repo entry)
+        // The HEAD branch should appear as a branch recipe even though it's checked out
         let head_recipe_key = format!("my-project@{}", head_branch_name);
         assert!(
-            !recipes.contains_key(&head_recipe_key),
-            "HEAD branch '{}' should not appear as a separate recipe: {:?}",
+            recipes.contains_key(&head_recipe_key),
+            "HEAD branch '{}' should appear as a recipe: {:?}",
             head_branch_name,
             recipes.keys().collect::<Vec<_>>()
         );
