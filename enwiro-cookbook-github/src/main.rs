@@ -159,18 +159,25 @@ fn parse_recipe_name(name: &str) -> anyhow::Result<(&str, u64)> {
     Ok((repo, number))
 }
 
-fn build_search_query(repos: &[String]) -> String {
+/// Build a GitHub search query string.
+/// `type_filter` controls the item type, e.g.:
+/// - `"is:pr is:open"` for pull requests
+/// - `"is:issue is:open assignee:@me"` for assigned issues
+fn build_search_query(repos: &[String], type_filter: &str) -> String {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
     let date_str = cutoff.format("%Y-%m-%d").to_string();
     let repo_filters: Vec<String> = repos.iter().map(|r| format!("repo:{}", r)).collect();
     format!(
-        "is:pr is:open {} updated:>{} sort:updated-desc",
+        "{} {} updated:>{} sort:updated-desc",
+        type_filter,
         repo_filters.join(" "),
         date_str
     )
 }
 
 /// Serde structs for the GraphQL search response.
+/// Both PR and Issue nodes are deserialized into `GraphQlNode`;
+/// PRs have `head_ref_name` set, issues don't.
 #[derive(Deserialize)]
 struct GraphQlResponse {
     data: GraphQlData,
@@ -183,15 +190,15 @@ struct GraphQlData {
 
 #[derive(Deserialize)]
 struct GraphQlSearch {
-    nodes: Vec<GraphQlPrNode>,
+    nodes: Vec<GraphQlNode>,
 }
 
 #[derive(Deserialize)]
-struct GraphQlPrNode {
+struct GraphQlNode {
     number: u64,
     title: String,
-    #[serde(rename = "headRefName")]
-    head_ref_name: String,
+    #[serde(rename = "headRefName", default)]
+    head_ref_name: Option<String>,
     repository: GraphQlRepo,
 }
 
@@ -199,6 +206,13 @@ struct GraphQlPrNode {
 struct GraphQlRepo {
     #[serde(rename = "nameWithOwner")]
     name_with_owner: String,
+}
+
+fn extract_short_repo_name(name_with_owner: String) -> String {
+    name_with_owner
+        .rsplit_once('/')
+        .map(|(_, name)| name.to_string())
+        .unwrap_or(name_with_owner)
 }
 
 fn parse_search_response(json: &str) -> anyhow::Result<Vec<GithubItem>> {
@@ -210,24 +224,23 @@ fn parse_search_response(json: &str) -> anyhow::Result<Vec<GithubItem>> {
         .nodes
         .into_iter()
         .map(|node| {
-            let repo = node
-                .repository
-                .name_with_owner
-                .rsplit_once('/')
-                .map(|(_, name)| name.to_string())
-                .unwrap_or(node.repository.name_with_owner);
+            let repo = extract_short_repo_name(node.repository.name_with_owner);
+            let kind = match node.head_ref_name {
+                Some(head_ref_name) => GithubItemKind::PullRequest { head_ref_name },
+                None => GithubItemKind::Issue,
+            };
             GithubItem {
                 number: node.number,
                 title: node.title,
                 repo,
-                kind: GithubItemKind::PullRequest {
-                    head_ref_name: node.head_ref_name,
-                },
+                kind,
             }
         })
         .collect())
 }
 
+/// Single GraphQL query with both PR and Issue fragments.
+/// GraphQL matches only the appropriate fragment per node type.
 const SEARCH_QUERY: &str = r#"query($searchQuery: String!) {
   search(query: $searchQuery, type: ISSUE, first: 100) {
     nodes {
@@ -238,16 +251,22 @@ const SEARCH_QUERY: &str = r#"query($searchQuery: String!) {
         updatedAt
         repository { nameWithOwner }
       }
+      ... on Issue {
+        number
+        title
+        updatedAt
+        repository { nameWithOwner }
+      }
     }
   }
 }"#;
 
-fn search_prs(repos: &[String]) -> anyhow::Result<Vec<GithubItem>> {
+fn search_github(repos: &[String], type_filter: &str) -> anyhow::Result<Vec<GithubItem>> {
     if repos.is_empty() {
         return Ok(Vec::new());
     }
 
-    let search_query = build_search_query(repos);
+    let search_query = build_search_query(repos, type_filter);
 
     let output = Command::new("gh")
         .args([
@@ -273,139 +292,25 @@ fn search_prs(repos: &[String]) -> anyhow::Result<Vec<GithubItem>> {
     }
 
     let stdout = String::from_utf8(output.stdout).context("gh produced invalid UTF-8")?;
-    let prs = parse_search_response(&stdout)?;
+    let items = parse_search_response(&stdout)?;
 
-    if prs.len() >= 100 {
+    if items.len() >= 100 {
         eprintln!(
-            "Warning: GitHub search returned 100 results (the maximum). Some PRs may be missing."
+            "Warning: GitHub search returned 100 results (the maximum). Some results may be missing."
         );
     }
 
-    Ok(prs)
-}
-
-/// Build a search query for issues assigned to the authenticated user.
-/// Unlike PRs (which show all open PRs on configured repos), issues are
-/// scoped to `assignee:@me` so only actionable work appears.
-fn build_issue_search_query(repos: &[String]) -> String {
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
-    let date_str = cutoff.format("%Y-%m-%d").to_string();
-    let repo_filters: Vec<String> = repos.iter().map(|r| format!("repo:{}", r)).collect();
-    format!(
-        "is:issue is:open assignee:@me {} updated:>{} sort:updated-desc",
-        repo_filters.join(" "),
-        date_str
-    )
-}
-
-#[derive(Deserialize)]
-struct GraphQlIssueSearch {
-    nodes: Vec<GraphQlIssueNode>,
-}
-
-#[derive(Deserialize)]
-struct GraphQlIssueNode {
-    number: u64,
-    title: String,
-    repository: GraphQlRepo,
-}
-
-#[derive(Deserialize)]
-struct GraphQlIssueResponse {
-    data: GraphQlIssueData,
-}
-
-#[derive(Deserialize)]
-struct GraphQlIssueData {
-    search: GraphQlIssueSearch,
-}
-
-fn parse_issue_search_response(json: &str) -> anyhow::Result<Vec<GithubItem>> {
-    let response: GraphQlIssueResponse =
-        serde_json::from_str(json).context("Could not parse GraphQL issue response")?;
-    Ok(response
-        .data
-        .search
-        .nodes
-        .into_iter()
-        .map(|node| {
-            let repo = node
-                .repository
-                .name_with_owner
-                .rsplit_once('/')
-                .map(|(_, name)| name.to_string())
-                .unwrap_or(node.repository.name_with_owner);
-            GithubItem {
-                number: node.number,
-                title: node.title,
-                repo,
-                kind: GithubItemKind::Issue,
-            }
-        })
-        .collect())
-}
-
-const ISSUE_SEARCH_QUERY: &str = r#"query($searchQuery: String!) {
-  search(query: $searchQuery, type: ISSUE, first: 100) {
-    nodes {
-      ... on Issue {
-        number
-        title
-        updatedAt
-        repository { nameWithOwner }
-      }
-    }
-  }
-}"#;
-
-fn search_issues(repos: &[String]) -> anyhow::Result<Vec<GithubItem>> {
-    if repos.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let search_query = build_issue_search_query(repos);
-
-    let output = Command::new("gh")
-        .args([
-            "api",
-            "graphql",
-            "-F",
-            &format!("searchQuery={}", search_query),
-            "-f",
-            &format!("query={}", ISSUE_SEARCH_QUERY),
-        ])
-        .output()
-        .context(
-            "Failed to run gh CLI. Is it installed and authenticated? \
-             (https://cli.github.com/, then run: gh auth login)",
-        )?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "gh api graphql failed: {}. Is gh authenticated? (try: gh auth login)",
-            stderr
-        );
-    }
-
-    let stdout = String::from_utf8(output.stdout).context("gh produced invalid UTF-8")?;
-    let issues = parse_issue_search_response(&stdout)?;
-
-    if issues.len() >= 100 {
-        eprintln!(
-            "Warning: GitHub search returned 100 results (the maximum). Some issues may be missing."
-        );
-    }
-
-    Ok(issues)
+    Ok(items)
 }
 
 fn list_recipes() -> anyhow::Result<()> {
     let repos = discover_github_repos()?;
     let repo_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
 
-    let prs = search_prs(&repo_names)?;
-    let issues = search_issues(&repo_names)?;
+    let prs = search_github(&repo_names, "is:pr is:open")?;
+    // Issues are scoped to `assignee:@me` so only actionable work appears,
+    // unlike PRs which show all open PRs on configured repos.
+    let issues = search_github(&repo_names, "is:issue is:open assignee:@me")?;
     for item in prs {
         let safe_title = item.title.replace(['\t', '\n', '\0', '\x1f'], " ");
         println!("{}#{}\t[PR] {}", item.repo, item.number, safe_title);
@@ -457,6 +362,20 @@ fn print_worktree_path(wt_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn worktree_path(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+    prefix: &str,
+    number: u64,
+) -> anyhow::Result<PathBuf> {
+    let wt_base = worktree_base_dir(config)?;
+    let path_hash = short_path_hash(&repo_config.local_path);
+    Ok(wt_base
+        .join(format!("{}-{}", repo_str, path_hash))
+        .join(format!("{}-{}", prefix, number)))
+}
+
 /// Create a worktree for a PR. Assumes the ref `pr-{number}` was already
 /// fetched and that no existing worktree was found (caller checks both).
 fn cook_pr(
@@ -465,11 +384,7 @@ fn cook_pr(
     repo_str: &str,
     number: u64,
 ) -> anyhow::Result<()> {
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
-    let wt_path = wt_base
-        .join(format!("{}-{}", repo_str, path_hash))
-        .join(format!("pr-{}", number));
+    let wt_path = worktree_path(config, repo_config, repo_str, "pr", number)?;
 
     std::fs::create_dir_all(wt_path.parent().unwrap())
         .context("Could not create worktree directory")?;
@@ -492,28 +407,13 @@ fn cook_pr(
     print_worktree_path(&wt_path)
 }
 
-fn get_default_branch(repo: &git2::Repository, local_path_str: &str) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            local_path_str,
-            "rev-parse",
-            "--abbrev-ref",
-            "origin/HEAD",
-        ])
-        .output()
-        .context("Failed to run git rev-parse")?;
-
-    if output.status.success() {
-        let full_ref = String::from_utf8(output.stdout)
-            .context("git produced invalid UTF-8")?
-            .trim()
-            .to_string();
-        // Strip "origin/" prefix to get bare branch name
-        return Ok(full_ref
-            .strip_prefix("origin/")
-            .unwrap_or(&full_ref)
-            .to_string());
+fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
+    // Try origin/HEAD symbolic ref
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
+        && let Ok(resolved) = reference.resolve()
+        && let Some(name) = resolved.shorthand()
+    {
+        return Ok(name.strip_prefix("origin/").unwrap_or(name).to_string());
     }
 
     // origin/HEAD not set — try common default branch names
@@ -545,11 +445,7 @@ fn cook_issue(
     repo_str: &str,
     number: u64,
 ) -> anyhow::Result<()> {
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
-    let wt_path = wt_base
-        .join(format!("{}-{}", repo_str, path_hash))
-        .join(format!("issue-{}", number));
+    let wt_path = worktree_path(config, repo_config, repo_str, "issue", number)?;
 
     std::fs::create_dir_all(wt_path.parent().unwrap())
         .context("Could not create worktree directory")?;
@@ -572,7 +468,7 @@ fn cook_issue(
     let repo = git2::Repository::open(&repo_config.local_path)
         .context("Could not open repository for worktree creation")?;
 
-    let default_branch = get_default_branch(&repo, local_path_str)?;
+    let default_branch = get_default_branch(&repo)?;
 
     let branch_name = format!("issue-{}", number);
 
@@ -611,16 +507,9 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
 
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
-
     // Check if a worktree already exists for either PR or issue
-    let pr_wt_path = wt_base
-        .join(format!("{}-{}", repo_str, path_hash))
-        .join(format!("pr-{}", number));
-    let issue_wt_path = wt_base
-        .join(format!("{}-{}", repo_str, path_hash))
-        .join(format!("issue-{}", number));
+    let pr_wt_path = worktree_path(config, &repo_config, repo_str, "pr", number)?;
+    let issue_wt_path = worktree_path(config, &repo_config, repo_str, "issue", number)?;
 
     if pr_wt_path.exists() {
         return print_worktree_path(&pr_wt_path);
@@ -630,6 +519,8 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     }
 
     // Also check old worktree path format for backward compatibility (PR only)
+    let wt_base = worktree_base_dir(config)?;
+    let path_hash = short_path_hash(&repo_config.local_path);
     let old_repo_name = repo_config.repo.replace('/', "-");
     let old_pr_wt_path = wt_base
         .join(format!("{}-{}", old_repo_name, path_hash))
@@ -701,12 +592,28 @@ mod tests {
     }
 
     #[test]
-    fn test_build_search_query_single_repo() {
+    fn test_build_search_query_pr() {
         let repos = vec!["kantord/enwiro".to_string()];
-        let query = build_search_query(&repos);
+        let query = build_search_query(&repos, "is:pr is:open");
         assert!(query.contains("repo:kantord/enwiro"));
         assert!(query.contains("is:pr"));
         assert!(query.contains("is:open"));
+        assert!(query.contains("sort:updated-desc"));
+        assert!(
+            query.contains("updated:>"),
+            "Should contain date filter, got: {}",
+            query
+        );
+    }
+
+    #[test]
+    fn test_build_search_query_issue() {
+        let repos = vec!["kantord/enwiro".to_string()];
+        let query = build_search_query(&repos, "is:issue is:open assignee:@me");
+        assert!(query.contains("repo:kantord/enwiro"));
+        assert!(query.contains("is:issue"));
+        assert!(query.contains("is:open"));
+        assert!(query.contains("assignee:@me"));
         assert!(query.contains("sort:updated-desc"));
     }
 
@@ -716,24 +623,13 @@ mod tests {
             "kantord/enwiro".to_string(),
             "expressjs/express".to_string(),
         ];
-        let query = build_search_query(&repos);
+        let query = build_search_query(&repos, "is:pr is:open");
         assert!(query.contains("repo:kantord/enwiro"));
         assert!(query.contains("repo:expressjs/express"));
     }
 
     #[test]
-    fn test_build_search_query_includes_date_filter() {
-        let repos = vec!["kantord/enwiro".to_string()];
-        let query = build_search_query(&repos);
-        assert!(
-            query.contains("updated:>"),
-            "Should contain date filter, got: {}",
-            query
-        );
-    }
-
-    #[test]
-    fn test_parse_graphql_response() {
+    fn test_parse_search_response_prs() {
         let json = r#"{
             "data": {
                 "search": {
@@ -756,24 +652,56 @@ mod tests {
                 }
             }
         }"#;
-        let prs = parse_search_response(json).unwrap();
-        assert_eq!(prs.len(), 2);
-        assert_eq!(prs[0].number, 42);
-        assert_eq!(prs[0].title, "Fix the thing");
+        let items = parse_search_response(json).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].number, 42);
+        assert_eq!(items[0].title, "Fix the thing");
         assert!(matches!(
-            &prs[0].kind,
+            &items[0].kind,
             GithubItemKind::PullRequest { head_ref_name } if head_ref_name == "fix-thing"
         ));
-        assert_eq!(prs[0].repo, "enwiro");
-        assert_eq!(prs[1].number, 99);
-        assert_eq!(prs[1].repo, "express");
+        assert_eq!(items[0].repo, "enwiro");
+        assert_eq!(items[1].number, 99);
+        assert_eq!(items[1].repo, "express");
     }
 
     #[test]
-    fn test_parse_graphql_response_empty_nodes() {
+    fn test_parse_search_response_issues() {
+        let json = r#"{
+            "data": {
+                "search": {
+                    "nodes": [
+                        {
+                            "number": 225,
+                            "title": "Discover GitHub Issues",
+                            "updatedAt": "2026-02-14T13:10:29Z",
+                            "repository": { "nameWithOwner": "kantord/enwiro" }
+                        },
+                        {
+                            "number": 100,
+                            "title": "Fix login bug",
+                            "updatedAt": "2026-02-13T10:00:00Z",
+                            "repository": { "nameWithOwner": "expressjs/express" }
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let items = parse_search_response(json).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].number, 225);
+        assert_eq!(items[0].title, "Discover GitHub Issues");
+        assert!(matches!(&items[0].kind, GithubItemKind::Issue));
+        assert_eq!(items[0].repo, "enwiro");
+        assert_eq!(items[1].number, 100);
+        assert!(matches!(&items[1].kind, GithubItemKind::Issue));
+    }
+
+    #[test]
+    fn test_parse_search_response_empty_nodes() {
         let json = r#"{"data": {"search": {"nodes": []}}}"#;
-        let prs = parse_search_response(json).unwrap();
-        assert!(prs.is_empty());
+        let items = parse_search_response(json).unwrap();
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -971,81 +899,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_issue_search_query_single_repo() {
-        let repos = vec!["kantord/enwiro".to_string()];
-        let query = build_issue_search_query(&repos);
-        assert!(query.contains("repo:kantord/enwiro"));
-        assert!(query.contains("is:issue"));
-        assert!(query.contains("is:open"));
-        assert!(query.contains("assignee:@me"));
-        assert!(query.contains("sort:updated-desc"));
-    }
-
-    #[test]
-    fn test_build_issue_search_query_multiple_repos() {
-        let repos = vec![
-            "kantord/enwiro".to_string(),
-            "expressjs/express".to_string(),
-        ];
-        let query = build_issue_search_query(&repos);
-        assert!(query.contains("repo:kantord/enwiro"));
-        assert!(query.contains("repo:expressjs/express"));
-        assert!(query.contains("is:issue"));
-        assert!(query.contains("assignee:@me"));
-    }
-
-    #[test]
-    fn test_build_issue_search_query_includes_date_filter() {
-        let repos = vec!["kantord/enwiro".to_string()];
-        let query = build_issue_search_query(&repos);
-        assert!(
-            query.contains("updated:>"),
-            "Should contain date filter, got: {}",
-            query
-        );
-    }
-
-    #[test]
-    fn test_parse_issue_search_response() {
-        let json = r#"{
-            "data": {
-                "search": {
-                    "nodes": [
-                        {
-                            "number": 225,
-                            "title": "Discover GitHub Issues",
-                            "updatedAt": "2026-02-14T13:10:29Z",
-                            "repository": { "nameWithOwner": "kantord/enwiro" }
-                        },
-                        {
-                            "number": 100,
-                            "title": "Fix login bug",
-                            "updatedAt": "2026-02-13T10:00:00Z",
-                            "repository": { "nameWithOwner": "expressjs/express" }
-                        }
-                    ]
-                }
-            }
-        }"#;
-        let issues = parse_issue_search_response(json).unwrap();
-        assert_eq!(issues.len(), 2);
-        assert_eq!(issues[0].number, 225);
-        assert_eq!(issues[0].title, "Discover GitHub Issues");
-        assert!(matches!(&issues[0].kind, GithubItemKind::Issue));
-        assert_eq!(issues[0].repo, "enwiro");
-        assert_eq!(issues[1].number, 100);
-        assert_eq!(issues[1].repo, "express");
-        assert!(matches!(&issues[1].kind, GithubItemKind::Issue));
-    }
-
-    #[test]
-    fn test_parse_issue_search_response_empty_nodes() {
-        let json = r#"{"data": {"search": {"nodes": []}}}"#;
-        let issues = parse_issue_search_response(json).unwrap();
-        assert!(issues.is_empty());
-    }
-
-    #[test]
     fn test_cook_creates_worktree_for_issue() {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
@@ -1113,7 +966,7 @@ mod tests {
         let repo = setup_repo_with_origin(&local_path, &origin_path);
 
         // Clone sets origin/HEAD automatically
-        let branch = get_default_branch(&repo, local_path.to_str().unwrap()).unwrap();
+        let branch = get_default_branch(&repo).unwrap();
         assert_eq!(branch, "main");
     }
 
@@ -1141,7 +994,7 @@ mod tests {
         )
         .unwrap();
 
-        let branch = get_default_branch(&repo, repo_path.to_str().unwrap()).unwrap();
+        let branch = get_default_branch(&repo).unwrap();
         assert_eq!(branch, "main");
     }
 
@@ -1169,7 +1022,7 @@ mod tests {
         )
         .unwrap();
 
-        let branch = get_default_branch(&repo, repo_path.to_str().unwrap()).unwrap();
+        let branch = get_default_branch(&repo).unwrap();
         assert_eq!(branch, "master");
     }
 
@@ -1189,7 +1042,7 @@ mod tests {
         repo.remote("origin", "https://example.com/fake.git")
             .unwrap();
 
-        let result = get_default_branch(&repo, repo_path.to_str().unwrap());
+        let result = get_default_branch(&repo);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
