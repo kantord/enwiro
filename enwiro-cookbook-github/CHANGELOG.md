@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.2...enwiro-cookbook-github-v0.1.3) - 2026-02-19
+
+### Added
+
+- *(cookbook-github)* discover GitHub Issues assigned to user as recipes
+
+### Other
+
+- .
+- .
+
 ## [0.1.2](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.1...enwiro-cookbook-github-v0.1.2) - 2026-02-15
 
 ### Added
