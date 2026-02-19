@@ -284,6 +284,9 @@ fn search_prs(repos: &[String]) -> anyhow::Result<Vec<GithubItem>> {
     Ok(prs)
 }
 
+/// Build a search query for issues assigned to the authenticated user.
+/// Unlike PRs (which show all open PRs on configured repos), issues are
+/// scoped to `assignee:@me` so only actionable work appears.
 fn build_issue_search_query(repos: &[String]) -> String {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
     let date_str = cutoff.format("%Y-%m-%d").to_string();
@@ -635,21 +638,35 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
         return print_worktree_path(&old_pr_wt_path);
     }
 
-    // Try fetching as a PR first; if that fails, treat as an issue
+    // Try fetching as a PR first. If the ref doesn't exist, treat as an issue.
+    // If fetch fails for another reason (network error), bail instead of
+    // silently creating an issue branch.
     let local_path_str = repo_config
         .local_path
         .to_str()
         .context("Could not convert local path to string")?;
     let fetch_refspec = format!("pull/{}/head:pr-{}", number, number);
-    let fetch_status = Command::new("git")
+    let fetch_output = Command::new("git")
         .args(["-C", local_path_str, "fetch", "origin", &fetch_refspec])
         .output()
         .context("Failed to run git fetch")?;
 
-    if fetch_status.status.success() {
-        cook_pr(config, &repo_config, repo_str, number)
-    } else {
+    if fetch_output.status.success() {
+        return cook_pr(config, &repo_config, repo_str, number);
+    }
+
+    let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+    // "not found" / "couldn't find remote ref" indicate the number is an
+    // issue, not a PR. Any other failure is a real error (network, auth, etc.)
+    if stderr.contains("not found") || stderr.contains("couldn't find remote ref") {
         cook_issue(config, &repo_config, repo_str, number)
+    } else {
+        anyhow::bail!(
+            "Failed to fetch #{} from {}: {}",
+            number,
+            repo_config.repo,
+            stderr.trim()
+        )
     }
 }
 
@@ -1067,6 +1084,119 @@ mod tests {
         assert!(wt_path.exists(), "Worktree path should exist on disk");
         let wt_repo = git2::Repository::open(&wt_path).unwrap();
         assert!(wt_repo.is_worktree(), "Should be a git worktree");
+    }
+
+    /// Helper: create a repo with an initial commit and a remote "origin"
+    /// pointing at `origin_path`. Returns the cloned repo.
+    fn setup_repo_with_origin(local_path: &Path, origin_path: &Path) -> git2::Repository {
+        // Create the "origin" bare repo
+        let origin = git2::Repository::init_bare(origin_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = origin.index().unwrap().write_tree().unwrap();
+        let tree = origin.find_tree(tree_id).unwrap();
+        origin
+            .commit(Some("refs/heads/main"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        // Clone it
+        let repo = git2::build::RepoBuilder::new()
+            .clone(origin_path.to_str().unwrap(), local_path)
+            .unwrap();
+        repo
+    }
+
+    #[test]
+    fn test_get_default_branch_uses_origin_head() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let origin_path = tmp.path().join("origin.git");
+        let local_path = tmp.path().join("local");
+        let repo = setup_repo_with_origin(&local_path, &origin_path);
+
+        // Clone sets origin/HEAD automatically
+        let branch = get_default_branch(&repo, local_path.to_str().unwrap()).unwrap();
+        assert_eq!(branch, "main");
+    }
+
+    #[test]
+    fn test_get_default_branch_falls_back_to_main() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let repo = git2::Repository::init(&repo_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        // Add a remote with a "main" branch ref but no HEAD
+        repo.remote("origin", "https://example.com/fake.git")
+            .unwrap();
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.reference(
+            "refs/remotes/origin/main",
+            head_commit.id(),
+            false,
+            "fake remote ref",
+        )
+        .unwrap();
+
+        let branch = get_default_branch(&repo, repo_path.to_str().unwrap()).unwrap();
+        assert_eq!(branch, "main");
+    }
+
+    #[test]
+    fn test_get_default_branch_falls_back_to_master() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let repo = git2::Repository::init(&repo_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        // Add a remote with only a "master" branch ref (no HEAD, no main)
+        repo.remote("origin", "https://example.com/fake.git")
+            .unwrap();
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.reference(
+            "refs/remotes/origin/master",
+            head_commit.id(),
+            false,
+            "fake remote ref",
+        )
+        .unwrap();
+
+        let branch = get_default_branch(&repo, repo_path.to_str().unwrap()).unwrap();
+        assert_eq!(branch, "master");
+    }
+
+    #[test]
+    fn test_get_default_branch_errors_when_no_candidates() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        let repo = git2::Repository::init(&repo_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        // Remote exists but has no refs at all
+        repo.remote("origin", "https://example.com/fake.git")
+            .unwrap();
+
+        let result = get_default_branch(&repo, repo_path.to_str().unwrap());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Could not determine default branch"),
+            "Expected helpful error, got: {}",
+            err
+        );
     }
 }
 
