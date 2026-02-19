@@ -37,6 +37,7 @@ pub struct GithubItem {
     pub title: String,
     pub repo: String,
     pub kind: GithubItemKind,
+    pub updated_at: String,
 }
 
 #[derive(Parser)]
@@ -200,6 +201,8 @@ struct GraphQlNode {
     title: String,
     #[serde(rename = "headRefName", default)]
     head_ref_name: Option<String>,
+    #[serde(rename = "updatedAt", default)]
+    updated_at: Option<String>,
     repository: GraphQlRepo,
 }
 
@@ -235,6 +238,7 @@ fn parse_search_response(json: &str) -> anyhow::Result<Vec<GithubItem>> {
                 title: node.title,
                 repo,
                 kind,
+                updated_at: node.updated_at.unwrap_or_default(),
             }
         })
         .collect())
@@ -304,6 +308,10 @@ fn search_github(repos: &[String], type_filter: &str) -> anyhow::Result<Vec<Gith
     Ok(items)
 }
 
+fn sort_items_by_date(items: &mut [GithubItem]) {
+    items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+}
+
 fn list_recipes() -> anyhow::Result<()> {
     let repos = discover_github_repos()?;
     let repo_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
@@ -312,13 +320,17 @@ fn list_recipes() -> anyhow::Result<()> {
     // Issues are scoped to `assignee:@me` so only actionable work appears,
     // unlike PRs which show all open PRs on configured repos.
     let issues = search_github(&repo_names, "is:issue is:open assignee:@me")?;
-    for item in prs {
+
+    let mut items: Vec<GithubItem> = prs.into_iter().chain(issues).collect();
+    sort_items_by_date(&mut items);
+
+    for item in items {
         let safe_title = item.title.replace(['\t', '\n', '\0', '\x1f'], " ");
-        println!("{}#{}\t[PR] {}", item.repo, item.number, safe_title);
-    }
-    for item in issues {
-        let safe_title = item.title.replace(['\t', '\n', '\0', '\x1f'], " ");
-        println!("{}#{}\t[issue] {}", item.repo, item.number, safe_title);
+        let prefix = match &item.kind {
+            GithubItemKind::PullRequest { .. } => "[PR]",
+            GithubItemKind::Issue => "[issue]",
+        };
+        println!("{}#{}\t{} {}", item.repo, item.number, prefix, safe_title);
     }
     Ok(())
 }
@@ -1025,6 +1037,73 @@ mod tests {
 
         let branch = get_default_branch(&repo).unwrap();
         assert_eq!(branch, "master");
+    }
+
+    #[test]
+    fn test_parse_search_response_captures_updated_at() {
+        let json = r#"{
+            "data": {
+                "search": {
+                    "nodes": [
+                        {
+                            "number": 42,
+                            "title": "Fix the thing",
+                            "headRefName": "fix-thing",
+                            "updatedAt": "2026-02-14T13:10:29Z",
+                            "repository": { "nameWithOwner": "kantord/enwiro" }
+                        },
+                        {
+                            "number": 225,
+                            "title": "Bug report",
+                            "updatedAt": "2026-02-12T09:00:00Z",
+                            "repository": { "nameWithOwner": "kantord/enwiro" }
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let items = parse_search_response(json).unwrap();
+        assert_eq!(items[0].updated_at, "2026-02-14T13:10:29Z");
+        assert_eq!(items[1].updated_at, "2026-02-12T09:00:00Z");
+    }
+
+    #[test]
+    fn test_list_recipes_sorts_combined_items_by_date() {
+        // When PRs and issues are combined, they should be sorted by
+        // updated_at descending (newest first), not grouped by type.
+        let mut items = vec![
+            GithubItem {
+                number: 10,
+                title: "Old PR".to_string(),
+                repo: "enwiro".to_string(),
+                kind: GithubItemKind::PullRequest {
+                    head_ref_name: "old-pr".to_string(),
+                },
+                updated_at: "2026-02-01T00:00:00Z".to_string(),
+            },
+            GithubItem {
+                number: 20,
+                title: "Recent issue".to_string(),
+                repo: "enwiro".to_string(),
+                kind: GithubItemKind::Issue,
+                updated_at: "2026-02-15T00:00:00Z".to_string(),
+            },
+            GithubItem {
+                number: 30,
+                title: "Newest PR".to_string(),
+                repo: "enwiro".to_string(),
+                kind: GithubItemKind::PullRequest {
+                    head_ref_name: "newest-pr".to_string(),
+                },
+                updated_at: "2026-02-18T00:00:00Z".to_string(),
+            },
+        ];
+
+        sort_items_by_date(&mut items);
+
+        assert_eq!(items[0].number, 30, "Newest PR should be first");
+        assert_eq!(items[1].number, 20, "Recent issue should be second");
+        assert_eq!(items[2].number, 10, "Old PR should be last");
     }
 
     #[test]
