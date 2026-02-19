@@ -301,6 +301,26 @@ mod tests {
     }
 
     #[rstest]
+    fn test_list_all_sorts_recipes_by_cookbook_priority(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.cookbooks = vec![
+            Box::new(FakeCookbook::new("github", vec!["repo#1"], vec![]).with_priority(30)),
+            Box::new(FakeCookbook::new("chezmoi", vec!["dotfiles"], vec![]).with_priority(20)),
+            Box::new(FakeCookbook::new("git", vec!["my-repo"], vec![]).with_priority(10)),
+        ];
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        let recipe_lines: Vec<&str> = output.lines().filter(|l| !l.starts_with("_: ")).collect();
+        assert_eq!(recipe_lines[0], "git: my-repo");
+        assert_eq!(recipe_lines[1], "chezmoi: dotfiles");
+        assert_eq!(recipe_lines[2], "github: repo#1");
+    }
+
+    #[rstest]
     fn test_list_all_falls_back_to_sync_when_no_cache(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {

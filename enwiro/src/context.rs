@@ -34,10 +34,15 @@ impl<W: Write> CommandContext<W> {
         };
 
         let plugins = get_plugins(PluginKind::Cookbook);
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
+        let mut cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
             .into_iter()
             .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
+        cookbooks.sort_by(|a, b| {
+            a.priority()
+                .cmp(&b.priority())
+                .then_with(|| a.name().cmp(b.name()))
+        });
 
         tracing::debug!(count = cookbooks.len(), "Cookbooks loaded");
 

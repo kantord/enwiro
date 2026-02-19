@@ -137,8 +137,14 @@ pub fn ensure_daemon_running(runtime_dir: &Path) -> anyhow::Result<bool> {
 /// Collect recipe lines from all cookbooks, formatted as "cookbook_name: recipe_name\n".
 /// Errors in individual cookbooks are logged and skipped.
 pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
+    let mut sorted: Vec<_> = cookbooks.iter().collect();
+    sorted.sort_by(|a, b| {
+        a.priority()
+            .cmp(&b.priority())
+            .then_with(|| a.name().cmp(b.name()))
+    });
     let mut output = String::new();
-    for cookbook in cookbooks {
+    for cookbook in sorted {
         match cookbook.list_recipes() {
             Ok(recipes) => {
                 for recipe in recipes {
@@ -397,6 +403,36 @@ mod tests {
         // Cache was just written — should be fresh
         let read = read_cached_recipes(dir.path()).unwrap();
         assert_eq!(read, Some("git: fresh-repo\n".to_string()));
+    }
+
+    #[test]
+    fn test_collect_all_recipes_sorts_by_priority() {
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
+            Box::new(FakeCookbook::new("github", vec!["repo#42"], vec![]).with_priority(30)),
+            Box::new(FakeCookbook::new("git", vec!["my-repo"], vec![]).with_priority(10)),
+        ];
+        let output = collect_all_recipes(&cookbooks);
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(
+            lines[0], "git: my-repo",
+            "Higher priority (lower number) should come first"
+        );
+        assert_eq!(lines[1], "github: repo#42");
+    }
+
+    #[test]
+    fn test_collect_all_recipes_sorts_by_name_on_priority_tie() {
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
+            Box::new(FakeCookbook::new("npm", vec!["pkg-x"], vec![]).with_priority(20)),
+            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]).with_priority(20)),
+        ];
+        let output = collect_all_recipes(&cookbooks);
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(
+            lines[0], "git: repo-a",
+            "Same priority should tie-break alphabetically"
+        );
+        assert_eq!(lines[1], "npm: pkg-x");
     }
 
     #[test]

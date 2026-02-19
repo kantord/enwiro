@@ -74,6 +74,7 @@ pub mod test_utilities {
         pub cookbook_name: String,
         pub recipes: Vec<Recipe>,
         pub cook_results: std::collections::HashMap<String, String>,
+        pub priority: u32,
     }
 
     impl FakeCookbook {
@@ -85,6 +86,7 @@ pub mod test_utilities {
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
+                priority: 50,
             }
         }
 
@@ -106,7 +108,13 @@ pub mod test_utilities {
                     .into_iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
+                priority: 50,
             }
+        }
+
+        pub fn with_priority(mut self, priority: u32) -> Self {
+            self.priority = priority;
+            self
         }
     }
 
@@ -142,6 +150,10 @@ pub mod test_utilities {
 
         fn name(&self) -> &str {
             &self.cookbook_name
+        }
+
+        fn priority(&self) -> u32 {
+            self.priority
         }
     }
 
