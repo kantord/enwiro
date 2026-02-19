@@ -9,7 +9,6 @@ const DEFAULT_PRIORITY: u32 = 50;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CookbookMetadata {
-    pub description: Option<String>,
     pub default_priority: Option<u32>,
 }
 
@@ -43,11 +42,21 @@ pub trait CookbookTrait {
     fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>>;
     fn cook(&self, recipe: &str) -> anyhow::Result<String>;
     fn name(&self) -> &str;
-    /// Lower values = higher priority. Used to sort cookbooks for display and
-    /// recipe resolution order. Default is 50.
+    /// Controls display and resolution order. Lower values appear first.
+    /// Built-in range: git=10, chezmoi=20, github=30. Third-party plugins
+    /// that don't provide metadata default to 50.
     fn priority(&self) -> u32 {
-        50
+        DEFAULT_PRIORITY
     }
+}
+
+/// Sort cookbooks by priority (lower first), then alphabetically by name.
+pub fn sort_cookbooks(cookbooks: &mut [Box<dyn CookbookTrait>]) {
+    cookbooks.sort_by(|a, b| {
+        a.priority()
+            .cmp(&b.priority())
+            .then_with(|| a.name().cmp(b.name()))
+    });
 }
 
 pub struct CookbookClient {
@@ -58,6 +67,11 @@ pub struct CookbookClient {
 impl CookbookClient {
     pub fn new(plugin: Plugin) -> Self {
         let metadata = Self::fetch_metadata(&plugin.executable);
+        Self { plugin, metadata }
+    }
+
+    #[cfg(test)]
+    fn with_metadata(plugin: Plugin, metadata: CookbookMetadata) -> Self {
         Self { plugin, metadata }
     }
 
@@ -150,20 +164,11 @@ impl CookbookTrait for CookbookClient {
 mod tests {
     use super::*;
     use crate::plugin::PluginKind;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn test_parse_metadata_valid_json() {
-        let json = r#"{
-            "description": "Discovers git repositories",
-            "defaultPriority": 10
-        }"#;
+        let json = r#"{"defaultPriority": 10}"#;
         let meta = parse_metadata(json).unwrap();
-        assert_eq!(
-            meta.description.as_deref(),
-            Some("Discovers git repositories")
-        );
         assert_eq!(meta.default_priority, Some(10));
     }
 
@@ -171,7 +176,6 @@ mod tests {
     fn test_parse_metadata_empty_object() {
         let json = r#"{}"#;
         let meta = parse_metadata(json).unwrap();
-        assert_eq!(meta.description, None);
         assert_eq!(meta.default_priority, None);
     }
 
@@ -190,64 +194,35 @@ mod tests {
         assert!(parse_metadata("not json").is_err());
     }
 
-    fn make_mock_plugin(dir: &std::path::Path, script: &str) -> Plugin {
-        let bin_path = dir.join("enwiro-cookbook-mock");
-        fs::write(&bin_path, script).unwrap();
-        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+    fn mock_plugin(name: &str) -> Plugin {
         Plugin {
-            name: "mock".to_string(),
+            name: name.to_string(),
             kind: PluginKind::Cookbook,
-            executable: bin_path.to_string_lossy().to_string(),
+            executable: String::new(),
         }
     }
 
     #[test]
     fn test_cookbook_client_uses_priority_from_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let plugin = make_mock_plugin(
-            dir.path(),
-            r#"#!/bin/sh
-case "$1" in
-  metadata) echo '{"defaultPriority":10}' ;;
-  list-recipes) echo "" ;;
-  *) exit 1 ;;
-esac
-"#,
+        let client = CookbookClient::with_metadata(
+            mock_plugin("git"),
+            CookbookMetadata {
+                default_priority: Some(10),
+            },
         );
-        let client = CookbookClient::new(plugin);
         assert_eq!(client.priority(), 10);
     }
 
     #[test]
-    fn test_cookbook_client_default_priority_when_metadata_unsupported() {
-        let dir = tempfile::tempdir().unwrap();
-        let plugin = make_mock_plugin(
-            dir.path(),
-            r#"#!/bin/sh
-case "$1" in
-  list-recipes) echo "" ;;
-  *) exit 1 ;;
-esac
-"#,
-        );
-        let client = CookbookClient::new(plugin);
+    fn test_cookbook_client_default_priority_when_no_metadata() {
+        let client = CookbookClient::with_metadata(mock_plugin("git"), CookbookMetadata::default());
         assert_eq!(client.priority(), DEFAULT_PRIORITY);
     }
 
     #[test]
-    fn test_cookbook_client_name_from_plugin_filename() {
-        let dir = tempfile::tempdir().unwrap();
-        let plugin = make_mock_plugin(
-            dir.path(),
-            r#"#!/bin/sh
-case "$1" in
-  metadata) echo '{}' ;;
-  list-recipes) echo "" ;;
-  *) exit 1 ;;
-esac
-"#,
-        );
-        let client = CookbookClient::new(plugin);
-        assert_eq!(client.name(), "mock");
+    fn test_cookbook_client_name_from_plugin() {
+        let client =
+            CookbookClient::with_metadata(mock_plugin("my-cookbook"), CookbookMetadata::default());
+        assert_eq!(client.name(), "my-cookbook");
     }
 }
