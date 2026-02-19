@@ -29,6 +29,11 @@ pub trait CookbookTrait {
     fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>>;
     fn cook(&self, recipe: &str) -> anyhow::Result<String>;
     fn name(&self) -> &str;
+    /// Lower values = higher priority. Used to sort cookbooks for display and
+    /// recipe resolution order. Default is 50.
+    fn priority(&self) -> u32 {
+        50
+    }
 }
 
 pub struct CookbookClient {
