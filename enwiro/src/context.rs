@@ -38,11 +38,7 @@ impl<W: Write> CommandContext<W> {
             .into_iter()
             .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
-        cookbooks.sort_by(|a, b| {
-            a.priority()
-                .cmp(&b.priority())
-                .then_with(|| a.name().cmp(b.name()))
-        });
+        crate::client::sort_cookbooks(&mut cookbooks);
 
         tracing::debug!(count = cookbooks.len(), "Cookbooks loaded");
 

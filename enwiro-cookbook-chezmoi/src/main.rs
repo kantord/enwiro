@@ -8,6 +8,7 @@ const RECIPE_NAME: &str = "chezmoi";
 enum EnwiroCookbookChezmoi {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
+    Metadata,
 }
 
 #[derive(clap::Args)]
@@ -58,6 +59,9 @@ fn main() -> anyhow::Result<()> {
         }
         EnwiroCookbookChezmoi::Cook(args) => {
             cook(args)?;
+        }
+        EnwiroCookbookChezmoi::Metadata => {
+            println!(r#"{{"defaultPriority":20}}"#);
         }
     };
 

@@ -517,7 +517,6 @@ dependencies = [
  "notify-rust",
  "rstest",
  "serde",
- "serde_derive",
  "serde_json",
  "signal-hook",
  "strum",

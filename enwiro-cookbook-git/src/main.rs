@@ -129,6 +129,7 @@ enum RecipeInfo {
 enum EnwiroCookbookGit {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
+    Metadata,
 }
 
 #[derive(clap::Args)]
@@ -783,6 +784,9 @@ fn main() -> anyhow::Result<()> {
         }
         EnwiroCookbookGit::Cook(args) => {
             cook(&config, args)?;
+        }
+        EnwiroCookbookGit::Metadata => {
+            println!(r#"{{"defaultPriority":10}}"#);
         }
     };
 

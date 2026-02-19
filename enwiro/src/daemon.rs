@@ -201,15 +201,10 @@ pub fn run_daemon() -> anyhow::Result<()> {
     loop {
         // Discover plugins fresh each cycle (new cookbooks may be installed)
         let plugins = get_plugins(PluginKind::Cookbook);
-        let mut cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
             .into_iter()
             .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
-        cookbooks.sort_by(|a, b| {
-            a.priority()
-                .cmp(&b.priority())
-                .then_with(|| a.name().cmp(b.name()))
-        });
 
         let recipes = collect_all_recipes(&cookbooks);
         if let Err(e) = write_cache_atomic(&dir, &recipes) {

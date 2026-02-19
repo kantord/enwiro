@@ -43,6 +43,7 @@ pub struct GithubItem {
 enum EnwiroCookbookGithub {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
+    Metadata,
 }
 
 #[derive(clap::Args)]
@@ -1067,6 +1068,9 @@ fn main() -> anyhow::Result<()> {
         }
         EnwiroCookbookGithub::Cook(args) => {
             cook(&config, args)?;
+        }
+        EnwiroCookbookGithub::Metadata => {
+            println!(r#"{{"defaultPriority":30}}"#);
         }
     };
 
