@@ -26,11 +26,17 @@ struct GitCookbookConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct PrInfo {
+pub enum GithubItemKind {
+    PullRequest { head_ref_name: String },
+    Issue,
+}
+
+#[derive(Debug, Clone)]
+pub struct GithubItem {
     pub number: u64,
     pub title: String,
-    pub head_ref_name: String,
     pub repo: String,
+    pub kind: GithubItemKind,
 }
 
 #[derive(Parser)]
@@ -149,7 +155,7 @@ fn parse_recipe_name(name: &str) -> anyhow::Result<(&str, u64)> {
         .context("Recipe name must contain '#' (expected format: repo#123)")?;
     let number = number_str
         .parse::<u64>()
-        .with_context(|| format!("Invalid PR number: {}", number_str))?;
+        .with_context(|| format!("Invalid issue/PR number: {}", number_str))?;
     Ok((repo, number))
 }
 
@@ -195,7 +201,7 @@ struct GraphQlRepo {
     name_with_owner: String,
 }
 
-fn parse_search_response(json: &str) -> anyhow::Result<Vec<PrInfo>> {
+fn parse_search_response(json: &str) -> anyhow::Result<Vec<GithubItem>> {
     let response: GraphQlResponse =
         serde_json::from_str(json).context("Could not parse GraphQL response")?;
     Ok(response
@@ -210,11 +216,13 @@ fn parse_search_response(json: &str) -> anyhow::Result<Vec<PrInfo>> {
                 .rsplit_once('/')
                 .map(|(_, name)| name.to_string())
                 .unwrap_or(node.repository.name_with_owner);
-            PrInfo {
+            GithubItem {
                 number: node.number,
                 title: node.title,
-                head_ref_name: node.head_ref_name,
                 repo,
+                kind: GithubItemKind::PullRequest {
+                    head_ref_name: node.head_ref_name,
+                },
             }
         })
         .collect())
@@ -234,7 +242,7 @@ const SEARCH_QUERY: &str = r#"query($searchQuery: String!) {
   }
 }"#;
 
-fn search_prs(repos: &[String]) -> anyhow::Result<Vec<PrInfo>> {
+fn search_prs(repos: &[String]) -> anyhow::Result<Vec<GithubItem>> {
     if repos.is_empty() {
         return Ok(Vec::new());
     }
@@ -276,24 +284,140 @@ fn search_prs(repos: &[String]) -> anyhow::Result<Vec<PrInfo>> {
     Ok(prs)
 }
 
+fn build_issue_search_query(repos: &[String]) -> String {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let date_str = cutoff.format("%Y-%m-%d").to_string();
+    let repo_filters: Vec<String> = repos.iter().map(|r| format!("repo:{}", r)).collect();
+    format!(
+        "is:issue is:open assignee:@me {} updated:>{} sort:updated-desc",
+        repo_filters.join(" "),
+        date_str
+    )
+}
+
+#[derive(Deserialize)]
+struct GraphQlIssueSearch {
+    nodes: Vec<GraphQlIssueNode>,
+}
+
+#[derive(Deserialize)]
+struct GraphQlIssueNode {
+    number: u64,
+    title: String,
+    repository: GraphQlRepo,
+}
+
+#[derive(Deserialize)]
+struct GraphQlIssueResponse {
+    data: GraphQlIssueData,
+}
+
+#[derive(Deserialize)]
+struct GraphQlIssueData {
+    search: GraphQlIssueSearch,
+}
+
+fn parse_issue_search_response(json: &str) -> anyhow::Result<Vec<GithubItem>> {
+    let response: GraphQlIssueResponse =
+        serde_json::from_str(json).context("Could not parse GraphQL issue response")?;
+    Ok(response
+        .data
+        .search
+        .nodes
+        .into_iter()
+        .map(|node| {
+            let repo = node
+                .repository
+                .name_with_owner
+                .rsplit_once('/')
+                .map(|(_, name)| name.to_string())
+                .unwrap_or(node.repository.name_with_owner);
+            GithubItem {
+                number: node.number,
+                title: node.title,
+                repo,
+                kind: GithubItemKind::Issue,
+            }
+        })
+        .collect())
+}
+
+const ISSUE_SEARCH_QUERY: &str = r#"query($searchQuery: String!) {
+  search(query: $searchQuery, type: ISSUE, first: 100) {
+    nodes {
+      ... on Issue {
+        number
+        title
+        updatedAt
+        repository { nameWithOwner }
+      }
+    }
+  }
+}"#;
+
+fn search_issues(repos: &[String]) -> anyhow::Result<Vec<GithubItem>> {
+    if repos.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let search_query = build_issue_search_query(repos);
+
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "graphql",
+            "-F",
+            &format!("searchQuery={}", search_query),
+            "-f",
+            &format!("query={}", ISSUE_SEARCH_QUERY),
+        ])
+        .output()
+        .context(
+            "Failed to run gh CLI. Is it installed and authenticated? \
+             (https://cli.github.com/, then run: gh auth login)",
+        )?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "gh api graphql failed: {}. Is gh authenticated? (try: gh auth login)",
+            stderr
+        );
+    }
+
+    let stdout = String::from_utf8(output.stdout).context("gh produced invalid UTF-8")?;
+    let issues = parse_issue_search_response(&stdout)?;
+
+    if issues.len() >= 100 {
+        eprintln!(
+            "Warning: GitHub search returned 100 results (the maximum). Some issues may be missing."
+        );
+    }
+
+    Ok(issues)
+}
+
 fn list_recipes() -> anyhow::Result<()> {
     let repos = discover_github_repos()?;
     let repo_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
 
     let prs = search_prs(&repo_names)?;
-    for pr in prs {
-        let safe_title = pr.title.replace(['\t', '\n', '\0', '\x1f'], " ");
-        println!("{}#{}\t{}", pr.repo, pr.number, safe_title);
+    let issues = search_issues(&repo_names)?;
+    for item in prs {
+        let safe_title = item.title.replace(['\t', '\n', '\0', '\x1f'], " ");
+        println!("{}#{}\t[PR] {}", item.repo, item.number, safe_title);
+    }
+    for item in issues {
+        let safe_title = item.title.replace(['\t', '\n', '\0', '\x1f'], " ");
+        println!("{}#{}\t[issue] {}", item.repo, item.number, safe_title);
     }
     Ok(())
 }
 
-fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
-    let (repo_str, pr_number) = parse_recipe_name(&args.recipe_name)?;
-
+fn resolve_repo_config(repo_str: &str) -> anyhow::Result<RepoConfig> {
     let repos = discover_github_repos()?;
     let matching: Vec<_> = repos
-        .iter()
+        .into_iter()
         .filter(|r| {
             r.repo
                 .rsplit_once('/')
@@ -309,80 +433,18 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
         matching.len()
     );
     let repo_config = matching
-        .first()
+        .into_iter()
+        .next()
         .with_context(|| format!("No configured repo matching '{}'", repo_str))?;
-
     anyhow::ensure!(
         repo_config.local_path.exists(),
         "Local clone not found at {}. Please clone the repo first.",
         repo_config.local_path.display()
     );
+    Ok(repo_config)
+}
 
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
-    // Check old worktree path format (owner-repo-{hash}) for backward compatibility
-    let old_repo_name = repo_config.repo.replace('/', "-");
-    let old_wt_path = wt_base
-        .join(format!("{}-{}", old_repo_name, path_hash))
-        .join(format!("pr-{}", pr_number));
-    let wt_path = if old_wt_path.exists() {
-        old_wt_path
-    } else {
-        wt_base
-            .join(format!("{}-{}", repo_str, path_hash))
-            .join(format!("pr-{}", pr_number))
-    };
-
-    // If worktree already exists, just return the path
-    if wt_path.exists() {
-        println!(
-            "{}",
-            wt_path
-                .to_str()
-                .context("Could not convert worktree path to string")?
-        );
-        return Ok(());
-    }
-
-    // Create parent directories
-    std::fs::create_dir_all(wt_path.parent().unwrap())
-        .context("Could not create worktree directory")?;
-
-    // Fetch the PR ref
-    let local_path_str = repo_config
-        .local_path
-        .to_str()
-        .context("Could not convert local path to string")?;
-    let ref_name = format!("pr-{}", pr_number);
-    let fetch_refspec = format!("pull/{}/head:{}", pr_number, ref_name);
-    let fetch_status = Command::new("git")
-        .args(["-C", local_path_str, "fetch", "origin", &fetch_refspec])
-        .status()
-        .context("Failed to run git fetch")?;
-
-    if !fetch_status.success() {
-        anyhow::bail!(
-            "Failed to fetch PR #{} from {}",
-            pr_number,
-            repo_config.repo
-        );
-    }
-
-    // Create worktree using git2
-    let repo = git2::Repository::open(&repo_config.local_path)
-        .context("Could not open repository for worktree creation")?;
-    let branch = repo
-        .find_branch(&ref_name, git2::BranchType::Local)
-        .with_context(|| format!("Could not find branch {}", ref_name))?;
-    let reference = branch.into_reference();
-
-    let wt_name = format!("enwiro-pr-{}", pr_number);
-    let mut opts = git2::WorktreeAddOptions::new();
-    opts.reference(Some(&reference));
-    repo.worktree(&wt_name, &wt_path, Some(&opts))
-        .with_context(|| format!("Could not create worktree for PR #{}", pr_number))?;
-
-    tracing::debug!(path = %wt_path.display(), pr = pr_number, "Created worktree for PR");
+fn print_worktree_path(wt_path: &Path) -> anyhow::Result<()> {
     println!(
         "{}",
         wt_path
@@ -390,6 +452,205 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
             .context("Could not convert worktree path to string")?
     );
     Ok(())
+}
+
+/// Create a worktree for a PR. Assumes the ref `pr-{number}` was already
+/// fetched and that no existing worktree was found (caller checks both).
+fn cook_pr(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+    number: u64,
+) -> anyhow::Result<()> {
+    let wt_base = worktree_base_dir(config)?;
+    let path_hash = short_path_hash(&repo_config.local_path);
+    let wt_path = wt_base
+        .join(format!("{}-{}", repo_str, path_hash))
+        .join(format!("pr-{}", number));
+
+    std::fs::create_dir_all(wt_path.parent().unwrap())
+        .context("Could not create worktree directory")?;
+
+    let ref_name = format!("pr-{}", number);
+    let repo = git2::Repository::open(&repo_config.local_path)
+        .context("Could not open repository for worktree creation")?;
+    let branch = repo
+        .find_branch(&ref_name, git2::BranchType::Local)
+        .with_context(|| format!("Could not find branch {}", ref_name))?;
+    let reference = branch.into_reference();
+
+    let wt_name = format!("enwiro-pr-{}", number);
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&reference));
+    repo.worktree(&wt_name, &wt_path, Some(&opts))
+        .with_context(|| format!("Could not create worktree for PR #{}", number))?;
+
+    tracing::debug!(path = %wt_path.display(), pr = number, "Created worktree for PR");
+    print_worktree_path(&wt_path)
+}
+
+fn get_default_branch(repo: &git2::Repository, local_path_str: &str) -> anyhow::Result<String> {
+    let output = Command::new("git")
+        .args([
+            "-C",
+            local_path_str,
+            "rev-parse",
+            "--abbrev-ref",
+            "origin/HEAD",
+        ])
+        .output()
+        .context("Failed to run git rev-parse")?;
+
+    if output.status.success() {
+        let full_ref = String::from_utf8(output.stdout)
+            .context("git produced invalid UTF-8")?
+            .trim()
+            .to_string();
+        // Strip "origin/" prefix to get bare branch name
+        return Ok(full_ref
+            .strip_prefix("origin/")
+            .unwrap_or(&full_ref)
+            .to_string());
+    }
+
+    // origin/HEAD not set — try common default branch names
+    tracing::warn!("origin/HEAD is not set, probing for default branch");
+    for candidate in ["main", "master"] {
+        if repo
+            .find_reference(&format!("refs/remotes/origin/{}", candidate))
+            .is_ok()
+        {
+            tracing::debug!(branch = candidate, "Using fallback default branch");
+            return Ok(candidate.to_string());
+        }
+    }
+
+    anyhow::bail!(
+        "Could not determine default branch: origin/HEAD is not set and \
+         neither origin/main nor origin/master exist. \
+         Try running: git remote set-head origin --auto"
+    )
+}
+
+/// Create a worktree for an issue. Assumes no existing worktree was found
+/// (caller checks). Creates a new branch `issue-{number}` from the default
+/// branch, or reuses the branch if it already exists (e.g., worktree was
+/// manually deleted but the branch was left behind).
+fn cook_issue(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+    number: u64,
+) -> anyhow::Result<()> {
+    let wt_base = worktree_base_dir(config)?;
+    let path_hash = short_path_hash(&repo_config.local_path);
+    let wt_path = wt_base
+        .join(format!("{}-{}", repo_str, path_hash))
+        .join(format!("issue-{}", number));
+
+    std::fs::create_dir_all(wt_path.parent().unwrap())
+        .context("Could not create worktree directory")?;
+
+    let local_path_str = repo_config
+        .local_path
+        .to_str()
+        .context("Could not convert local path to string")?;
+
+    // Fetch latest state of default branch
+    let fetch_status = Command::new("git")
+        .args(["-C", local_path_str, "fetch", "origin"])
+        .status()
+        .context("Failed to run git fetch")?;
+
+    if !fetch_status.success() {
+        anyhow::bail!("Failed to fetch from {}", repo_config.repo);
+    }
+
+    let repo = git2::Repository::open(&repo_config.local_path)
+        .context("Could not open repository for worktree creation")?;
+
+    let default_branch = get_default_branch(&repo, local_path_str)?;
+
+    let branch_name = format!("issue-{}", number);
+
+    // Reuse existing branch if present (e.g., worktree was manually deleted
+    // but the branch was left behind), otherwise create from default branch.
+    let branch = match repo.find_branch(&branch_name, git2::BranchType::Local) {
+        Ok(existing) => {
+            tracing::debug!(branch = %branch_name, "Reusing existing issue branch");
+            existing
+        }
+        Err(_) => {
+            let origin_ref = format!("origin/{}", default_branch);
+            let origin_commit = repo
+                .find_reference(&format!("refs/remotes/{}", origin_ref))
+                .with_context(|| format!("Could not find ref {}", origin_ref))?
+                .peel_to_commit()
+                .with_context(|| format!("Could not resolve {} to a commit", origin_ref))?;
+
+            repo.branch(&branch_name, &origin_commit, false)
+                .with_context(|| format!("Could not create branch {}", branch_name))?
+        }
+    };
+    let reference = branch.into_reference();
+
+    let wt_name = format!("enwiro-issue-{}", number);
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&reference));
+    repo.worktree(&wt_name, &wt_path, Some(&opts))
+        .with_context(|| format!("Could not create worktree for issue #{}", number))?;
+
+    tracing::debug!(path = %wt_path.display(), issue = number, "Created worktree for issue");
+    print_worktree_path(&wt_path)
+}
+
+fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
+    let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
+    let repo_config = resolve_repo_config(repo_str)?;
+
+    let wt_base = worktree_base_dir(config)?;
+    let path_hash = short_path_hash(&repo_config.local_path);
+
+    // Check if a worktree already exists for either PR or issue
+    let pr_wt_path = wt_base
+        .join(format!("{}-{}", repo_str, path_hash))
+        .join(format!("pr-{}", number));
+    let issue_wt_path = wt_base
+        .join(format!("{}-{}", repo_str, path_hash))
+        .join(format!("issue-{}", number));
+
+    if pr_wt_path.exists() {
+        return print_worktree_path(&pr_wt_path);
+    }
+    if issue_wt_path.exists() {
+        return print_worktree_path(&issue_wt_path);
+    }
+
+    // Also check old worktree path format for backward compatibility (PR only)
+    let old_repo_name = repo_config.repo.replace('/', "-");
+    let old_pr_wt_path = wt_base
+        .join(format!("{}-{}", old_repo_name, path_hash))
+        .join(format!("pr-{}", number));
+    if old_pr_wt_path.exists() {
+        return print_worktree_path(&old_pr_wt_path);
+    }
+
+    // Try fetching as a PR first; if that fails, treat as an issue
+    let local_path_str = repo_config
+        .local_path
+        .to_str()
+        .context("Could not convert local path to string")?;
+    let fetch_refspec = format!("pull/{}/head:pr-{}", number, number);
+    let fetch_status = Command::new("git")
+        .args(["-C", local_path_str, "fetch", "origin", &fetch_refspec])
+        .output()
+        .context("Failed to run git fetch")?;
+
+    if fetch_status.status.success() {
+        cook_pr(config, &repo_config, repo_str, number)
+    } else {
+        cook_issue(config, &repo_config, repo_str, number)
+    }
 }
 
 #[cfg(test)]
@@ -482,7 +743,10 @@ mod tests {
         assert_eq!(prs.len(), 2);
         assert_eq!(prs[0].number, 42);
         assert_eq!(prs[0].title, "Fix the thing");
-        assert_eq!(prs[0].head_ref_name, "fix-thing");
+        assert!(matches!(
+            &prs[0].kind,
+            GithubItemKind::PullRequest { head_ref_name } if head_ref_name == "fix-thing"
+        ));
         assert_eq!(prs[0].repo, "enwiro");
         assert_eq!(prs[1].number, 99);
         assert_eq!(prs[1].repo, "express");
@@ -682,6 +946,122 @@ mod tests {
         let mut opts = git2::WorktreeAddOptions::new();
         opts.reference(Some(&reference));
         repo.worktree("enwiro-pr-42", &wt_path, Some(&opts))
+            .unwrap();
+
+        assert!(wt_path.exists(), "Worktree path should exist on disk");
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        assert!(wt_repo.is_worktree(), "Should be a git worktree");
+    }
+
+    #[test]
+    fn test_build_issue_search_query_single_repo() {
+        let repos = vec!["kantord/enwiro".to_string()];
+        let query = build_issue_search_query(&repos);
+        assert!(query.contains("repo:kantord/enwiro"));
+        assert!(query.contains("is:issue"));
+        assert!(query.contains("is:open"));
+        assert!(query.contains("assignee:@me"));
+        assert!(query.contains("sort:updated-desc"));
+    }
+
+    #[test]
+    fn test_build_issue_search_query_multiple_repos() {
+        let repos = vec![
+            "kantord/enwiro".to_string(),
+            "expressjs/express".to_string(),
+        ];
+        let query = build_issue_search_query(&repos);
+        assert!(query.contains("repo:kantord/enwiro"));
+        assert!(query.contains("repo:expressjs/express"));
+        assert!(query.contains("is:issue"));
+        assert!(query.contains("assignee:@me"));
+    }
+
+    #[test]
+    fn test_build_issue_search_query_includes_date_filter() {
+        let repos = vec!["kantord/enwiro".to_string()];
+        let query = build_issue_search_query(&repos);
+        assert!(
+            query.contains("updated:>"),
+            "Should contain date filter, got: {}",
+            query
+        );
+    }
+
+    #[test]
+    fn test_parse_issue_search_response() {
+        let json = r#"{
+            "data": {
+                "search": {
+                    "nodes": [
+                        {
+                            "number": 225,
+                            "title": "Discover GitHub Issues",
+                            "updatedAt": "2026-02-14T13:10:29Z",
+                            "repository": { "nameWithOwner": "kantord/enwiro" }
+                        },
+                        {
+                            "number": 100,
+                            "title": "Fix login bug",
+                            "updatedAt": "2026-02-13T10:00:00Z",
+                            "repository": { "nameWithOwner": "expressjs/express" }
+                        }
+                    ]
+                }
+            }
+        }"#;
+        let issues = parse_issue_search_response(json).unwrap();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].number, 225);
+        assert_eq!(issues[0].title, "Discover GitHub Issues");
+        assert!(matches!(&issues[0].kind, GithubItemKind::Issue));
+        assert_eq!(issues[0].repo, "enwiro");
+        assert_eq!(issues[1].number, 100);
+        assert_eq!(issues[1].repo, "express");
+        assert!(matches!(&issues[1].kind, GithubItemKind::Issue));
+    }
+
+    #[test]
+    fn test_parse_issue_search_response_empty_nodes() {
+        let json = r#"{"data": {"search": {"nodes": []}}}"#;
+        let issues = parse_issue_search_response(json).unwrap();
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_cook_creates_worktree_for_issue() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        std::fs::create_dir(&repo_path).unwrap();
+
+        // Create a repo with an initial commit on "main"
+        let repo = git2::Repository::init(&repo_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let commit_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+
+        // Create an issue branch from the initial commit
+        let commit = repo.find_commit(commit_oid).unwrap();
+        repo.branch("issue-225", &commit, false).unwrap();
+
+        let wt_dir = tmp.path().join("worktrees");
+        let path_hash = short_path_hash(&repo_path);
+        let wt_path = wt_dir
+            .join(format!("my-project-{}", path_hash))
+            .join("issue-225");
+
+        std::fs::create_dir_all(wt_path.parent().unwrap()).unwrap();
+
+        let branch = repo
+            .find_branch("issue-225", git2::BranchType::Local)
+            .unwrap();
+        let reference = branch.into_reference();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(&reference));
+        repo.worktree("enwiro-issue-225", &wt_path, Some(&opts))
             .unwrap();
 
         assert!(wt_path.exists(), "Worktree path should exist on disk");
