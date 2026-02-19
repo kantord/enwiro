@@ -1,5 +1,5 @@
 use anyhow::Context;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
@@ -67,6 +67,9 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
             .context("Could not write to output")?;
     }
 
+    // Collect environment names to filter out duplicate recipes
+    let env_names: HashSet<&str> = envs.iter().map(|e| e.name.as_str()).collect();
+
     // 2. Resolve runtime directory (test-injectable via cache_dir)
     let runtime_dir = match &context.cache_dir {
         Some(dir) => dir.clone(),
@@ -92,30 +95,35 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
     }
 
     // 4. Read from cache if available, otherwise synchronous fallback
-    match daemon::read_cached_recipes(&runtime_dir) {
+    let recipes = match daemon::read_cached_recipes(&runtime_dir) {
         Ok(Some(cached)) => {
             let _ = daemon::touch_heartbeat(&runtime_dir);
-            context
-                .writer
-                .write_all(cached.as_bytes())
-                .context("Could not write cached recipes to output")?;
+            cached
         }
         Ok(None) => {
             tracing::debug!("No cache available, falling back to synchronous recipe collection");
-            let recipes = daemon::collect_all_recipes(&context.cookbooks);
-            context
-                .writer
-                .write_all(recipes.as_bytes())
-                .context("Could not write recipes to output")?;
+            daemon::collect_all_recipes(&context.cookbooks)
         }
         Err(e) => {
             tracing::warn!(error = %e, "Could not read cache, falling back to sync");
-            let recipes = daemon::collect_all_recipes(&context.cookbooks);
-            context
-                .writer
-                .write_all(recipes.as_bytes())
-                .context("Could not write recipes to output")?;
+            daemon::collect_all_recipes(&context.cookbooks)
         }
+    };
+
+    // 5. Write recipes, excluding any that match an existing environment
+    for line in recipes.lines() {
+        let recipe_name = line
+            .split_once(": ")
+            .map(|(_, rest)| rest.split_once('\t').map_or(rest, |(name, _)| name));
+        if let Some(name) = recipe_name
+            && env_names.contains(name)
+        {
+            continue;
+        }
+        context
+            .writer
+            .write_all(format!("{}\n", line).as_bytes())
+            .context("Could not write recipe to output")?;
     }
 
     Ok(())
@@ -148,6 +156,60 @@ mod tests {
         assert!(output.contains("_: my-env"));
         assert!(output.contains("git: repo-a"));
         assert!(output.contains("git: repo-b"));
+    }
+
+    #[rstest]
+    fn test_list_all_excludes_recipes_that_match_existing_environments(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("repo-a");
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["repo-a", "repo-b"],
+            vec![],
+        ))];
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        assert!(output.contains("_: repo-a"), "Environment should be listed");
+        assert!(
+            !output.contains("git: repo-a"),
+            "Recipe matching an existing environment should be excluded"
+        );
+        assert!(
+            output.contains("git: repo-b"),
+            "Recipe without a matching environment should still be listed"
+        );
+    }
+
+    #[rstest]
+    fn test_list_all_excludes_recipes_with_descriptions_that_match_existing_environments(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("repo#42");
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new_with_descriptions(
+            "github",
+            vec![
+                ("repo#42", Some("Fix auth bug")),
+                ("repo#99", Some("Add feature")),
+            ],
+            vec![],
+        ))];
+
+        list_all(&mut context_object).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            !output.contains("github: repo#42"),
+            "Recipe with description matching an existing environment should be excluded"
+        );
+        assert!(
+            output.contains("github: repo#99\tAdd feature"),
+            "Non-matching recipe with description should still be listed"
+        );
     }
 
     #[rstest]
