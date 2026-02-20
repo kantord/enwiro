@@ -41,7 +41,9 @@ All crates except `enwiro` (core) and `enwiro-logging` (shared library) are **st
 - `enwiro-adapter-*` — integrates with a window manager
 - `enwiro-bridge-*` — integrates with a launcher/UI
 
-Plugins communicate via subprocess: core calls `<plugin> list-recipes` and `<plugin> cook <recipe>` and reads stdout. This means manual testing requires `cargo install --path <crate>` to make the binary visible to the core.
+Plugins communicate via subprocess: core calls `<plugin> list-recipes`, `<plugin> cook <recipe>`, and `<plugin> metadata` and reads stdout. This means manual testing requires `cargo install --path <crate>` to make the binary visible to the core.
+
+The cookbook plugin protocol is documented in `docs/creating-a-cookbook.md`. **When making changes that affect how cookbooks work** (subcommand behavior, output format, discovery, sorting, metadata, error handling), always update that document to keep it in sync.
 
 ### Crate Relationships
 
