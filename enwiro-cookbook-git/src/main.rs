@@ -37,7 +37,7 @@ fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyho
         .get(recipe_name)
         .with_context(|| format!("Could not find recipe {}", recipe_name))?;
     match recipe {
-        RecipeInfo::ExistingRepo(repo) => {
+        RecipeInfo::ExistingRepo { repo, .. } => {
             let workdir = repo
                 .workdir()
                 .context("Could not get working directory of repo")?;
@@ -47,6 +47,7 @@ fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyho
             repo_path,
             branch_name,
             is_remote,
+            ..
         } => {
             let repo = Repository::open(repo_path)
                 .context("Could not open repository for worktree creation")?;
@@ -117,12 +118,33 @@ fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyho
 }
 
 enum RecipeInfo {
-    ExistingRepo(Repository),
+    ExistingRepo {
+        repo: Repository,
+        commit_epoch: i64,
+    },
     Branch {
         repo_path: PathBuf,
         branch_name: String,
         is_remote: bool,
+        commit_epoch: i64,
     },
+}
+
+impl RecipeInfo {
+    fn commit_epoch(&self) -> i64 {
+        match self {
+            RecipeInfo::ExistingRepo { commit_epoch, .. }
+            | RecipeInfo::Branch { commit_epoch, .. } => *commit_epoch,
+        }
+    }
+}
+
+fn head_commit_epoch(repo: &Repository) -> i64 {
+    repo.head()
+        .ok()
+        .and_then(|r| r.peel_to_commit().ok())
+        .map(|c| c.time().seconds())
+        .unwrap_or(0)
 }
 
 #[derive(Parser)]
@@ -184,8 +206,14 @@ fn build_repository_hashmap(
                                 Ok(wt_repo) => {
                                     let compound_name = format!("{}@{}", repo_name, wt_name);
                                     tracing::debug!(name = %compound_name, "Found git worktree");
-                                    results
-                                        .insert(compound_name, RecipeInfo::ExistingRepo(wt_repo));
+                                    let epoch = head_commit_epoch(&wt_repo);
+                                    results.insert(
+                                        compound_name,
+                                        RecipeInfo::ExistingRepo {
+                                            repo: wt_repo,
+                                            commit_epoch: epoch,
+                                        },
+                                    );
                                 }
                                 Err(e) => {
                                     tracing::debug!(worktree = %wt_name, error = %e, "Failed to open worktree as repository");
@@ -245,6 +273,11 @@ fn build_repository_hashmap(
                                 if checked_out_branches.contains(&short_name) {
                                     continue;
                                 }
+                                let epoch = branch
+                                    .get()
+                                    .peel_to_commit()
+                                    .map(|c| c.time().seconds())
+                                    .unwrap_or(0);
                                 let compound_name = format!("{}@{}", repo_name, short_name);
                                 // Don't overwrite existing entries (worktrees or local branches)
                                 results.entry(compound_name).or_insert_with(|| {
@@ -252,6 +285,7 @@ fn build_repository_hashmap(
                                         repo_path: repo_abs_path.clone(),
                                         branch_name: name.to_string(),
                                         is_remote: branch_type == git2::BranchType::Remote,
+                                        commit_epoch: epoch,
                                     }
                                 });
                             }
@@ -263,7 +297,15 @@ fn build_repository_hashmap(
                     tracing::debug!(name = %repo_name, "Skipping bare repo (no working directory)");
                 } else {
                     tracing::debug!(name = %repo_name, path = %repo_path_string, "Found git repository");
-                    results.insert(repo_name, RecipeInfo::ExistingRepo(repo));
+                    // Main repo directories always sort first — once cooked
+                    // into an environment they become envs, not recipes.
+                    results.insert(
+                        repo_name,
+                        RecipeInfo::ExistingRepo {
+                            repo,
+                            commit_epoch: i64::MAX,
+                        },
+                    );
                 }
             } else {
                 tracing::debug!(path = %path.display(), "Skipping non-repo path");
@@ -277,7 +319,13 @@ fn build_repository_hashmap(
 fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
     let repos = build_repository_hashmap(config)?;
     tracing::debug!(count = repos.len(), "Listing recipes");
-    for key in repos.keys() {
+    let mut sorted: Vec<_> = repos.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.1.commit_epoch()
+            .cmp(&a.1.commit_epoch())
+            .then_with(|| a.0.cmp(b.0))
+    });
+    for (key, _) in sorted {
         println!("{}", key);
     }
     Ok(())
@@ -392,7 +440,7 @@ mod tests {
 
         let recipe = repos.get("my-project@feature-branch").unwrap();
         let cooked_path = match recipe {
-            RecipeInfo::ExistingRepo(repo) => repo.workdir().unwrap().to_path_buf(),
+            RecipeInfo::ExistingRepo { repo, .. } => repo.workdir().unwrap().to_path_buf(),
             _ => panic!("Expected ExistingRepo variant"),
         };
 
@@ -766,6 +814,219 @@ mod tests {
         assert_ne!(
             path_a, path_b,
             "Branches feature/foo and feature-foo should have different worktree paths"
+        );
+    }
+
+    /// Helper: create a repo with two branches at different known commit times.
+    /// Returns (repo, old_epoch, new_epoch).
+    fn create_repo_with_timed_branches(repo_path: &Path) -> (Repository, i64, i64) {
+        let repo = Repository::init(repo_path).expect("Failed to init repo");
+        let old_epoch: i64 = 1_000_000;
+        let new_epoch: i64 = 2_000_000;
+
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+
+        let old_oid = {
+            let old_time = git2::Time::new(old_epoch, 0);
+            let old_sig = git2::Signature::new("Test", "test@test.com", &old_time).unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let oid = repo
+                .commit(Some("HEAD"), &old_sig, &old_sig, "old commit", &tree, &[])
+                .unwrap();
+            let commit = repo.find_commit(oid).unwrap();
+            repo.branch("old-branch", &commit, false).unwrap();
+            oid
+        };
+
+        {
+            let new_time = git2::Time::new(new_epoch, 0);
+            let new_sig = git2::Signature::new("Test", "test@test.com", &new_time).unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let old_commit = repo.find_commit(old_oid).unwrap();
+            let oid = repo
+                .commit(
+                    Some("HEAD"),
+                    &new_sig,
+                    &new_sig,
+                    "new commit",
+                    &tree,
+                    &[&old_commit],
+                )
+                .unwrap();
+            let commit = repo.find_commit(oid).unwrap();
+            repo.branch("new-branch", &commit, false).unwrap();
+        }
+
+        (repo, old_epoch, new_epoch)
+    }
+
+    #[test]
+    fn test_branch_recipe_has_correct_commit_epoch() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let (_repo, old_epoch, new_epoch) = create_repo_with_timed_branches(&repo_path);
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+        let recipes = build_repository_hashmap(&config).unwrap();
+
+        let old_recipe = recipes
+            .get("my-project@old-branch")
+            .expect("old-branch not found");
+        let new_recipe = recipes
+            .get("my-project@new-branch")
+            .expect("new-branch not found");
+
+        assert_eq!(
+            old_recipe.commit_epoch(),
+            old_epoch,
+            "old-branch should have epoch {}",
+            old_epoch
+        );
+        assert_eq!(
+            new_recipe.commit_epoch(),
+            new_epoch,
+            "new-branch should have epoch {}",
+            new_epoch
+        );
+    }
+
+    #[test]
+    fn test_list_recipes_sorted_newest_first() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let (_repo, _old_epoch, _new_epoch) = create_repo_with_timed_branches(&repo_path);
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+        let recipes = build_repository_hashmap(&config).unwrap();
+
+        let mut recipe_list: Vec<_> = recipes.iter().collect();
+        recipe_list.sort_by(|a, b| {
+            b.1.commit_epoch()
+                .cmp(&a.1.commit_epoch())
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let names: Vec<&str> = recipe_list.iter().map(|(k, _)| k.as_str()).collect();
+
+        let new_idx = names
+            .iter()
+            .position(|n| *n == "my-project@new-branch")
+            .unwrap();
+        let old_idx = names
+            .iter()
+            .position(|n| *n == "my-project@old-branch")
+            .unwrap();
+
+        assert!(
+            new_idx < old_idx,
+            "new-branch should come before old-branch, got order: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_main_repo_always_sorts_before_branches() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let (repo, _old_epoch, _new_epoch) = create_repo_with_timed_branches(&repo_path);
+
+        // Create a branch with a commit far in the future, so it would
+        // sort before the main repo if we used HEAD commit time.
+        {
+            let future_time = git2::Time::new(9_999_999, 0);
+            let sig = git2::Signature::new("Test", "test@test.com", &future_time).unwrap();
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let head = repo.head().unwrap().peel_to_commit().unwrap();
+            let oid = repo
+                .commit(None, &sig, &sig, "future commit", &tree, &[&head])
+                .unwrap();
+            let commit = repo.find_commit(oid).unwrap();
+            repo.branch("future-branch", &commit, false).unwrap();
+        }
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+        let recipes = build_repository_hashmap(&config).unwrap();
+
+        let mut recipe_list: Vec<_> = recipes.iter().collect();
+        recipe_list.sort_by(|a, b| {
+            b.1.commit_epoch()
+                .cmp(&a.1.commit_epoch())
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let names: Vec<&str> = recipe_list.iter().map(|(k, _)| k.as_str()).collect();
+
+        let repo_idx = names.iter().position(|n| *n == "my-project").unwrap();
+        let future_idx = names
+            .iter()
+            .position(|n| *n == "my-project@future-branch")
+            .unwrap();
+
+        assert!(
+            repo_idx < future_idx,
+            "main repo should always come before any branch, got order: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_same_epoch_branches_sorted_alphabetically() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = Repository::init(&repo_path).expect("Failed to init repo");
+
+        // Create a single commit — all branches will point here (same epoch).
+        let tree_id = repo.index().unwrap().write_tree().unwrap();
+        {
+            let time = git2::Time::new(1_000_000, 0);
+            let sig = git2::Signature::new("Test", "test@test.com", &time).unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            let oid = repo
+                .commit(Some("HEAD"), &sig, &sig, "single commit", &tree, &[])
+                .unwrap();
+            let commit = repo.find_commit(oid).unwrap();
+            // Names chosen so alphabetical order differs from insertion order
+            repo.branch("zebra", &commit, false).unwrap();
+            repo.branch("alpha", &commit, false).unwrap();
+            repo.branch("middle", &commit, false).unwrap();
+        }
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+        let recipes = build_repository_hashmap(&config).unwrap();
+
+        let mut recipe_list: Vec<_> = recipes.iter().collect();
+        recipe_list.sort_by(|a, b| {
+            b.1.commit_epoch()
+                .cmp(&a.1.commit_epoch())
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let branch_names: Vec<&str> = recipe_list
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| k.contains('@'))
+            .collect();
+
+        // All branches share the same epoch, so tiebreaker should be alphabetical
+        let alpha_idx = branch_names
+            .iter()
+            .position(|n| *n == "my-project@alpha")
+            .unwrap();
+        let middle_idx = branch_names
+            .iter()
+            .position(|n| *n == "my-project@middle")
+            .unwrap();
+        let zebra_idx = branch_names
+            .iter()
+            .position(|n| *n == "my-project@zebra")
+            .unwrap();
+
+        assert!(
+            alpha_idx < middle_idx && middle_idx < zebra_idx,
+            "Same-epoch branches should sort alphabetically, got: {:?}",
+            branch_names
         );
     }
 }
