@@ -134,9 +134,11 @@ pub fn ensure_daemon_running(runtime_dir: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Collect recipe lines from all cookbooks, formatted as "cookbook_name: recipe_name\n".
+/// Collect recipes from all cookbooks as JSON lines.
 /// Errors in individual cookbooks are logged and skipped.
 pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
+    use crate::client::CachedRecipe;
+
     let mut sorted: Vec<_> = cookbooks.iter().collect();
     sorted.sort_by(|a, b| {
         a.priority()
@@ -148,14 +150,14 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
         match cookbook.list_recipes() {
             Ok(recipes) => {
                 for recipe in recipes {
-                    match &recipe.description {
-                        Some(desc) => output.push_str(&format!(
-                            "{}: {}\t{}\n",
-                            cookbook.name(),
-                            recipe.name,
-                            desc
-                        )),
-                        None => output.push_str(&format!("{}: {}\n", cookbook.name(), recipe.name)),
+                    let cached = CachedRecipe {
+                        cookbook: cookbook.name().to_string(),
+                        name: recipe.name,
+                        description: recipe.description,
+                    };
+                    if let Ok(json) = serde_json::to_string(&cached) {
+                        output.push_str(&json);
+                        output.push('\n');
                     }
                 }
             }
@@ -235,7 +237,16 @@ pub fn run_daemon() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::CachedRecipe;
     use crate::test_utils::test_utilities::{FailingCookbook, FakeCookbook};
+
+    fn parse_cached_lines(output: &str) -> Vec<CachedRecipe> {
+        output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
 
     #[test]
     fn test_collect_all_recipes_includes_description() {
@@ -246,17 +257,23 @@ mod tests {
                 vec![],
             ))];
         let output = collect_all_recipes(&cookbooks);
-        assert_eq!(output, "github: owner/repo#42\tFix auth bug\n");
+        let entries = parse_cached_lines(&output);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cookbook, "github");
+        assert_eq!(entries[0].name, "owner/repo#42");
+        assert_eq!(entries[0].description.as_deref(), Some("Fix auth bug"));
     }
 
     #[test]
-    fn test_collect_all_recipes_omits_tab_when_no_description() {
+    fn test_collect_all_recipes_omits_description_when_none() {
         let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(
             FakeCookbook::new_with_descriptions("git", vec![("repo-a", None)], vec![]),
         )];
         let output = collect_all_recipes(&cookbooks);
-        assert_eq!(output, "git: repo-a\n");
-        assert!(!output.contains('\t'));
+        let entries = parse_cached_lines(&output);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "repo-a");
+        assert!(entries[0].description.is_none());
     }
 
     #[test]
@@ -267,7 +284,10 @@ mod tests {
             vec![],
         ))];
         let output = collect_all_recipes(&cookbooks);
-        assert_eq!(output, "git: repo-a\ngit: repo-b\n");
+        let entries = parse_cached_lines(&output);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "repo-a");
+        assert_eq!(entries[1].name, "repo-b");
     }
 
     #[test]
@@ -277,8 +297,10 @@ mod tests {
             Box::new(FakeCookbook::new("npm", vec!["pkg-x"], vec![])),
         ];
         let output = collect_all_recipes(&cookbooks);
-        assert!(output.contains("git: repo-a\n"));
-        assert!(output.contains("npm: pkg-x\n"));
+        let entries = parse_cached_lines(&output);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"repo-a"));
+        assert!(names.contains(&"pkg-x"));
     }
 
     #[test]
@@ -358,7 +380,9 @@ mod tests {
     #[test]
     fn test_write_and_read_cache() {
         let dir = tempfile::tempdir().unwrap();
-        let content = "git: my-repo\nchezmoi: chezmoi\n";
+        let content = r#"{"cookbook":"git","name":"my-repo"}
+{"cookbook":"chezmoi","name":"chezmoi"}
+"#;
         write_cache_atomic(dir.path(), content).unwrap();
         let read = read_cached_recipes(dir.path()).unwrap();
         assert_eq!(read, Some(content.to_string()));
@@ -383,7 +407,7 @@ mod tests {
     #[test]
     fn test_read_cache_returns_none_when_stale() {
         let dir = tempfile::tempdir().unwrap();
-        write_cache_atomic(dir.path(), "git: old-repo\n").unwrap();
+        write_cache_atomic(dir.path(), r#"{"cookbook":"git","name":"old-repo"}"#).unwrap();
         // Backdate cache to 10 minutes ago (older than 40s + 30s staleness threshold)
         let past = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - std::time::Duration::from_secs(600),
@@ -399,10 +423,10 @@ mod tests {
     #[test]
     fn test_read_cache_returns_content_when_fresh() {
         let dir = tempfile::tempdir().unwrap();
-        write_cache_atomic(dir.path(), "git: fresh-repo\n").unwrap();
-        // Cache was just written — should be fresh
+        let content = "{\"cookbook\":\"git\",\"name\":\"fresh-repo\"}\n";
+        write_cache_atomic(dir.path(), content).unwrap();
         let read = read_cached_recipes(dir.path()).unwrap();
-        assert_eq!(read, Some("git: fresh-repo\n".to_string()));
+        assert_eq!(read, Some(content.to_string()));
     }
 
     #[test]
@@ -412,12 +436,14 @@ mod tests {
             Box::new(FakeCookbook::new("git", vec!["my-repo"], vec![]).with_priority(10)),
         ];
         let output = collect_all_recipes(&cookbooks);
-        let lines: Vec<&str> = output.lines().collect();
+        let entries = parse_cached_lines(&output);
         assert_eq!(
-            lines[0], "git: my-repo",
+            entries[0].cookbook, "git",
             "Higher priority (lower number) should come first"
         );
-        assert_eq!(lines[1], "github: repo#42");
+        assert_eq!(entries[0].name, "my-repo");
+        assert_eq!(entries[1].cookbook, "github");
+        assert_eq!(entries[1].name, "repo#42");
     }
 
     #[test]
@@ -427,12 +453,14 @@ mod tests {
             Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]).with_priority(20)),
         ];
         let output = collect_all_recipes(&cookbooks);
-        let lines: Vec<&str> = output.lines().collect();
+        let entries = parse_cached_lines(&output);
         assert_eq!(
-            lines[0], "git: repo-a",
+            entries[0].cookbook, "git",
             "Same priority should tie-break alphabetically"
         );
-        assert_eq!(lines[1], "npm: pkg-x");
+        assert_eq!(entries[0].name, "repo-a");
+        assert_eq!(entries[1].cookbook, "npm");
+        assert_eq!(entries[1].name, "pkg-x");
     }
 
     #[test]
@@ -444,6 +472,9 @@ mod tests {
             Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
         ];
         let output = collect_all_recipes(&cookbooks);
-        assert_eq!(output, "git: repo-a\n");
+        let entries = parse_cached_lines(&output);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cookbook, "git");
+        assert_eq!(entries[0].name, "repo-a");
     }
 }

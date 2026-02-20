@@ -1,5 +1,5 @@
 use anyhow::{Context, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 use crate::plugin::Plugin;
@@ -16,9 +16,18 @@ pub fn parse_metadata(json: &str) -> anyhow::Result<CookbookMetadata> {
     serde_json::from_str(json).context("Failed to parse cookbook metadata")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recipe {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedRecipe {
+    pub cookbook: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
@@ -30,6 +39,7 @@ impl Recipe {
         }
     }
 
+    #[cfg(test)]
     pub fn with_description(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -120,10 +130,8 @@ impl CookbookTrait for CookbookClient {
             String::from_utf8(output.stdout).context("Cookbook produced invalid UTF-8 output")?;
         Ok(stdout
             .lines()
-            .map(|line| match line.split_once('\t') {
-                Some((name, desc)) => Recipe::with_description(name, desc),
-                None => Recipe::new(line),
-            })
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str::<Recipe>(line).unwrap_or_else(|_| Recipe::new(line)))
             .collect())
     }
 

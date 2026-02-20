@@ -544,6 +544,8 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "enwiro-logging",
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]
@@ -571,6 +573,7 @@ dependencies = [
  "glob",
  "serde",
  "serde_derive",
+ "serde_json",
  "sha2",
  "tempfile",
  "tracing",

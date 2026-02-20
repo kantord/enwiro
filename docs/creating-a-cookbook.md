@@ -33,19 +33,19 @@ Your cookbook binary must handle three subcommands passed as the first argument:
 enwiro-cookbook-yourname list-recipes
 ```
 
-Print available recipes to stdout, one per line. Each line is a recipe name,
-optionally followed by a tab character and a description:
+Print available recipes to stdout as **JSON lines** (one JSON object per line).
+Each object must have a `name` field and may optionally include a `description`:
 
-```
-my-project
-another-project	A short description of this project
+```json
+{"name":"my-project"}
+{"name":"another-project","description":"A short description of this project"}
 ```
 
-- Recipe names must not contain tabs, newlines, or null bytes.
-- Descriptions are optional. If present, separate them from the name with a
-  single tab (`\t`).
-- If a description is present, sanitize it — replace any tabs, newlines, or
-  null bytes with spaces.
+- Each line must be a valid JSON object with at least a `"name"` field.
+- The `"description"` field is optional. Omit it or set it to `null` if there
+  is no description.
+- Recipe names must not contain newlines or null bytes.
+- Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
 
 **Sorting matters.** Enwiro preserves the order your cookbook returns. Print
@@ -136,10 +136,10 @@ set -euo pipefail
 
 case "${1:-}" in
     list-recipes)
-        # List project directories, sorted by modification time (newest first)
+        # List project directories as JSON lines, sorted by modification time (newest first)
         for dir in $(ls -t ~/projects/); do
             if [ -d "$HOME/projects/$dir" ]; then
-                echo "$dir"
+                printf '{"name":"%s"}\n' "$dir"
             fi
         done
         ;;
@@ -188,7 +188,7 @@ def list_recipes():
     for name in entries:
         full = os.path.join(WORKSPACE_DIR, name)
         if os.path.isdir(full):
-            print(name)
+            print(json.dumps({"name": name}))
 
 def cook(recipe_name):
     path = os.path.join(WORKSPACE_DIR, recipe_name)

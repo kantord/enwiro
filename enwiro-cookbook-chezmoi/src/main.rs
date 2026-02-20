@@ -20,7 +20,7 @@ pub struct CookArgs {
 }
 
 fn list_recipes() {
-    println!("{}", RECIPE_NAME);
+    println!(r#"{{"name":"{}"}}"#, RECIPE_NAME);
 }
 
 fn cook(args: CookArgs) -> anyhow::Result<()> {

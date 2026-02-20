@@ -1,8 +1,17 @@
 use anyhow::Context;
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
+
+#[derive(Deserialize)]
+struct CacheEntry {
+    cookbook: String,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
 fn enwiro_bin() -> anyhow::Result<PathBuf> {
     if let Ok(path) = env::var("ENWIRO_BIN") {
         tracing::debug!(path = %path, "Using ENWIRO_BIN env var");
@@ -15,7 +24,7 @@ fn enwiro_bin() -> anyhow::Result<PathBuf> {
     Ok(bin)
 }
 
-/// Format raw `enwiro list-all` output into rofi script-mode entries.
+/// Format raw `enwiro list-all` JSON lines output into rofi script-mode entries.
 /// Deduplicates by name and formats as tab-separated columns with rofi metadata.
 fn format_entries(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -25,15 +34,12 @@ fn format_entries(input: &str) -> Vec<String> {
         if line.is_empty() {
             continue;
         }
-        if let Some((source, rest)) = line.split_once(": ") {
-            let (name, description) = match rest.split_once('\t') {
-                Some((n, d)) => (n, d),
-                None => (rest, ""),
-            };
-            if seen.insert(name.to_string()) {
+        if let Ok(entry) = serde_json::from_str::<CacheEntry>(line) {
+            let description = entry.description.as_deref().unwrap_or("");
+            if seen.insert(entry.name.clone()) {
                 entries.push(format!(
                     "{}\t{}\t{}\0info\x1f{}",
-                    source, name, description, source
+                    entry.cookbook, entry.name, description, entry.cookbook
                 ));
             }
         }
@@ -99,7 +105,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_columns() {
-        let input = "git: my-project\n";
+        let input = r#"{"cookbook":"git","name":"my-project"}"#;
         let entries = format_entries(input);
         assert_eq!(entries.len(), 1);
         assert!(
@@ -111,7 +117,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_rofi_metadata() {
-        let input = "git: my-project\n";
+        let input = r#"{"cookbook":"git","name":"my-project"}"#;
         let entries = format_entries(input);
         assert!(
             entries[0].contains("\0info\x1fgit"),
@@ -122,7 +128,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_deduplicates_by_name() {
-        let input = "_: my-project\ngit: my-project\n";
+        let input = "{\"cookbook\":\"_\",\"name\":\"my-project\"}\n{\"cookbook\":\"git\",\"name\":\"my-project\"}\n";
         let entries = format_entries(input);
         assert_eq!(
             entries.len(),
@@ -134,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_keeps_first_source_on_duplicate() {
-        let input = "_: my-project\ngit: my-project\n";
+        let input = "{\"cookbook\":\"_\",\"name\":\"my-project\"}\n{\"cookbook\":\"git\",\"name\":\"my-project\"}\n";
         let entries = format_entries(input);
         assert!(
             entries[0].starts_with("_\tmy-project"),
@@ -145,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_skips_empty_lines() {
-        let input = "\n  \ngit: my-project\n\n";
+        let input = "\n  \n{\"cookbook\":\"git\",\"name\":\"my-project\"}\n\n";
         let entries = format_entries(input);
         assert_eq!(entries.len(), 1);
     }
@@ -170,7 +176,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_multiple_recipes() {
-        let input = "git: project-a\nchezmoi: chezmoi\ngit: project-b\n";
+        let input = "{\"cookbook\":\"git\",\"name\":\"project-a\"}\n{\"cookbook\":\"chezmoi\",\"name\":\"chezmoi\"}\n{\"cookbook\":\"git\",\"name\":\"project-b\"}\n";
         let entries = format_entries(input);
         assert_eq!(entries.len(), 3);
         assert!(entries[0].starts_with("git\tproject-a\t"));
@@ -180,7 +186,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_with_description() {
-        let input = "github: owner/repo#42\tFix auth bug\n";
+        let input = r#"{"cookbook":"github","name":"owner/repo#42","description":"Fix auth bug"}"#;
         let entries = format_entries(input);
         assert_eq!(entries.len(), 1);
         assert!(
@@ -192,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_without_description_has_empty_column() {
-        let input = "git: my-project\n";
+        let input = r#"{"cookbook":"git","name":"my-project"}"#;
         let entries = format_entries(input);
         assert!(
             entries[0].starts_with("git\tmy-project\t\0"),
@@ -203,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_format_entries_deduplicates_by_name_ignoring_description() {
-        let input = "_: foo\ngit: foo\tsome description\n";
+        let input = "{\"cookbook\":\"_\",\"name\":\"foo\"}\n{\"cookbook\":\"git\",\"name\":\"foo\",\"description\":\"some description\"}\n";
         let entries = format_entries(input);
         assert_eq!(
             entries.len(),

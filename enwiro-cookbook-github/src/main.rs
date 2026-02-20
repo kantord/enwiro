@@ -325,12 +325,16 @@ fn list_recipes() -> anyhow::Result<()> {
     sort_items_by_date(&mut items);
 
     for item in items {
-        let safe_title = item.title.replace(['\t', '\n', '\0', '\x1f'], " ");
+        let safe_title = item.title.replace(['\n', '\0', '\x1f'], " ");
         let prefix = match &item.kind {
             GithubItemKind::PullRequest { .. } => "[PR]",
             GithubItemKind::Issue => "[issue]",
         };
-        println!("{}#{}\t{} {}", item.repo, item.number, prefix, safe_title);
+        let recipe = serde_json::json!({
+            "name": format!("{}#{}", item.repo, item.number),
+            "description": format!("{} {}", prefix, safe_title),
+        });
+        println!("{}", serde_json::to_string(&recipe).unwrap());
     }
     Ok(())
 }
