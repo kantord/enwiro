@@ -326,7 +326,10 @@ fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
             .then_with(|| a.0.cmp(b.0))
     });
     for (key, _) in sorted {
-        println!("{}", key);
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"name": key})).unwrap()
+        );
     }
     Ok(())
 }

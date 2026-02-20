@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 
 use crate::{
-    client::{CookbookClient, CookbookTrait},
+    client::{CachedRecipe, CookbookClient, CookbookTrait},
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
     config::ConfigurationValues,
     daemon,
@@ -115,16 +115,14 @@ impl<W: Write> CommandContext<W> {
             None => daemon::runtime_dir().ok()?,
         };
         let cached = daemon::read_cached_recipes(&runtime_dir).ok()??;
-        // Cache format: "cookbook: recipe\tdescription\n" (see daemon::collect_all_recipes)
         for line in cached.lines() {
-            if let Some((cookbook_name, rest)) = line.split_once(": ") {
-                let (name, description) = match rest.split_once('\t') {
-                    Some((n, d)) => (n, Some(d.to_string())),
-                    None => (rest, None),
-                };
-                if name == recipe_name {
-                    return Some(Some((cookbook_name.to_string(), description)));
-                }
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line)
+                && entry.name == recipe_name
+            {
+                return Some(Some((entry.cookbook, entry.description)));
             }
         }
         Some(None) // cache exists but recipe not found
@@ -336,7 +334,11 @@ mod tests {
         // Write a cache that knows about the recipe
         let cache_dir = context_object.cache_dir.as_ref().unwrap();
         fs::create_dir_all(cache_dir).unwrap();
-        fs::write(cache_dir.join("recipes.cache"), "git: my-project\n").unwrap();
+        fs::write(
+            cache_dir.join("recipes.cache"),
+            "{\"cookbook\":\"git\",\"name\":\"my-project\"}\n",
+        )
+        .unwrap();
 
         // FailingCookbook simulates a slow cookbook (like GitHub) that would
         // block or error if list_recipes() is called. The working cookbook is second.
@@ -369,7 +371,11 @@ mod tests {
         // Write a fresh cache that does NOT contain the requested recipe
         let cache_dir = context_object.cache_dir.as_ref().unwrap();
         fs::create_dir_all(cache_dir).unwrap();
-        fs::write(cache_dir.join("recipes.cache"), "git: other-project\n").unwrap();
+        fs::write(
+            cache_dir.join("recipes.cache"),
+            "{\"cookbook\":\"git\",\"name\":\"other-project\"}\n",
+        )
+        .unwrap();
 
         // The recipe isn't in the cache, but the cookbook has it.
         // cook_environment should fall through to the slow path and find it.
@@ -392,12 +398,12 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
-        // Cache entry has a tab-separated description
+        // Cache entry has a description
         let cache_dir = context_object.cache_dir.as_ref().unwrap();
         fs::create_dir_all(cache_dir).unwrap();
         fs::write(
             cache_dir.join("recipes.cache"),
-            "github: owner/repo#42\tFix auth bug\n",
+            "{\"cookbook\":\"github\",\"name\":\"owner/repo#42\",\"description\":\"Fix auth bug\"}\n",
         )
         .unwrap();
 
@@ -423,7 +429,11 @@ mod tests {
         // Cache says recipe belongs to "npm" cookbook, but only "git" is installed
         let cache_dir = context_object.cache_dir.as_ref().unwrap();
         fs::create_dir_all(cache_dir).unwrap();
-        fs::write(cache_dir.join("recipes.cache"), "npm: my-project\n").unwrap();
+        fs::write(
+            cache_dir.join("recipes.cache"),
+            "{\"cookbook\":\"npm\",\"name\":\"my-project\"}\n",
+        )
+        .unwrap();
 
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
