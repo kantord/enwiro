@@ -4,6 +4,8 @@ install-dev:
     set -euo pipefail
     echo "Building workspace in release mode..."
     cargo build --workspace --release
+    # Kill the background daemon so the binary isn't held open
+    pkill -x enwiro && sleep 0.2 || true
     installed=$(cargo install --list | grep -E '^enwiro' | awk '{print $1}')
     for crate in $installed; do
         [ "$crate" = "enwiro-logging" ] && continue
@@ -12,8 +14,10 @@ install-dev:
             echo "WARNING: $crate binary not found, skipping"
             continue
         fi
+        dest="${CARGO_HOME:-$HOME/.cargo}/bin/$crate"
         echo "Installing $crate..."
-        cp "$bin" "${CARGO_HOME:-$HOME/.cargo}/bin/"
+        rm -f "$dest"
+        cp "$bin" "$dest"
     done
 
 # Install all currently-installed enwiro binaries from crates.io
