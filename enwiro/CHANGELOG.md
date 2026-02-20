@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.18](https://github.com/kantord/enwiro/compare/enwiro-v0.3.17...enwiro-v0.3.18) - 2026-02-20
+
+### Added
+
+- do not show recipes that have already been cooked
+- add metadata
+- add a metadata field
+- use fixed sorting for cookbooks
+
 ## [0.3.17](https://github.com/kantord/enwiro/compare/enwiro-v0.3.16...enwiro-v0.3.17) - 2026-02-16
 
 ### Added
