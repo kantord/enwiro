@@ -116,6 +116,13 @@ pub mod test_utilities {
             self.priority = priority;
             self
         }
+
+        pub fn with_sort_orders(mut self, sort_orders: Vec<u32>) -> Self {
+            for (recipe, order) in self.recipes.iter_mut().zip(sort_orders) {
+                recipe.sort_order = order;
+            }
+            self
+        }
     }
 
     pub struct FailingCookbook {

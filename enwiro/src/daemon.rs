@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 
-use crate::client::{CookbookClient, CookbookTrait};
+use crate::client::{CachedRecipe, CookbookClient, CookbookTrait};
 use crate::plugin::{PluginKind, get_plugins};
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
@@ -121,31 +121,31 @@ pub fn ensure_daemon_running(runtime_dir: &Path) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-/// Collect recipes from all cookbooks as JSON lines.
+/// A cached recipe with its cookbook's priority, used for global sorting.
+struct SortableCachedRecipe {
+    cached: CachedRecipe,
+    priority: u32,
+}
+
+/// Collect recipes from all cookbooks as JSON lines, sorted globally
+/// by (sort_order, cookbook priority, name).
 /// Errors in individual cookbooks are logged and skipped.
 pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
-    use crate::client::CachedRecipe;
+    let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
 
-    let mut sorted: Vec<_> = cookbooks.iter().collect();
-    sorted.sort_by(|a, b| {
-        a.priority()
-            .cmp(&b.priority())
-            .then_with(|| a.name().cmp(b.name()))
-    });
-    let mut output = String::new();
-    for cookbook in sorted {
+    for cookbook in cookbooks {
         match cookbook.list_recipes() {
             Ok(recipes) => {
                 for recipe in recipes {
-                    let cached = CachedRecipe {
-                        cookbook: cookbook.name().to_string(),
-                        name: recipe.name,
-                        description: recipe.description,
-                    };
-                    if let Ok(json) = serde_json::to_string(&cached) {
-                        output.push_str(&json);
-                        output.push('\n');
-                    }
+                    all_recipes.push(SortableCachedRecipe {
+                        cached: CachedRecipe {
+                            cookbook: cookbook.name().to_string(),
+                            name: recipe.name,
+                            description: recipe.description,
+                            sort_order: recipe.sort_order,
+                        },
+                        priority: cookbook.priority(),
+                    });
                 }
             }
             Err(e) => {
@@ -155,6 +155,22 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
                     "Skipping cookbook due to error"
                 );
             }
+        }
+    }
+
+    all_recipes.sort_by(|a, b| {
+        a.cached
+            .sort_order
+            .cmp(&b.cached.sort_order)
+            .then_with(|| a.priority.cmp(&b.priority))
+            .then_with(|| a.cached.name.cmp(&b.cached.name))
+    });
+
+    let mut output = String::new();
+    for item in all_recipes {
+        if let Ok(json) = serde_json::to_string(&item.cached) {
+            output.push_str(&json);
+            output.push('\n');
         }
     }
     output
@@ -436,13 +452,14 @@ mod tests {
         ];
         let output = collect_all_recipes(&cookbooks);
         let entries = parse_cached_lines(&output);
+        // Global sort: (sort_order=0, priority=20, name) — alphabetical by recipe name
         assert_eq!(
-            entries[0].cookbook, "git",
-            "Same priority should tie-break alphabetically"
+            entries[0].name, "pkg-x",
+            "Same sort_order and priority should tie-break by recipe name"
         );
-        assert_eq!(entries[0].name, "repo-a");
-        assert_eq!(entries[1].cookbook, "npm");
-        assert_eq!(entries[1].name, "pkg-x");
+        assert_eq!(entries[0].cookbook, "npm");
+        assert_eq!(entries[1].name, "repo-a");
+        assert_eq!(entries[1].cookbook, "git");
     }
 
     #[test]
@@ -458,5 +475,60 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].cookbook, "git");
         assert_eq!(entries[0].name, "repo-a");
+    }
+
+    #[test]
+    fn test_collect_all_recipes_sorts_globally_by_sort_order() {
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
+            Box::new(
+                FakeCookbook::new("git", vec!["git-repo-a", "git-repo-b"], vec![])
+                    .with_priority(10)
+                    .with_sort_orders(vec![0, 50]),
+            ),
+            Box::new(
+                FakeCookbook::new("github", vec!["gh-issue-1", "gh-issue-2"], vec![])
+                    .with_priority(30)
+                    .with_sort_orders(vec![0, 50]),
+            ),
+        ];
+        let output = collect_all_recipes(&cookbooks);
+        let entries = parse_cached_lines(&output);
+        assert_eq!(entries.len(), 4);
+        // sort_order=0 items first (git before github due to priority tiebreak)
+        assert_eq!(entries[0].name, "git-repo-a");
+        assert_eq!(entries[0].sort_order, 0);
+        assert_eq!(entries[1].name, "gh-issue-1");
+        assert_eq!(entries[1].sort_order, 0);
+        // sort_order=50 items next
+        assert_eq!(entries[2].name, "git-repo-b");
+        assert_eq!(entries[2].sort_order, 50);
+        assert_eq!(entries[3].name, "gh-issue-2");
+        assert_eq!(entries[3].sort_order, 50);
+    }
+
+    #[test]
+    fn test_collect_all_recipes_interleaves_cookbooks_by_sort_order() {
+        // GitHub recipe with sort_order=0 should appear before git recipe with sort_order=50,
+        // even though git has higher priority
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
+            Box::new(
+                FakeCookbook::new("git", vec!["low-priority-branch"], vec![])
+                    .with_priority(10)
+                    .with_sort_orders(vec![80]),
+            ),
+            Box::new(
+                FakeCookbook::new("github", vec!["hot-issue"], vec![])
+                    .with_priority(30)
+                    .with_sort_orders(vec![0]),
+            ),
+        ];
+        let output = collect_all_recipes(&cookbooks);
+        let entries = parse_cached_lines(&output);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].name, "hot-issue",
+            "Lower sort_order should come first regardless of cookbook priority"
+        );
+        assert_eq!(entries[1].name, "low-priority-branch");
     }
 }

@@ -147,6 +147,22 @@ fn head_commit_epoch(repo: &Repository) -> i64 {
         .unwrap_or(0)
 }
 
+/// Return the most recent modification time among local git metadata files.
+/// Checks `.git/index` (updated by add, checkout, merge, commit) and
+/// `.git/HEAD` (updated by init, branch switch).  This reflects actual
+/// user activity rather than upstream commit timestamps.
+fn repo_activity_epoch(repo: &Repository) -> i64 {
+    let git_dir = repo.path();
+    [git_dir.join("index"), git_dir.join("HEAD")]
+        .iter()
+        .filter_map(|p| p.metadata().ok())
+        .filter_map(|m| m.modified().ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .max()
+        .unwrap_or(0)
+}
+
 #[derive(Parser)]
 enum EnwiroCookbookGit {
     ListRecipes(ListRecipesArgs),
@@ -297,13 +313,14 @@ fn build_repository_hashmap(
                     tracing::debug!(name = %repo_name, "Skipping bare repo (no working directory)");
                 } else {
                     tracing::debug!(name = %repo_name, path = %repo_path_string, "Found git repository");
-                    // Main repo directories always sort first — once cooked
-                    // into an environment they become envs, not recipes.
+                    // Use .git/index mtime so repos rank by local activity
+                    // rather than upstream commit timestamps.
+                    let activity_epoch = repo_activity_epoch(&repo);
                     results.insert(
                         repo_name,
                         RecipeInfo::ExistingRepo {
                             repo,
-                            commit_epoch: i64::MAX,
+                            commit_epoch: activity_epoch,
                         },
                     );
                 }
@@ -316,19 +333,41 @@ fn build_repository_hashmap(
     Ok(results)
 }
 
-fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
-    let repos = build_repository_hashmap(config)?;
-    tracing::debug!(count = repos.len(), "Listing recipes");
+fn compute_sort_order(index: usize, total: usize) -> u32 {
+    if total <= 1 {
+        0
+    } else {
+        ((index * 100) / (total - 1)) as u32
+    }
+}
+
+/// Build the sorted recipe list with sort_order values.
+/// Returns (name, sort_order) pairs in output order.
+fn build_sorted_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<(&String, u32)> {
     let mut sorted: Vec<_> = repos.iter().collect();
     sorted.sort_by(|a, b| {
         b.1.commit_epoch()
             .cmp(&a.1.commit_epoch())
             .then_with(|| a.0.cmp(b.0))
     });
-    for (key, _) in sorted {
+    let total = sorted.len();
+
+    sorted
+        .into_iter()
+        .enumerate()
+        .map(|(i, (key, _))| (key, compute_sort_order(i, total)))
+        .collect()
+}
+
+fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
+    let repos = build_repository_hashmap(config)?;
+    tracing::debug!(count = repos.len(), "Listing recipes");
+
+    for (key, sort_order) in build_sorted_recipes(&repos) {
         println!(
             "{}",
-            serde_json::to_string(&serde_json::json!({"name": key})).unwrap()
+            serde_json::to_string(&serde_json::json!({"name": key, "sort_order": sort_order}))
+                .unwrap()
         );
     }
     Ok(())
@@ -929,27 +968,15 @@ mod tests {
     }
 
     #[test]
-    fn test_main_repo_always_sorts_before_branches() {
+    fn test_recently_active_repo_sorts_before_old_branches() {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
         fs::create_dir(&repo_path).unwrap();
-        let (repo, _old_epoch, _new_epoch) = create_repo_with_timed_branches(&repo_path);
+        let (_repo, _old_epoch, _new_epoch) = create_repo_with_timed_branches(&repo_path);
 
-        // Create a branch with a commit far in the future, so it would
-        // sort before the main repo if we used HEAD commit time.
-        {
-            let future_time = git2::Time::new(9_999_999, 0);
-            let sig = git2::Signature::new("Test", "test@test.com", &future_time).unwrap();
-            let tree_id = repo.index().unwrap().write_tree().unwrap();
-            let tree = repo.find_tree(tree_id).unwrap();
-            let head = repo.head().unwrap().peel_to_commit().unwrap();
-            let oid = repo
-                .commit(None, &sig, &sig, "future commit", &tree, &[&head])
-                .unwrap();
-            let commit = repo.find_commit(oid).unwrap();
-            repo.branch("future-branch", &commit, false).unwrap();
-        }
-
+        // Branches have commit epochs in the distant past (1_000_000 and 2_000_000)
+        // while the main repo's .git/index mtime is "now" (wall-clock time).
+        // The main repo should sort before all old branches.
         let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
         let recipes = build_repository_hashmap(&config).unwrap();
 
@@ -962,14 +989,12 @@ mod tests {
         let names: Vec<&str> = recipe_list.iter().map(|(k, _)| k.as_str()).collect();
 
         let repo_idx = names.iter().position(|n| *n == "my-project").unwrap();
-        let future_idx = names
-            .iter()
-            .position(|n| *n == "my-project@future-branch")
-            .unwrap();
 
-        assert!(
-            repo_idx < future_idx,
-            "main repo should always come before any branch, got order: {:?}",
+        // The main repo entry uses .git/index mtime (current wall-clock time),
+        // which is much more recent than any test commit epoch, so it sorts first.
+        assert_eq!(
+            repo_idx, 0,
+            "Recently active repo should sort first, got order: {:?}",
             names
         );
     }
@@ -1030,6 +1055,61 @@ mod tests {
             alpha_idx < middle_idx && middle_idx < zebra_idx,
             "Same-epoch branches should sort alphabetically, got: {:?}",
             branch_names
+        );
+    }
+
+    #[test]
+    fn test_compute_sort_order_single_item() {
+        assert_eq!(compute_sort_order(0, 1), 0);
+    }
+
+    #[test]
+    fn test_compute_sort_order_two_items() {
+        assert_eq!(compute_sort_order(0, 2), 0);
+        assert_eq!(compute_sort_order(1, 2), 100);
+    }
+
+    #[test]
+    fn test_compute_sort_order_three_items() {
+        assert_eq!(compute_sort_order(0, 3), 0);
+        assert_eq!(compute_sort_order(1, 3), 50);
+        assert_eq!(compute_sort_order(2, 3), 100);
+    }
+
+    #[test]
+    fn test_compute_sort_order_five_items() {
+        assert_eq!(compute_sort_order(0, 5), 0);
+        assert_eq!(compute_sort_order(1, 5), 25);
+        assert_eq!(compute_sort_order(2, 5), 50);
+        assert_eq!(compute_sort_order(3, 5), 75);
+        assert_eq!(compute_sort_order(4, 5), 100);
+    }
+
+    #[test]
+    fn test_main_repo_without_branches_keeps_position_sort_order() {
+        let tmp = TempDir::new().unwrap();
+        // Create two repos so total > 1 and sort_order isn't trivially 0.
+        // Use Repository::init() without commits so there are no branches.
+        let repo_a_path = tmp.path().join("aaa-project");
+        let repo_b_path = tmp.path().join("zzz-project");
+        fs::create_dir(&repo_a_path).unwrap();
+        fs::create_dir(&repo_b_path).unwrap();
+        Repository::init(&repo_a_path).unwrap();
+        // Sleep briefly so the two repos get different .git/HEAD mtimes
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Repository::init(&repo_b_path).unwrap();
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+        let repos = build_repository_hashmap(&config).unwrap();
+        let sorted = build_sorted_recipes(&repos);
+
+        // Both repos have no branches, so they keep position-based
+        // sort_order from the linear mapping.
+        assert_eq!(sorted.len(), 2);
+        assert_eq!(sorted[0].1, 0, "First repo gets sort_order=0 from position");
+        assert_eq!(
+            sorted[1].1, 100,
+            "Second repo gets sort_order=100 from position"
         );
     }
 }
