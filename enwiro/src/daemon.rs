@@ -53,37 +53,24 @@ pub fn read_cached_recipes(runtime_dir: &Path) -> anyhow::Result<Option<String>>
     Ok(Some(content))
 }
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(10800); // 3 hours
+const USER_IDLE_THRESHOLD: Duration = Duration::from_secs(5400); // 90 minutes
 
-/// Touch the heartbeat file to indicate the daemon's output is being consumed.
-pub fn touch_heartbeat(runtime_dir: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(runtime_dir).context("Could not create runtime directory")?;
-    let heartbeat_path = runtime_dir.join("heartbeat");
-    fs::write(&heartbeat_path, "").context("Could not touch heartbeat file")?;
-    Ok(())
-}
-
-/// Check if the daemon has been idle for longer than the given timeout.
-/// Returns true if the daemon should exit due to inactivity.
-fn check_idle_with_timeout(runtime_dir: &Path, timeout: Duration) -> bool {
-    let heartbeat_path = runtime_dir.join("heartbeat");
-    match fs::metadata(&heartbeat_path) {
-        Ok(metadata) => match metadata.modified() {
-            Ok(modified) => {
-                let elapsed = SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or(Duration::ZERO);
-                elapsed > timeout
-            }
-            Err(_) => false,
-        },
-        Err(_) => false,
+/// Returns true if the user has been idle longer than the threshold.
+/// When idle time is unavailable (e.g. Wayland without support), returns false
+/// so the daemon keeps running rather than dying unexpectedly.
+fn check_idle_with_timeout(get_idle: impl Fn() -> Option<Duration>, threshold: Duration) -> bool {
+    match get_idle() {
+        Some(idle) => idle > threshold,
+        None => false,
     }
 }
 
-/// Check if the daemon has been idle (no heartbeat touch) for longer than 3 hours.
-pub fn check_idle(runtime_dir: &Path) -> bool {
-    check_idle_with_timeout(runtime_dir, IDLE_TIMEOUT)
+/// Returns true if the user has been idle longer than 90 minutes.
+pub fn check_idle() -> bool {
+    check_idle_with_timeout(
+        || system_idle_time::get_idle_time().ok(),
+        USER_IDLE_THRESHOLD,
+    )
 }
 
 /// Write the current process PID to the PID file.
@@ -193,9 +180,6 @@ pub fn run_daemon() -> anyhow::Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
 
-    // Initial heartbeat (so we don't immediately exit)
-    touch_heartbeat(&dir)?;
-
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
@@ -223,9 +207,8 @@ pub fn run_daemon() -> anyhow::Result<()> {
             elapsed += Duration::from_secs(1);
         }
 
-        // Check idle timeout
-        if check_idle(&dir) {
-            tracing::info!("Idle timeout reached, exiting");
+        if check_idle() {
+            tracing::info!("User idle threshold reached, exiting");
             remove_pid_file(&dir);
             return Ok(());
         }
@@ -329,30 +312,29 @@ mod tests {
     }
 
     #[test]
-    fn test_fresh_heartbeat_is_not_idle() {
-        let dir = tempfile::tempdir().unwrap();
-        touch_heartbeat(dir.path()).unwrap();
-        assert!(!check_idle(dir.path()));
+    fn test_user_is_idle_when_idle_time_exceeds_threshold() {
+        let threshold = Duration::from_secs(5400);
+        let idle_time = Duration::from_secs(6000);
+        assert!(check_idle_with_timeout(|| Some(idle_time), threshold));
     }
 
     #[test]
-    fn test_no_heartbeat_file_is_not_idle() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!check_idle(dir.path()));
+    fn test_user_is_not_idle_when_idle_time_below_threshold() {
+        let threshold = Duration::from_secs(5400);
+        let idle_time = Duration::from_secs(60);
+        assert!(!check_idle_with_timeout(|| Some(idle_time), threshold));
     }
 
     #[test]
-    fn test_old_heartbeat_is_idle() {
-        let dir = tempfile::tempdir().unwrap();
-        touch_heartbeat(dir.path()).unwrap();
-        let past = filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(14400),
-        );
-        filetime::set_file_mtime(dir.path().join("heartbeat"), past).unwrap();
-        assert!(check_idle_with_timeout(
-            dir.path(),
-            std::time::Duration::from_secs(10800)
-        ));
+    fn test_user_is_not_idle_when_idle_time_equals_threshold() {
+        let threshold = Duration::from_secs(5400);
+        assert!(!check_idle_with_timeout(|| Some(threshold), threshold));
+    }
+
+    #[test]
+    fn test_user_is_not_idle_when_idle_time_unavailable() {
+        let threshold = Duration::from_secs(5400);
+        assert!(!check_idle_with_timeout(|| None, threshold));
     }
 
     #[test]

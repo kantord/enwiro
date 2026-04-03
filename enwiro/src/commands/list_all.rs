@@ -96,10 +96,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
 
     // 4. Read from cache if available, otherwise synchronous fallback
     let recipes = match daemon::read_cached_recipes(&runtime_dir) {
-        Ok(Some(cached)) => {
-            let _ = daemon::touch_heartbeat(&runtime_dir);
-            cached
-        }
+        Ok(Some(cached)) => cached,
         Ok(None) => {
             tracing::debug!("No cache available, falling back to synchronous recipe collection");
             daemon::collect_all_recipes(&context.cookbooks)
