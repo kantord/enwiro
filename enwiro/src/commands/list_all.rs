@@ -14,9 +14,13 @@ use crate::usage_stats::EnvStats;
     version,
     about = "list all existing environments as well as recipes to create environments"
 )]
-pub struct ListAllArgs {}
+pub struct ListAllArgs {
+    /// Output in JSON lines format
+    #[arg(long)]
+    pub json: bool,
+}
 
-pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()> {
+pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow::Result<()> {
     // 1. Always list environments (instant — local directory listing), sorted by frecency
     let mut envs: Vec<_> = context.get_all_environments()?.into_values().collect();
 
@@ -55,13 +59,25 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
             .then_with(|| a.name.cmp(&b.name))
     });
     for env in &envs {
-        let cached = CachedRecipe {
-            cookbook: "_".to_string(),
-            name: env.name.clone(),
-            description: meta_map.get(&env.name).and_then(|s| s.description.clone()),
-        };
-        let line = serde_json::to_string(&cached).unwrap();
-        writeln!(context.writer, "{}", line).context("Could not write to output")?;
+        if json {
+            let cached = CachedRecipe {
+                cookbook: "_".to_string(),
+                name: env.name.clone(),
+                description: meta_map.get(&env.name).and_then(|s| s.description.clone()),
+                sort_order: 0,
+            };
+            let line = serde_json::to_string(&cached).unwrap();
+            writeln!(context.writer, "{}", line).context("Could not write to output")?;
+        } else {
+            let line = match meta_map
+                .get(&env.name)
+                .and_then(|s| s.description.as_deref())
+            {
+                Some(desc) => format!("_: {}\t{}", env.name, desc),
+                None => format!("_: {}", env.name),
+            };
+            writeln!(context.writer, "{}", line).context("Could not write to output")?;
+        }
     }
 
     // Collect environment names to filter out duplicate recipes
@@ -109,12 +125,21 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()>
         if line.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line)
-            && env_names.contains(entry.name.as_str())
-        {
-            continue;
+        if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line) {
+            if env_names.contains(entry.name.as_str()) {
+                continue;
+            }
+            if json {
+                writeln!(context.writer, "{}", line).context("Could not write recipe to output")?;
+            } else {
+                let formatted = match &entry.description {
+                    Some(desc) => format!("{}: {}\t{}", entry.cookbook, entry.name, desc),
+                    None => format!("{}: {}", entry.cookbook, entry.name),
+                };
+                writeln!(context.writer, "{}", formatted)
+                    .context("Could not write recipe to output")?;
+            }
         }
-        writeln!(context.writer, "{}", line).context("Could not write recipe to output")?;
     }
 
     Ok(())
@@ -129,7 +154,7 @@ mod tests {
         AdapterLog, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
 
-    fn parse_output_entries(output: &str) -> Vec<CachedRecipe> {
+    fn parse_json_entries(output: &str) -> Vec<CachedRecipe> {
         output
             .lines()
             .filter(|l| !l.is_empty())
@@ -149,24 +174,12 @@ mod tests {
             vec![],
         ))];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "_" && e.name == "my-env")
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "git" && e.name == "repo-a")
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "git" && e.name == "repo-b")
-        );
+        let output = context_object.get_output();
+        assert!(output.contains("_: my-env"));
+        assert!(output.contains("git: repo-a"));
+        assert!(output.contains("git: repo-b"));
     }
 
     #[rstest]
@@ -181,25 +194,16 @@ mod tests {
             vec![],
         ))];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
+        let output = context_object.get_output();
+        assert!(output.contains("_: repo-a"), "Environment should be listed");
         assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "_" && e.name == "repo-a"),
-            "Environment should be listed"
-        );
-        assert!(
-            !entries
-                .iter()
-                .any(|e| e.cookbook == "git" && e.name == "repo-a"),
+            !output.contains("git: repo-a"),
             "Recipe matching an existing environment should be excluded"
         );
         assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "git" && e.name == "repo-b"),
+            output.contains("git: repo-b"),
             "Recipe without a matching environment should still be listed"
         );
     }
@@ -219,20 +223,17 @@ mod tests {
             vec![],
         ))];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
+        let output = context_object.get_output();
         assert!(
-            !entries
-                .iter()
-                .any(|e| e.cookbook == "github" && e.name == "repo#42"),
+            !output.contains("github: repo#42"),
             "Recipe with description matching an existing environment should be excluded"
         );
-        let repo99 = entries
-            .iter()
-            .find(|e| e.cookbook == "github" && e.name == "repo#99")
-            .expect("Non-matching recipe should still be listed");
-        assert_eq!(repo99.description.as_deref(), Some("Add feature"));
+        assert!(
+            output.contains("github: repo#99\tAdd feature"),
+            "Non-matching recipe with description should still be listed"
+        );
     }
 
     #[rstest]
@@ -243,20 +244,12 @@ mod tests {
         context_object.create_mock_environment("env-a");
         context_object.create_mock_environment("env-b");
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "_" && e.name == "env-a")
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "_" && e.name == "env-b")
-        );
-        assert!(!entries.iter().any(|e| e.cookbook == "git"));
+        let output = context_object.get_output();
+        assert!(output.contains("_: env-a"));
+        assert!(output.contains("_: env-b"));
+        assert!(!output.contains("git:"));
     }
 
     #[rstest]
@@ -270,15 +263,11 @@ mod tests {
             vec![],
         ))];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "git" && e.name == "some-repo")
-        );
-        assert!(!entries.iter().any(|e| e.cookbook == "_"));
+        let output = context_object.get_output();
+        assert!(output.contains("git: some-repo"));
+        assert!(!output.contains("_:"));
     }
 
     #[rstest]
@@ -291,24 +280,12 @@ mod tests {
             Box::new(FakeCookbook::new("npm", vec!["pkg-x", "pkg-y"], vec![])),
         ];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "git" && e.name == "repo-a")
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "npm" && e.name == "pkg-x")
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "npm" && e.name == "pkg-y")
-        );
+        let output = context_object.get_output();
+        assert!(output.contains("git: repo-a"));
+        assert!(output.contains("npm: pkg-x"));
+        assert!(output.contains("npm: pkg-y"));
     }
 
     #[rstest]
@@ -318,7 +295,7 @@ mod tests {
         let (_temp_dir, mut context_object, _, _) = context_object;
         let cache_dir = context_object.cache_dir.clone().unwrap();
 
-        // Pre-populate cache with JSON
+        // Pre-populate cache with JSONL (daemon format)
         daemon::write_cache_atomic(
             &cache_dir,
             "{\"cookbook\":\"git\",\"name\":\"cached-repo\"}\n",
@@ -328,15 +305,13 @@ mod tests {
         // No cookbooks — if it falls back to sync, output would be empty
         context_object.cookbooks = vec![];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
+        let output = context_object.get_output();
         assert!(
-            entries
-                .iter()
-                .any(|e| e.cookbook == "git" && e.name == "cached-repo"),
+            output.contains("git: cached-repo"),
             "Should read from cache, got: {}",
-            context_object.get_output()
+            output
         );
     }
 
@@ -374,14 +349,13 @@ mod tests {
         )
         .unwrap();
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
-        let env_entries: Vec<&CachedRecipe> =
-            entries.iter().filter(|e| e.cookbook == "_").collect();
-        assert_eq!(env_entries[0].name, "often-used");
-        assert_eq!(env_entries[1].name, "rarely-used");
-        assert_eq!(env_entries[2].name, "never-used");
+        let output = context_object.get_output();
+        let env_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("_: ")).collect();
+        assert_eq!(env_lines[0], "_: often-used");
+        assert_eq!(env_lines[1], "_: rarely-used");
+        assert_eq!(env_lines[2], "_: never-used");
     }
 
     #[rstest]
@@ -406,17 +380,13 @@ mod tests {
         )
         .unwrap();
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
-        let env = entries
-            .iter()
-            .find(|e| e.cookbook == "_" && e.name == "owner-repo#42")
-            .expect("Expected environment in listing");
-        assert_eq!(
-            env.description.as_deref(),
-            Some("Fix auth bug"),
-            "Expected description in environment listing"
+        let output = context_object.get_output();
+        assert!(
+            output.contains("_: owner-repo#42\tFix auth bug"),
+            "Expected description in environment listing, got: {}",
+            output
         );
     }
 
@@ -431,17 +401,13 @@ mod tests {
             Box::new(FakeCookbook::new("git", vec!["my-repo"], vec![]).with_priority(10)),
         ];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
-        let recipe_entries: Vec<&CachedRecipe> =
-            entries.iter().filter(|e| e.cookbook != "_").collect();
-        assert_eq!(recipe_entries[0].cookbook, "git");
-        assert_eq!(recipe_entries[0].name, "my-repo");
-        assert_eq!(recipe_entries[1].cookbook, "chezmoi");
-        assert_eq!(recipe_entries[1].name, "dotfiles");
-        assert_eq!(recipe_entries[2].cookbook, "github");
-        assert_eq!(recipe_entries[2].name, "repo#1");
+        let output = context_object.get_output();
+        let recipe_lines: Vec<&str> = output.lines().filter(|l| !l.starts_with("_: ")).collect();
+        assert_eq!(recipe_lines[0], "git: my-repo");
+        assert_eq!(recipe_lines[1], "chezmoi: dotfiles");
+        assert_eq!(recipe_lines[2], "github: repo#1");
     }
 
     #[rstest]
@@ -455,15 +421,36 @@ mod tests {
             vec![],
         ))];
 
-        list_all(&mut context_object).unwrap();
+        list_all(&mut context_object, false).unwrap();
 
-        let entries = parse_output_entries(&context_object.get_output());
+        let output = context_object.get_output();
+        assert!(
+            output.contains("git: sync-repo"),
+            "Should fall back to sync, got: {}",
+            output
+        );
+    }
+
+    #[rstest]
+    fn test_list_all_json_flag_outputs_jsonl(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("my-env");
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]))];
+
+        list_all(&mut context_object, true).unwrap();
+
+        let entries = parse_json_entries(&context_object.get_output());
         assert!(
             entries
                 .iter()
-                .any(|e| e.cookbook == "git" && e.name == "sync-repo"),
-            "Should fall back to sync, got: {}",
-            context_object.get_output()
+                .any(|e| e.cookbook == "_" && e.name == "my-env")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.cookbook == "git" && e.name == "repo-a")
         );
     }
 }

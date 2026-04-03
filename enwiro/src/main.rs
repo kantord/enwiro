@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
     let result = match args {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
-        EnwiroCli::ListAll(_) => list_all(&mut context_object),
+        EnwiroCli::ListAll(args) => list_all(&mut context_object, args.json),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
         EnwiroCli::Daemon => unreachable!(),

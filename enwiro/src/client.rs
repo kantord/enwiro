@@ -21,6 +21,8 @@ pub struct Recipe {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default)]
+    pub sort_order: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +31,8 @@ pub struct CachedRecipe {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default)]
+    pub sort_order: u32,
 }
 
 impl Recipe {
@@ -36,6 +40,7 @@ impl Recipe {
         Self {
             name: name.into(),
             description: None,
+            sort_order: 0,
         }
     }
 
@@ -44,6 +49,7 @@ impl Recipe {
         Self {
             name: name.into(),
             description: Some(description.into()),
+            sort_order: 0,
         }
     }
 }

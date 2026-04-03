@@ -312,6 +312,14 @@ fn sort_items_by_date(items: &mut [GithubItem]) {
     items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 }
 
+fn compute_sort_order(index: usize, total: usize) -> u32 {
+    if total <= 1 {
+        0
+    } else {
+        ((index * 100) / (total - 1)) as u32
+    }
+}
+
 fn list_recipes() -> anyhow::Result<()> {
     let repos = discover_github_repos()?;
     let repo_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
@@ -324,15 +332,18 @@ fn list_recipes() -> anyhow::Result<()> {
     let mut items: Vec<GithubItem> = prs.into_iter().chain(issues).collect();
     sort_items_by_date(&mut items);
 
-    for item in items {
+    let total = items.len();
+    for (index, item) in items.iter().enumerate() {
         let safe_title = item.title.replace(['\n', '\0', '\x1f'], " ");
         let prefix = match &item.kind {
             GithubItemKind::PullRequest { .. } => "[PR]",
             GithubItemKind::Issue => "[issue]",
         };
+        let sort_order = compute_sort_order(index, total);
         let recipe = serde_json::json!({
             "name": format!("{}#{}", item.repo, item.number),
             "description": format!("{} {}", prefix, safe_title),
+            "sort_order": sort_order,
         });
         println!("{}", serde_json::to_string(&recipe).unwrap());
     }
@@ -1134,6 +1145,24 @@ mod tests {
             "Expected helpful error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_compute_sort_order_single_item() {
+        assert_eq!(compute_sort_order(0, 1), 0);
+    }
+
+    #[test]
+    fn test_compute_sort_order_two_items() {
+        assert_eq!(compute_sort_order(0, 2), 0);
+        assert_eq!(compute_sort_order(1, 2), 100);
+    }
+
+    #[test]
+    fn test_compute_sort_order_three_items() {
+        assert_eq!(compute_sort_order(0, 3), 0);
+        assert_eq!(compute_sort_order(1, 3), 50);
+        assert_eq!(compute_sort_order(2, 3), 100);
     }
 }
 

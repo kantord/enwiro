@@ -34,28 +34,53 @@ enwiro-cookbook-yourname list-recipes
 ```
 
 Print available recipes to stdout as **JSON lines** (one JSON object per line).
-Each object must have a `name` field and may optionally include a `description`:
+Each object must have a `name` field and may optionally include `description`
+and `sort_order`:
 
 ```json
-{"name":"my-project"}
-{"name":"another-project","description":"A short description of this project"}
+{"name":"my-project","sort_order":0}
+{"name":"another-project","description":"A short description","sort_order":50}
 ```
 
 - Each line must be a valid JSON object with at least a `"name"` field.
 - The `"description"` field is optional. Omit it or set it to `null` if there
   is no description.
+- The `"sort_order"` field is optional (defaults to 0). It is a number from 0
+  to 100 that controls how this recipe ranks globally against recipes from other
+  cookbooks. Lower values appear first. See **Global sort order** below.
 - Recipe names must not contain newlines or null bytes.
 - Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
 
-**Sorting matters.** Enwiro preserves the order your cookbook returns. Print
-recipes in the order that makes the most sense for your use case. For example,
-if your cookbook discovers time-based resources, sort by most recently updated
-first. If there are "primary" entries (like a main project directory) that
-should always appear first, put them at the top.
+**Sorting matters.** Enwiro uses `sort_order` to interleave recipes from all
+cookbooks into a single globally sorted list. Within the same `sort_order`,
+recipes are further sorted by cookbook priority (see `metadata`) and then
+alphabetically by name.
 
 Within a cookbook, a good default is: most relevant or most recently used items
-first.
+first, with `sort_order` assigned linearly based on position.
+
+#### Global sort order
+
+The `sort_order` field (0–100) lets enwiro merge recipes from different
+cookbooks into a single relevance-ranked list. Without it, all recipes from a
+higher-priority cookbook would appear before any recipe from a lower-priority
+one, regardless of individual relevance.
+
+**Convention:** After sorting your recipes internally, assign `sort_order`
+linearly based on position:
+
+```
+sort_order = if total <= 1 { 0 } else { (index * 100) / (total - 1) }
+```
+
+This maps the first recipe to 0 and the last to 100, with intermediate values
+spread evenly. The built-in cookbooks all use this convention.
+
+**Example:** A git cookbook with 5 recipes sorted newest-first would output
+`sort_order` values of 0, 25, 50, 75, 100. A GitHub cookbook with 3 items would
+output 0, 50, 100. When combined, the globally sorted list interleaves them by
+relevance rather than grouping by cookbook.
 
 ### `cook <recipe_name>`
 
@@ -219,11 +244,12 @@ When a user runs `enwiro list-all`, here's what happens:
 
 1. Enwiro discovers all `enwiro-cookbook-*` binaries on `$PATH`.
 2. It calls `metadata` on each to learn their priority (falling back to 50).
-3. Cookbooks are sorted by priority (lowest first), then alphabetically.
-4. It calls `list-recipes` on each cookbook in order.
-5. Results are combined into a single list, preserving cookbook order and each
-   cookbook's internal ordering.
-6. Recipes that match an already-existing environment are filtered out (they
+3. It calls `list-recipes` on each cookbook.
+4. All recipes are collected into a single list and sorted globally by
+   `(sort_order, cookbook priority, name)`. This means a highly relevant recipe
+   from a low-priority cookbook can appear above a less relevant recipe from a
+   high-priority cookbook.
+5. Recipes that match an already-existing environment are filtered out (they
    can't be cooked again since the environment already exists).
 
 When a user activates a recipe:

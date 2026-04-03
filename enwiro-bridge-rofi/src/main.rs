@@ -11,6 +11,9 @@ struct CacheEntry {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    sort_order: u32,
 }
 fn enwiro_bin() -> anyhow::Result<PathBuf> {
     if let Ok(path) = env::var("ENWIRO_BIN") {
