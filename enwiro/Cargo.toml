@@ -23,6 +23,7 @@ tracing.workspace = true
 dirs = "6"
 libc = "0.2"
 signal-hook = "0.3"
+system-idle-time = "1.0.4"
 
 [dev-dependencies]
 assertables = "9.0.0"
