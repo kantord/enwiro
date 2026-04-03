@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.4...enwiro-cookbook-github-v0.1.5) - 2026-04-03
+
+### Added
+
+- sort recipes globally by per-cookbook importance signal
+
+### Other
+
+- use JSONL format to print recipes
+
 ## [0.1.4](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.3...enwiro-cookbook-github-v0.1.4) - 2026-02-20
 
 ### Added
