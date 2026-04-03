@@ -2,6 +2,7 @@ use anyhow::{Context, anyhow};
 
 use crate::CommandContext;
 
+use std::os::unix::process::CommandExt;
 use std::{env, io::Write, process::Command};
 #[derive(clap::Args)]
 #[command(
@@ -45,20 +46,13 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
         None => String::from(""),
     };
 
-    let mut child = Command::new(args.command_name)
+    let err = Command::new(&args.command_name)
         .env("ENWIRO_ENV", environment_name)
         .args(match args.child_args {
             Some(x) => x.into_iter().map(|x| x.to_string()).collect(),
             None => vec![],
         })
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("Failed to execute command")?;
+        .exec();
 
-    let status = child.wait().context("Command wasn't running")?;
-    tracing::debug!(exit_code = ?status.code(), "Child process exited");
-
-    Ok(())
+    Err(anyhow!(err).context(format!("Failed to exec {}", args.command_name)))
 }
