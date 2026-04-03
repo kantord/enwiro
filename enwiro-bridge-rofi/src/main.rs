@@ -54,6 +54,7 @@ fn list_entries() -> anyhow::Result<()> {
     tracing::debug!("Listing entries via enwiro list-all");
     let output = Command::new(enwiro_bin()?)
         .arg("list-all")
+        .arg("--json")
         .output()
         .context("Failed to run enwiro list-all")?;
 
