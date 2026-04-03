@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.19](https://github.com/kantord/enwiro/compare/enwiro-v0.3.18...enwiro-v0.3.19) - 2026-04-03
+
+### Added
+
+- sort recipes globally by per-cookbook importance signal
+- only kill daemon based on real user idleness
+- *(wrap)* exec() into child instead of babysitting it
+
+### Other
+
+- use JSONL format to print recipes
+
 ## [0.3.18](https://github.com/kantord/enwiro/compare/enwiro-v0.3.17...enwiro-v0.3.18) - 2026-02-20
 
 ### Added
