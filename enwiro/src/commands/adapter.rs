@@ -1,11 +1,18 @@
 use anyhow::{Context, bail};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use crate::plugin::{PluginKind, get_plugins};
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct ManagedEnvInfo {
+    pub name: String,
+    pub frecency: f64,
+}
+
 pub trait EnwiroAdapterTrait {
     fn get_active_environment_name(&self) -> anyhow::Result<String>;
-    fn activate(&self, name: &str) -> anyhow::Result<()>;
+    fn activate(&self, name: &str, managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()>;
 }
 
 pub struct EnwiroAdapterExternal {
@@ -29,12 +36,28 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
         }
     }
 
-    fn activate(&self, name: &str) -> anyhow::Result<()> {
+    fn activate(&self, name: &str, managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()> {
         tracing::debug!(name = %name, "Activating workspace via adapter");
-        let output = Command::new(&self.adapter_command)
+        let stdin_json =
+            serde_json::to_string(managed_envs).context("Could not serialize managed envs")?;
+
+        let mut child = Command::new(&self.adapter_command)
             .arg("activate")
             .arg(name)
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Adapter failed to activate workspace")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(stdin_json.as_bytes())
+                .context("Could not write managed envs to adapter stdin")?;
+        }
+
+        let output = child
+            .wait_with_output()
             .context("Adapter failed to activate workspace")?;
 
         if output.status.success() {
@@ -67,7 +90,7 @@ impl EnwiroAdapterTrait for EnwiroAdapterNone {
         bail!("Could not determine active environment because no adapter is configured.")
     }
 
-    fn activate(&self, _name: &str) -> anyhow::Result<()> {
+    fn activate(&self, _name: &str, _managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()> {
         bail!("Could not activate workspace because no adapter is configured.")
     }
 }

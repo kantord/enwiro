@@ -2,6 +2,7 @@ use anyhow::Context;
 use std::io::Write;
 use std::path::Path;
 
+use crate::commands::adapter::ManagedEnvInfo;
 use crate::context::CommandContext;
 
 #[derive(clap::Args)]
@@ -14,11 +15,31 @@ pub struct ActivateArgs {
     pub name: String,
 }
 
+fn build_managed_envs<W: Write>(context: &CommandContext<W>) -> Vec<ManagedEnvInfo> {
+    let envs = match context.get_all_environments() {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    let now = crate::usage_stats::now_timestamp();
+    envs.values()
+        .map(|env| {
+            let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
+            let meta = crate::usage_stats::load_env_meta(&env_dir);
+            let frecency = crate::usage_stats::frecency_score(&meta, now);
+            ManagedEnvInfo {
+                name: env.name.clone(),
+                frecency,
+            }
+        })
+        .collect()
+}
+
 pub fn activate<W: Write>(
     context: &mut CommandContext<W>,
     args: ActivateArgs,
 ) -> anyhow::Result<()> {
-    if let Err(e) = context.adapter.activate(&args.name) {
+    let managed_envs = build_managed_envs(context);
+    if let Err(e) = context.adapter.activate(&args.name, &managed_envs) {
         context
             .notifier
             .notify_error(&format!("Failed to activate workspace: {}", e));
