@@ -2,6 +2,13 @@ use anyhow::Context;
 use clap::Parser;
 use i3ipc_types::reply::Workspace;
 use tokio_i3ipc::I3;
+
+#[derive(serde::Deserialize, Debug, Clone)]
+struct ManagedEnvInfo {
+    name: String,
+    frecency: f64,
+}
+
 #[derive(Parser)]
 enum EnwiroAdapterI3WmCLI {
     GetActiveWorkspaceId(GetActiveWorkspaceIdArgs),
@@ -19,6 +26,44 @@ pub struct ActivateArgs {
 fn build_workspace_command(workspace_name: &str) -> String {
     let escaped = workspace_name.replace('\\', r"\\").replace('"', r#"\""#);
     format!(r#"workspace "{}""#, escaped)
+}
+
+fn build_rename_workspace_command(old_name: &str, new_name: &str) -> String {
+    let esc_old = old_name.replace('\\', r"\\").replace('"', r#"\""#);
+    let esc_new = new_name.replace('\\', r"\\").replace('"', r#"\""#);
+    format!(r#"rename workspace "{}" to "{}""#, esc_old, esc_new)
+}
+
+/// Read managed env list from stdin. Returns empty vec on any parse failure.
+fn read_managed_envs() -> Vec<ManagedEnvInfo> {
+    use std::io::Read;
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return vec![];
+    }
+    serde_json::from_str(&buf).unwrap_or_default()
+}
+
+/// Find the least-frecently-used single-digit workspace that is enwiro-managed,
+/// returning its workspace and the frecency score.
+fn find_eviction_candidate<'a>(
+    workspaces: &'a [Workspace],
+    managed_envs: &[ManagedEnvInfo],
+) -> Option<&'a Workspace> {
+    let frecency_map: std::collections::HashMap<&str, f64> = managed_envs
+        .iter()
+        .map(|e| (e.name.as_str(), e.frecency))
+        .collect();
+
+    workspaces
+        .iter()
+        .filter(|ws| ws.num >= 1 && ws.num <= 9)
+        .filter_map(|ws| {
+            let frecency = frecency_map.get(extract_environment_name(ws).as_str())?;
+            Some((ws, *frecency))
+        })
+        .min_by(|(_, fa), (_, fb)| fa.partial_cmp(fb).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(ws, _)| ws)
 }
 
 async fn run_i3_command(i3: &mut I3, command: String) -> anyhow::Result<()> {
@@ -61,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
             print!("{}", environment_name);
         }
         EnwiroAdapterI3WmCLI::Activate(args) => {
+            let managed_envs = read_managed_envs();
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
             tracing::debug!(count = workspaces.len(), name = %args.name, "Activating environment");
@@ -81,8 +127,33 @@ async fn main() -> anyhow::Result<()> {
                     free_num += 1;
                 }
 
-                let workspace_name = format!("{}: {}", free_num, args.name);
-                tracing::info!(workspace = %workspace_name, num = free_num, "Creating new workspace");
+                // If the free slot is multi-digit, try to evict the least-frecent
+                // enwiro-managed single-digit workspace to make room.
+                let target_num = if free_num > 9 {
+                    if let Some(victim) = find_eviction_candidate(&workspaces, &managed_envs) {
+                        let victim_num = victim.num;
+                        let victim_new_name =
+                            format!("{}: {}", free_num, extract_environment_name(victim));
+                        tracing::info!(
+                            victim = %victim.name,
+                            new_name = %victim_new_name,
+                            "Evicting least-frecent workspace to free single-digit slot"
+                        );
+                        run_i3_command(
+                            &mut i3,
+                            build_rename_workspace_command(&victim.name, &victim_new_name),
+                        )
+                        .await?;
+                        victim_num
+                    } else {
+                        free_num
+                    }
+                } else {
+                    free_num
+                };
+
+                let workspace_name = format!("{}: {}", target_num, args.name);
+                tracing::info!(workspace = %workspace_name, num = target_num, "Creating new workspace");
                 run_i3_command(&mut i3, build_workspace_command(&workspace_name)).await?;
             }
         }
@@ -138,6 +209,87 @@ mod tests {
         // Workspace "3: a3b" — the name contains "3" as a substring
         let ws = make_workspace(456, 3, "3: a3b");
         assert_eq!(extract_environment_name(&ws), "a3b");
+    }
+
+    fn make_managed(name: &str, frecency: f64) -> ManagedEnvInfo {
+        ManagedEnvInfo {
+            name: name.to_string(),
+            frecency,
+        }
+    }
+
+    #[test]
+    fn test_find_eviction_candidate_picks_least_frecent() {
+        let workspaces = vec![
+            make_workspace(1, 1, "1: high-frecency"),
+            make_workspace(2, 2, "2: low-frecency"),
+            make_workspace(3, 3, "3: mid-frecency"),
+        ];
+        let managed = vec![
+            make_managed("high-frecency", 100.0),
+            make_managed("low-frecency", 1.0),
+            make_managed("mid-frecency", 50.0),
+        ];
+        let candidate = find_eviction_candidate(&workspaces, &managed).unwrap();
+        assert_eq!(extract_environment_name(candidate), "low-frecency");
+    }
+
+    #[test]
+    fn test_find_eviction_candidate_ignores_unmanaged_workspaces() {
+        let workspaces = vec![
+            make_workspace(1, 1, "1: unmanaged"),
+            make_workspace(2, 2, "2: managed"),
+        ];
+        let managed = vec![make_managed("managed", 0.0)];
+        let candidate = find_eviction_candidate(&workspaces, &managed).unwrap();
+        assert_eq!(extract_environment_name(candidate), "managed");
+    }
+
+    #[test]
+    fn test_find_eviction_candidate_ignores_multi_digit_workspaces() {
+        let workspaces = vec![
+            make_workspace(1, 10, "10: managed-but-multi-digit"),
+            make_workspace(2, 5, "5: managed-single-digit"),
+        ];
+        let managed = vec![
+            make_managed("managed-but-multi-digit", 0.0),
+            make_managed("managed-single-digit", 999.0),
+        ];
+        // Should pick workspace 5 even though it has higher frecency —
+        // workspace 10 is excluded because it's already multi-digit.
+        let candidate = find_eviction_candidate(&workspaces, &managed).unwrap();
+        assert_eq!(candidate.num, 5);
+    }
+
+    #[test]
+    fn test_find_eviction_candidate_returns_none_when_no_managed_single_digit() {
+        let workspaces = vec![
+            make_workspace(1, 1, "1: unmanaged-a"),
+            make_workspace(2, 2, "2: unmanaged-b"),
+        ];
+        let managed = vec![make_managed("something-else", 0.0)];
+        assert!(find_eviction_candidate(&workspaces, &managed).is_none());
+    }
+
+    #[test]
+    fn test_find_eviction_candidate_returns_none_for_empty_workspaces() {
+        let managed = vec![make_managed("some-env", 1.0)];
+        assert!(find_eviction_candidate(&[], &managed).is_none());
+    }
+
+    #[test]
+    fn test_build_rename_workspace_command() {
+        let cmd = build_rename_workspace_command("5: old-project", "10: old-project");
+        assert_eq!(
+            cmd,
+            r#"rename workspace "5: old-project" to "10: old-project""#
+        );
+    }
+
+    #[test]
+    fn test_build_rename_workspace_command_escapes_quotes() {
+        let cmd = build_rename_workspace_command(r#"5: has"quote"#, "10: safe");
+        assert!(cmd.contains(r#"\""#), "Quote in old name should be escaped");
     }
 
     #[test]

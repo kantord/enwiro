@@ -55,7 +55,11 @@ pub mod test_utilities {
             Ok(self.current_environment.to_string())
         }
 
-        fn activate(&self, name: &str) -> anyhow::Result<()> {
+        fn activate(
+            &self,
+            name: &str,
+            _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
+        ) -> anyhow::Result<()> {
             self.activated.borrow_mut().push(name.to_string());
             Ok(())
         }
