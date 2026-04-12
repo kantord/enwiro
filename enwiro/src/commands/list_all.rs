@@ -329,12 +329,14 @@ mod tests {
         let often_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now, 1.0); 10],
+                ..Default::default()
             },
             ..Default::default()
         };
         let rarely_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now - 700_000, 1.0)],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -383,6 +385,7 @@ mod tests {
         let high_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now, 1.0); 5],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -390,6 +393,7 @@ mod tests {
         let mid_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now - 48 * 3600, 1.0)],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -457,6 +461,7 @@ mod tests {
         let beta_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now, 1.0)],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -514,6 +519,7 @@ mod tests {
         let meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now, 1.0)],
+                ..Default::default()
             },
             description: Some("Fix auth bug".to_string()),
             cookbook: Some("github".to_string()),
