@@ -29,7 +29,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
     for env in &envs {
         let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
         let meta = crate::usage_stats::load_env_meta(&env_dir);
-        if meta.activation_count > 0 || meta.description.is_some() {
+        if meta.signals.activation_count > 0 || meta.description.is_some() {
             meta_map.insert(env.name.clone(), meta);
         }
     }
@@ -153,6 +153,7 @@ mod tests {
     use crate::test_utils::test_utilities::{
         AdapterLog, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
+    use crate::usage_stats::UserIntentSignals;
 
     fn parse_json_entries(output: &str) -> Vec<CachedRecipe> {
         output
@@ -327,13 +328,17 @@ mod tests {
         // Write per-env meta.json giving "often-used" a high score and "rarely-used" a low score
         let now = crate::usage_stats::now_timestamp();
         let often_meta = crate::usage_stats::EnvStats {
-            last_activated: now,
-            activation_count: 50,
+            signals: UserIntentSignals {
+                last_activated: now,
+                activation_count: 50,
+            },
             ..Default::default()
         };
         let rarely_meta = crate::usage_stats::EnvStats {
-            last_activated: now - 700_000,
-            activation_count: 2,
+            signals: UserIntentSignals {
+                last_activated: now - 700_000,
+                activation_count: 2,
+            },
             ..Default::default()
         };
         let often_dir = temp_dir.path().join("often-used");
@@ -368,8 +373,10 @@ mod tests {
         // Write per-env meta.json with description
         let now = crate::usage_stats::now_timestamp();
         let meta = crate::usage_stats::EnvStats {
-            last_activated: now,
-            activation_count: 1,
+            signals: UserIntentSignals {
+                last_activated: now,
+                activation_count: 1,
+            },
             description: Some("Fix auth bug".to_string()),
             cookbook: Some("github".to_string()),
         };
