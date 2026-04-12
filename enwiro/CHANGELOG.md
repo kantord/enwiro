@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.23](https://github.com/kantord/enwiro/compare/enwiro-v0.3.22...enwiro-v0.3.23) - 2026-04-12
+
+### Other
+
+- add launcher_score and slot_scores wrappers in usage_stats
+- replace frecency with percentile slot_score in ManagedEnvInfo
+
 ## [0.3.22](https://github.com/kantord/enwiro/compare/enwiro-v0.3.21...enwiro-v0.3.22) - 2026-04-12
 
 ### Added
