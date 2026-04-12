@@ -29,7 +29,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
     for env in &envs {
         let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
         let meta = crate::usage_stats::load_env_meta(&env_dir);
-        if meta.signals.activation_count > 0 || meta.description.is_some() {
+        if !meta.signals.activation_buffer.is_empty() || meta.description.is_some() {
             meta_map.insert(env.name.clone(), meta);
         }
     }
@@ -329,15 +329,13 @@ mod tests {
         let now = crate::usage_stats::now_timestamp();
         let often_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
-                last_activated: now,
-                activation_count: 50,
+                activation_buffer: vec![(now, 1.0); 10],
             },
             ..Default::default()
         };
         let rarely_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
-                last_activated: now - 700_000,
-                activation_count: 2,
+                activation_buffer: vec![(now - 700_000, 1.0)],
             },
             ..Default::default()
         };
@@ -374,8 +372,7 @@ mod tests {
         let now = crate::usage_stats::now_timestamp();
         let meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
-                last_activated: now,
-                activation_count: 1,
+                activation_buffer: vec![(now, 1.0)],
             },
             description: Some("Fix auth bug".to_string()),
             cookbook: Some("github".to_string()),

@@ -6,8 +6,8 @@ use std::{fs, io};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UserIntentSignals {
-    pub last_activated: i64,
-    pub activation_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activation_buffer: Vec<(i64, f64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -84,8 +84,12 @@ pub fn record_activation(env_name: &str) {
 fn record_activation_to(path: &Path, env_name: &str) {
     let mut stats = load_stats(path);
     let entry = stats.envs.entry(env_name.to_string()).or_default();
-    entry.signals.last_activated = now_timestamp();
-    entry.signals.activation_count += 1;
+    entry.signals.activation_buffer.push((now_timestamp(), 1.0));
+    entry
+        .signals
+        .activation_buffer
+        .sort_by(|a, b| b.0.cmp(&a.0));
+    entry.signals.activation_buffer.truncate(10);
     if let Err(e) = save_stats(path, &stats) {
         tracing::warn!(error = %e, "Could not save usage stats");
     }
@@ -110,8 +114,9 @@ fn save_env_meta(env_dir: &Path, meta: &EnvStats) -> io::Result<()> {
 /// Record activation in per-env meta.json. Best-effort.
 pub fn record_activation_per_env(env_dir: &Path) {
     let mut meta = load_env_meta(env_dir);
-    meta.signals.last_activated = now_timestamp();
-    meta.signals.activation_count += 1;
+    meta.signals.activation_buffer.push((now_timestamp(), 1.0));
+    meta.signals.activation_buffer.sort_by(|a, b| b.0.cmp(&a.0));
+    meta.signals.activation_buffer.truncate(10);
     if let Err(e) = save_env_meta(env_dir, &meta) {
         tracing::warn!(error = %e, "Could not save environment metadata");
     }
@@ -129,20 +134,20 @@ pub fn record_cook_metadata_per_env(env_dir: &Path, cookbook: &str, description:
     }
 }
 
-/// Compute frecency score for an environment (zoxide-style bucket multiplier).
+/// Compute exponential-decay score for an environment.
+/// λ = ln(2) / (48h) gives a 48-hour half-life.
 /// Pass the current timestamp (seconds since epoch) for deterministic results.
 pub fn frecency_score(stats: &EnvStats, now: i64) -> f64 {
-    let age_secs = (now - stats.signals.last_activated).max(0) as f64;
-    let multiplier = if age_secs < 3600.0 {
-        4.0
-    } else if age_secs < 86400.0 {
-        2.0
-    } else if age_secs < 604800.0 {
-        0.5
-    } else {
-        0.25
-    };
-    stats.signals.activation_count as f64 * multiplier
+    let lambda = std::f64::consts::LN_2 / (48.0 * 3600.0);
+    stats
+        .signals
+        .activation_buffer
+        .iter()
+        .map(|&(ts, weight)| {
+            let age = (now - ts).max(0) as f64;
+            weight * (-lambda * age).exp()
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -227,8 +232,8 @@ mod tests {
         let stats = load_stats(&path);
         assert_eq!(stats.envs.len(), 1);
         let entry = &stats.envs["my-project"];
-        assert_eq!(entry.signals.activation_count, 1);
-        assert!(entry.signals.last_activated > 0);
+        assert_eq!(entry.signals.activation_buffer.len(), 1);
+        assert!(entry.signals.activation_buffer[0].0 > 0);
     }
 
     #[test]
@@ -240,7 +245,7 @@ mod tests {
         record_activation_to(&path, "my-project");
 
         let stats = load_stats(&path);
-        assert_eq!(stats.envs["my-project"].signals.activation_count, 2);
+        assert_eq!(stats.envs["my-project"].signals.activation_buffer.len(), 2);
     }
 
     #[test]
@@ -253,100 +258,8 @@ mod tests {
         record_activation_to(&path, "project-a");
 
         let stats = load_stats(&path);
-        assert_eq!(stats.envs["project-a"].signals.activation_count, 2);
-        assert_eq!(stats.envs["project-b"].signals.activation_count, 1);
-    }
-
-    #[test]
-    fn test_frecency_score_recent_high() {
-        let now = 1_000_000;
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now,
-                activation_count: 10,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 40.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_frecency_score_old_low() {
-        let now = 1_000_000;
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now - 604801, // >1 week
-                activation_count: 10,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 2.5).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_frecency_score_bucket_boundaries() {
-        let now = 1_000_000;
-        let count = 10;
-
-        // Just under 1 hour → ×4
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now - 3599,
-                activation_count: count,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 40.0).abs() < 0.01);
-
-        // Exactly 1 hour → ×2
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now - 3600,
-                activation_count: count,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 20.0).abs() < 0.01);
-
-        // Just under 1 day → ×2
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now - 86399,
-                activation_count: count,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 20.0).abs() < 0.01);
-
-        // Exactly 1 day → ×0.5
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now - 86400,
-                activation_count: count,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 5.0).abs() < 0.01);
-
-        // Just under 1 week → ×0.5
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now - 604799,
-                activation_count: count,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 5.0).abs() < 0.01);
-
-        // Exactly 1 week → ×0.25
-        let stats = EnvStats {
-            signals: UserIntentSignals {
-                last_activated: now - 604800,
-                activation_count: count,
-            },
-            ..Default::default()
-        };
-        assert!((frecency_score(&stats, now) - 2.5).abs() < 0.01);
+        assert_eq!(stats.envs["project-a"].signals.activation_buffer.len(), 2);
+        assert_eq!(stats.envs["project-b"].signals.activation_buffer.len(), 1);
     }
 
     #[test]
@@ -358,8 +271,8 @@ mod tests {
         record_activation_per_env(&env_dir);
 
         let meta = load_env_meta(&env_dir);
-        assert_eq!(meta.signals.activation_count, 1);
-        assert!(meta.signals.last_activated > 0);
+        assert_eq!(meta.signals.activation_buffer.len(), 1);
+        assert!(meta.signals.activation_buffer[0].0 > 0);
     }
 
     #[test]
@@ -372,7 +285,7 @@ mod tests {
         record_activation_per_env(&env_dir);
 
         let meta = load_env_meta(&env_dir);
-        assert_eq!(meta.signals.activation_count, 2);
+        assert_eq!(meta.signals.activation_buffer.len(), 2);
     }
 
     #[test]
@@ -391,7 +304,7 @@ mod tests {
     #[test]
     fn test_per_env_load_missing_dir_returns_default() {
         let meta = load_env_meta(Path::new("/nonexistent/env/dir"));
-        assert_eq!(meta.signals.activation_count, 0);
+        assert!(meta.signals.activation_buffer.is_empty());
         assert_eq!(meta.description, None);
     }
 
@@ -406,7 +319,7 @@ mod tests {
         record_cook_metadata_per_env(&env_dir, "git", Some("My project"));
 
         let meta = load_env_meta(&env_dir);
-        assert_eq!(meta.signals.activation_count, 2);
+        assert_eq!(meta.signals.activation_buffer.len(), 2);
         assert_eq!(meta.cookbook, Some("git".to_string()));
         assert_eq!(meta.description, Some("My project".to_string()));
     }
@@ -427,126 +340,237 @@ mod tests {
         assert!(stats.envs.is_empty());
     }
 
-    // ── JSON field-name serialization tests ────────────────────────────────
-    // These tests anchor the *on-disk* JSON keys for activation_count and
-    // last_activated. A refactor that moves these fields into a sub-struct
-    // (e.g. UserIntentSignals) must preserve the top-level key names for
-    // backward compatibility with existing meta.json files on disk.
+    // ── activation_buffer ring-buffer tests ────────────────────────────────
 
-    /// `activation_count` must be serialized under that exact key name.
+    /// `UserIntentSignals` must have an `activation_buffer` field of type `Vec<(i64, f64)>`.
+    /// A freshly default-constructed value must have an empty buffer.
     #[test]
-    fn test_env_stats_serializes_activation_count_field_name() {
+    fn test_activation_buffer_field_exists_and_defaults_empty() {
+        let signals = UserIntentSignals::default();
+        assert!(
+            signals.activation_buffer.is_empty(),
+            "activation_buffer must be empty by default"
+        );
+    }
+
+    /// `activation_buffer` must be serialised under that exact JSON key name,
+    /// flattened into the top-level `EnvStats` object.
+    #[test]
+    fn test_env_stats_serializes_activation_buffer_field_name() {
+        let signals = UserIntentSignals {
+            activation_buffer: vec![(1_700_000_000i64, 1.0f64)],
+            ..Default::default()
+        };
         let stats = EnvStats {
-            signals: UserIntentSignals {
-                activation_count: 7,
-                last_activated: 0,
-            },
+            signals,
             ..Default::default()
         };
         let json = serde_json::to_string(&stats).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            value["activation_count"],
-            serde_json::json!(7),
-            "activation_count must be a top-level JSON key in EnvStats"
+        assert!(
+            value.get("activation_buffer").is_some(),
+            "activation_buffer must appear as a top-level JSON key in EnvStats"
         );
     }
 
-    /// `last_activated` must be serialized under that exact key name.
+    /// Recording an activation pushes a `(timestamp, 1.0)` entry into `activation_buffer`.
     #[test]
-    fn test_env_stats_serializes_last_activated_field_name() {
+    fn test_record_activation_pushes_entry_to_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let before = now_timestamp();
+        record_activation_per_env(&env_dir);
+        let after = now_timestamp();
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "buffer must have exactly one entry after one activation"
+        );
+        let (ts, weight) = meta.signals.activation_buffer[0];
+        assert!(
+            ts >= before && ts <= after,
+            "buffer entry timestamp must be within the recording window"
+        );
+        assert!(
+            (weight - 1.0).abs() < 1e-10,
+            "buffer entry weight must be 1.0"
+        );
+    }
+
+    /// Each subsequent activation must append another `(timestamp, 1.0)` entry.
+    #[test]
+    fn test_record_activation_appends_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_activation_per_env(&env_dir);
+        record_activation_per_env(&env_dir);
+        record_activation_per_env(&env_dir);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            3,
+            "buffer must grow by one entry per activation"
+        );
+        for &(_, weight) in &meta.signals.activation_buffer {
+            assert!((weight - 1.0).abs() < 1e-10, "every weight must be 1.0");
+        }
+    }
+
+    /// The buffer must be capped at N=10: when an 11th activation is recorded,
+    /// the oldest entry is dropped so the buffer stays at length 10.
+    #[test]
+    fn test_activation_buffer_capped_at_ten() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        // Pre-populate the buffer with 10 entries using a fixed old timestamp.
+        let old_ts: i64 = 1_000_000;
+        let mut meta = load_env_meta(&env_dir);
+        for _ in 0..10 {
+            meta.signals.activation_buffer.push((old_ts, 1.0));
+        }
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        // Record one more activation — should trim to 10.
+        record_activation_per_env(&env_dir);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            10,
+            "buffer must stay at capacity 10 after an 11th activation"
+        );
+
+        // The newest entry (just recorded) must be present at buffer[0] after descending sort.
+        let newest_ts = meta.signals.activation_buffer[0].0;
+        assert!(
+            newest_ts > old_ts,
+            "newest entry should be present after cap; got ts={newest_ts}"
+        );
+        // The oldest surviving entries must still carry the old timestamp.
+        assert_eq!(
+            meta.signals.activation_buffer.last().unwrap().0,
+            old_ts,
+            "some pre-populated old entries must still be in the buffer after cap"
+        );
+    }
+
+    /// `frecency_score` must return 0.0 for an empty buffer.
+    #[test]
+    fn test_frecency_score_empty_buffer_is_zero() {
+        let stats = EnvStats::default();
+        let now = now_timestamp();
+        let score = frecency_score(&stats, now);
+        assert!(
+            score.abs() < 1e-10,
+            "frecency_score for an empty buffer must be 0.0, got {score}"
+        );
+    }
+
+    /// A single activation recorded at `now` must yield a score ≈ 1.0
+    /// (decay factor e^0 = 1.0, weight 1.0).
+    #[test]
+    fn test_frecency_score_single_entry_at_now_is_one() {
+        let now: i64 = 1_700_000_000;
         let stats = EnvStats {
             signals: UserIntentSignals {
-                activation_count: 0,
-                last_activated: 1_700_000_000,
+                activation_buffer: vec![(now, 1.0)],
+                ..Default::default()
             },
             ..Default::default()
         };
-        let json = serde_json::to_string(&stats).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            value["last_activated"],
-            serde_json::json!(1_700_000_000i64),
-            "last_activated must be a top-level JSON key in EnvStats"
+        let score = frecency_score(&stats, now);
+        assert!(
+            (score - 1.0).abs() < 1e-6,
+            "score for a single entry at now must be ≈ 1.0, got {score}"
         );
     }
 
-    /// `load_env_meta` must correctly deserialize `activation_count` from a
-    /// pre-existing JSON file that uses the flat top-level key (as written by
-    /// earlier versions of enwiro).
+    /// A single activation recorded exactly 48 hours ago must yield a score ≈ 0.5
+    /// (48-hour half-life: e^(-λ*48h) = 0.5 by definition).
     #[test]
-    fn test_load_env_meta_deserializes_activation_count_from_raw_json() {
+    fn test_frecency_score_single_entry_48h_ago_is_half() {
+        let now: i64 = 1_700_000_000;
+        let forty_eight_hours: i64 = 48 * 3600;
+        let stats = EnvStats {
+            signals: UserIntentSignals {
+                activation_buffer: vec![(now - forty_eight_hours, 1.0)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let score = frecency_score(&stats, now);
+        assert!(
+            (score - 0.5).abs() < 1e-6,
+            "score for a single entry 48h ago must be ≈ 0.5, got {score}"
+        );
+    }
+
+    /// Scores from multiple entries must be summed: two entries each with weight 1.0
+    /// at `now` must give score ≈ 2.0.
+    #[test]
+    fn test_frecency_score_sums_multiple_entries() {
+        let now: i64 = 1_700_000_000;
+        let stats = EnvStats {
+            signals: UserIntentSignals {
+                activation_buffer: vec![(now, 1.0), (now, 1.0)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let score = frecency_score(&stats, now);
+        assert!(
+            (score - 2.0).abs() < 1e-6,
+            "score for two entries at now must be ≈ 2.0, got {score}"
+        );
+    }
+
+    /// Old on-disk JSON that only has `activation_count` and `last_activated` keys
+    /// must deserialize without error, and `activation_buffer` must be empty.
+    #[test]
+    fn test_old_json_with_activation_count_only_gives_empty_buffer() {
         let dir = tempfile::tempdir().unwrap();
         let env_dir = dir.path().join("my-project");
         fs::create_dir(&env_dir).unwrap();
         fs::write(
             env_dir.join("meta.json"),
-            r#"{"last_activated":1700000000,"activation_count":42}"#,
+            r#"{"last_activated":1700000000,"activation_count":99}"#,
         )
         .unwrap();
 
         let meta = load_env_meta(&env_dir);
-        assert_eq!(
-            meta.signals.activation_count, 42,
-            "activation_count must deserialize from top-level JSON key"
+        assert!(
+            meta.signals.activation_buffer.is_empty(),
+            "old JSON without activation_buffer key must deserialize to an empty buffer"
         );
     }
 
-    /// `load_env_meta` must correctly deserialize `last_activated` from a
-    /// pre-existing JSON file that uses the flat top-level key.
+    /// Variant: centralized usage-stats.json with old keys must also give empty buffer.
     #[test]
-    fn test_load_env_meta_deserializes_last_activated_from_raw_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let env_dir = dir.path().join("my-project");
-        fs::create_dir(&env_dir).unwrap();
-        fs::write(
-            env_dir.join("meta.json"),
-            r#"{"last_activated":1700000000,"activation_count":3}"#,
-        )
-        .unwrap();
-
-        let meta = load_env_meta(&env_dir);
-        assert_eq!(
-            meta.signals.last_activated, 1_700_000_000,
-            "last_activated must deserialize from top-level JSON key"
-        );
-    }
-
-    /// `load_stats` must correctly deserialize `activation_count` from a
-    /// pre-existing centralized usage-stats.json file.
-    #[test]
-    fn test_load_stats_deserializes_activation_count_from_raw_json() {
+    fn test_old_centralized_json_gives_empty_buffer() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stats.json");
         fs::write(
             &path,
-            r#"{"envs":{"my-project":{"last_activated":0,"activation_count":5}}}"#,
+            r#"{"envs":{"my-project":{"last_activated":1700000000,"activation_count":42}}}"#,
         )
         .unwrap();
 
         let stats = load_stats(&path);
-        assert_eq!(
-            stats.envs["my-project"].signals.activation_count, 5,
-            "activation_count must deserialize from top-level JSON key in centralized stats"
-        );
-    }
-
-    /// `load_stats` must correctly deserialize `last_activated` from a
-    /// pre-existing centralized usage-stats.json file.
-    #[test]
-    fn test_load_stats_deserializes_last_activated_from_raw_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stats.json");
-        fs::write(
-            &path,
-            r#"{"envs":{"my-project":{"last_activated":1700000000,"activation_count":1}}}"#,
-        )
-        .unwrap();
-
-        let stats = load_stats(&path);
-        assert_eq!(
-            stats.envs["my-project"].signals.last_activated, 1_700_000_000,
-            "last_activated must deserialize from top-level JSON key in centralized stats"
+        assert!(
+            stats.envs["my-project"]
+                .signals
+                .activation_buffer
+                .is_empty(),
+            "old centralized JSON without activation_buffer must deserialize to an empty buffer"
         );
     }
 }
