@@ -6,7 +6,7 @@ use tokio_i3ipc::I3;
 #[derive(serde::Deserialize, Debug, Clone)]
 struct ManagedEnvInfo {
     name: String,
-    frecency: f64,
+    slot_score: f64,
 }
 
 #[derive(Parser)]
@@ -52,7 +52,7 @@ fn find_eviction_candidate<'a>(
 ) -> Option<&'a Workspace> {
     let frecency_map: std::collections::HashMap<&str, f64> = managed_envs
         .iter()
-        .map(|e| (e.name.as_str(), e.frecency))
+        .map(|e| (e.name.as_str(), e.slot_score))
         .collect();
 
     workspaces
@@ -211,10 +211,44 @@ mod tests {
         assert_eq!(extract_environment_name(&ws), "a3b");
     }
 
-    fn make_managed(name: &str, frecency: f64) -> ManagedEnvInfo {
+    fn make_managed(name: &str, slot_score: f64) -> ManagedEnvInfo {
         ManagedEnvInfo {
             name: name.to_string(),
-            frecency,
+            slot_score,
+        }
+    }
+
+    /// `ManagedEnvInfo` in the i3wm adapter must deserialize from JSON using the key
+    /// `"slot_score"` (not `"frecency"`).  This mirrors the rename on the core side.
+    #[test]
+    fn test_i3wm_deserializes_slot_score_from_json() {
+        let json = r#"[{"name":"my-project","slot_score":0.5}]"#;
+        let envs: Vec<ManagedEnvInfo> =
+            serde_json::from_str(json).expect("must parse slot_score from JSON");
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].name, "my-project");
+        assert!(
+            (envs[0].slot_score - 0.5).abs() < 1e-10,
+            "slot_score must round-trip from JSON, got {}",
+            envs[0].slot_score
+        );
+    }
+
+    /// Confirm that a JSON payload using the old `"frecency"` key is NOT silently
+    /// accepted under the new field name — this guards against accidentally keeping
+    /// a serde rename alias.
+    #[test]
+    fn test_i3wm_does_not_accept_frecency_key() {
+        let json = r#"[{"name":"my-project","frecency":0.5}]"#;
+        // With `deny_unknown_fields` this would error; without it the struct default (0.0)
+        // is used.  Either way, the slot_score must NOT be 0.5 (i.e. the old key is gone).
+        let envs: Vec<ManagedEnvInfo> = serde_json::from_str(json).unwrap_or_default();
+        if !envs.is_empty() {
+            assert!(
+                (envs[0].slot_score - 0.5).abs() > 1e-10,
+                "slot_score must NOT be populated from the old `frecency` JSON key; \
+                 if it is, the rename has a hidden alias"
+            );
         }
     }
 
