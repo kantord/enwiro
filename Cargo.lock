@@ -548,6 +548,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-i3ipc",
+ "tokio-stream",
  "tracing",
 ]
 

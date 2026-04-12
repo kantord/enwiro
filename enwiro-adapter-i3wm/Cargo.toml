@@ -17,4 +17,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = "1.37.0"
 tokio-i3ipc = "0.16.0"
+tokio-stream = "0.1"
 tracing.workspace = true
