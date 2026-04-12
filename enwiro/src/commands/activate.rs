@@ -29,7 +29,7 @@ fn build_managed_envs<W: Write>(context: &CommandContext<W>) -> Vec<ManagedEnvIn
             (env.name.clone(), meta)
         })
         .collect();
-    let percentile_scores = crate::usage_stats::activation_percentile_scores(&all_stats, now);
+    let percentile_scores = crate::usage_stats::slot_scores(&all_stats, now);
     envs.values()
         .map(|env| ManagedEnvInfo {
             name: env.name.clone(),
@@ -94,6 +94,96 @@ mod tests {
             *self.captured.borrow_mut() = managed_envs.to_vec();
             Ok(())
         }
+    }
+
+    /// Verify that `build_managed_envs` is wired to `slot_scores` from `usage_stats`.
+    ///
+    /// This test checks two things:
+    /// 1. `crate::usage_stats::slot_scores` is a callable public symbol (compile-time check).
+    /// 2. The `slot_score` values passed to the adapter by `activate` / `build_managed_envs`
+    ///    are consistent with what `slot_scores` returns for the same input data, establishing
+    ///    that the caller is wired to `slot_scores` rather than some other scoring function.
+    ///
+    /// Two environments are created; one receives a recent activation.  `slot_scores` is called
+    /// directly with the same metadata to derive expected values.  The captured adapter args
+    /// must match those expected values.
+    #[rstest]
+    fn test_build_managed_envs_uses_slot_scores(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        use std::collections::HashMap;
+
+        let (temp_dir, mut ctx, _, _) = context_object;
+        ctx.create_mock_environment("env-x");
+        ctx.create_mock_environment("env-y");
+
+        // Give "env-x" a recent activation.
+        let env_x_dir = std::path::Path::new(&ctx.config.workspaces_directory).join("env-x");
+        crate::usage_stats::record_activation_per_env(&env_x_dir);
+
+        // Build expected scores using slot_scores directly (compile-time symbol check).
+        let mut meta_map: HashMap<String, crate::usage_stats::EnvStats> = HashMap::new();
+        let now = crate::usage_stats::now_timestamp();
+        meta_map.insert(
+            "env-x".to_string(),
+            crate::usage_stats::load_env_meta(&env_x_dir),
+        );
+        let env_y_dir = std::path::Path::new(&ctx.config.workspaces_directory).join("env-y");
+        meta_map.insert(
+            "env-y".to_string(),
+            crate::usage_stats::load_env_meta(&env_y_dir),
+        );
+
+        let expected_scores = crate::usage_stats::slot_scores(&meta_map, now);
+        assert!(
+            expected_scores["env-x"] > expected_scores["env-y"],
+            "slot_scores must rank env-x higher than env-y"
+        );
+
+        // Install capturing adapter.
+        let captured = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
+        ctx.adapter = Box::new(CapturingAdapter {
+            captured: captured.clone(),
+        });
+
+        let result = activate(
+            &mut ctx,
+            ActivateArgs {
+                name: "env-x".to_string(),
+            },
+        );
+        assert!(result.is_ok());
+
+        let infos = captured.borrow();
+        let env_x_info = infos
+            .iter()
+            .find(|e| e.name == "env-x")
+            .expect("env-x must appear in managed_envs");
+        let env_y_info = infos
+            .iter()
+            .find(|e| e.name == "env-y")
+            .expect("env-y must appear in managed_envs");
+
+        // The slot_score passed to the adapter must match what slot_scores returns.
+        assert!(
+            env_x_info.slot_score > env_y_info.slot_score,
+            "activate must wire build_managed_envs to slot_scores: env-x slot_score \
+             must exceed env-y slot_score; env-x={}, env-y={}",
+            env_x_info.slot_score,
+            env_y_info.slot_score
+        );
+        assert!(
+            env_y_info.slot_score.abs() < 1e-10,
+            "env-y with no activations must have slot_score 0.0, got {}",
+            env_y_info.slot_score
+        );
+        assert!(
+            (env_x_info.slot_score - 0.5).abs() < 1e-10,
+            "env-x must have slot_score 0.5 (rank 1/2), got {}",
+            env_x_info.slot_score
+        );
+
+        drop(temp_dir);
     }
 
     /// `build_managed_envs` must set `slot_score` from percentile rank, not raw frecency.

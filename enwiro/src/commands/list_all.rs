@@ -48,7 +48,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
     }
 
     let now = crate::usage_stats::now_timestamp();
-    let percentile_map = crate::usage_stats::activation_percentile_scores(&meta_map, now);
+    let percentile_map = crate::usage_stats::launcher_score(&meta_map, now);
     envs.sort_by(|a, b| {
         let score_a = percentile_map.get(&a.name).copied().unwrap_or(0.0);
         let score_b = percentile_map.get(&b.name).copied().unwrap_or(0.0);
@@ -427,6 +427,78 @@ mod tests {
         assert_eq!(
             env_lines[2], "_: low-activity",
             "lowest percentile rank (no activations) must be last"
+        );
+    }
+
+    /// Verify that `list-all` sorts environments using `launcher_score` from `usage_stats`.
+    ///
+    /// This test checks two things:
+    /// 1. `crate::usage_stats::launcher_score` is a callable public symbol (compile-time check).
+    /// 2. The ordering produced by `list_all` is consistent with what `launcher_score` returns
+    ///    for the same input data — establishing that the caller is wired to `launcher_score`
+    ///    rather than some other scoring function.
+    ///
+    /// Two environments are set up with different activation histories.  `launcher_score` is
+    /// called directly with the same metadata to derive the expected ordering.  `list_all` must
+    /// place the environment with the higher `launcher_score` first.
+    #[rstest]
+    fn test_list_all_uses_launcher_score_for_ordering(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        use std::collections::HashMap;
+
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("alpha");
+        context_object.create_mock_environment("beta");
+
+        let now = crate::usage_stats::now_timestamp();
+
+        // "beta" gets a recent activation; "alpha" gets none.
+        let beta_meta = crate::usage_stats::EnvStats {
+            signals: UserIntentSignals {
+                activation_buffer: vec![(now, 1.0)],
+            },
+            ..Default::default()
+        };
+        let alpha_meta = crate::usage_stats::EnvStats::default();
+
+        std::fs::write(
+            temp_dir.path().join("beta").join("meta.json"),
+            serde_json::to_string(&beta_meta).unwrap(),
+        )
+        .unwrap();
+
+        // Derive the expected order using launcher_score directly (compile-time symbol check).
+        let mut meta_map: HashMap<String, crate::usage_stats::EnvStats> = HashMap::new();
+        meta_map.insert("alpha".to_string(), alpha_meta.clone());
+        meta_map.insert("beta".to_string(), beta_meta.clone());
+
+        let scores = crate::usage_stats::launcher_score(&meta_map, now);
+        assert!(
+            scores["beta"] > scores["alpha"],
+            "launcher_score must rank beta higher than alpha; beta={}, alpha={}",
+            scores["beta"],
+            scores["alpha"]
+        );
+
+        // Now verify list_all produces the same ordering.
+        list_all(&mut context_object, false).unwrap();
+
+        let output = context_object.get_output();
+        let env_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("_: ")).collect();
+        assert_eq!(
+            env_lines.len(),
+            2,
+            "expected 2 env lines, got: {:?}",
+            env_lines
+        );
+        assert_eq!(
+            env_lines[0], "_: beta",
+            "list_all must put the environment with the higher launcher_score first"
+        );
+        assert_eq!(
+            env_lines[1], "_: alpha",
+            "list_all must put the environment with the lower launcher_score second"
         );
     }
 

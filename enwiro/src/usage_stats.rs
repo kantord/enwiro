@@ -174,6 +174,20 @@ pub fn activation_percentile_scores(
         .collect()
 }
 
+/// Score function for the launcher UI (`list-all`).
+/// Returns percentile ranks identical to [`activation_percentile_scores`].
+/// Callers should use this named wrapper so the intent is explicit at call sites.
+pub fn launcher_score(all_stats: &HashMap<String, EnvStats>, now: i64) -> HashMap<String, f64> {
+    activation_percentile_scores(all_stats, now)
+}
+
+/// Score function for workspace slot assignment (`activate`).
+/// Returns percentile ranks identical to [`activation_percentile_scores`].
+/// Callers should use this named wrapper so the intent is explicit at call sites.
+pub fn slot_scores(all_stats: &HashMap<String, EnvStats>, now: i64) -> HashMap<String, f64> {
+    activation_percentile_scores(all_stats, now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,6 +761,192 @@ mod tests {
         assert!(
             (result["tied-a"] - result["tied-b"]).abs() < 1e-10,
             "tied envs must have identical percentile ranks"
+        );
+    }
+
+    // ── launcher_score / slot_scores wrapper tests ─────────────────────────
+
+    /// `launcher_score` must exist as a public function with the same signature as
+    /// `activation_percentile_scores` and must return an empty map for empty input.
+    #[test]
+    fn test_launcher_score_empty_input_returns_empty() {
+        let all_stats: HashMap<String, EnvStats> = HashMap::new();
+        let now: i64 = 1_700_000_000;
+        let result = launcher_score(&all_stats, now);
+        assert!(
+            result.is_empty(),
+            "launcher_score with empty input must return an empty map, got {result:?}"
+        );
+    }
+
+    /// `launcher_score` must return the same result as `activation_percentile_scores`
+    /// for any input — it is a semantically identical thin wrapper.
+    #[test]
+    fn test_launcher_score_matches_activation_percentile_scores() {
+        let now: i64 = 1_700_000_000;
+        let forty_eight_hours: i64 = 48 * 3600;
+
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+        all_stats.insert("low".to_string(), EnvStats::default());
+        all_stats.insert(
+            "mid".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now - forty_eight_hours, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "high".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let expected = activation_percentile_scores(&all_stats, now);
+        let actual = launcher_score(&all_stats, now);
+
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "launcher_score must return the same number of entries as activation_percentile_scores"
+        );
+        for (name, &expected_score) in &expected {
+            let actual_score = actual
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("launcher_score missing entry for '{name}'"));
+            assert!(
+                (actual_score - expected_score).abs() < 1e-10,
+                "launcher_score['{name}'] = {actual_score} but activation_percentile_scores['{name}'] = {expected_score}"
+            );
+        }
+    }
+
+    /// `launcher_score` preserves strict ordering: a higher-frecency env must get a
+    /// higher score than a lower-frecency env.
+    #[test]
+    fn test_launcher_score_ordering_high_beats_low() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+        all_stats.insert("never-used".to_string(), EnvStats::default());
+        all_stats.insert(
+            "recently-used".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = launcher_score(&all_stats, now);
+
+        assert!(
+            result["recently-used"] > result["never-used"],
+            "recently-used must have a higher launcher_score than never-used; \
+             recently-used={}, never-used={}",
+            result["recently-used"],
+            result["never-used"]
+        );
+    }
+
+    /// `slot_scores` must exist as a public function with the same signature as
+    /// `activation_percentile_scores` and must return an empty map for empty input.
+    #[test]
+    fn test_slot_scores_empty_input_returns_empty() {
+        let all_stats: HashMap<String, EnvStats> = HashMap::new();
+        let now: i64 = 1_700_000_000;
+        let result = slot_scores(&all_stats, now);
+        assert!(
+            result.is_empty(),
+            "slot_scores with empty input must return an empty map, got {result:?}"
+        );
+    }
+
+    /// `slot_scores` must return the same result as `activation_percentile_scores`
+    /// for any input — it is a semantically identical thin wrapper.
+    #[test]
+    fn test_slot_scores_matches_activation_percentile_scores() {
+        let now: i64 = 1_700_000_000;
+        let forty_eight_hours: i64 = 48 * 3600;
+
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+        all_stats.insert("low".to_string(), EnvStats::default());
+        all_stats.insert(
+            "mid".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now - forty_eight_hours, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "high".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let expected = activation_percentile_scores(&all_stats, now);
+        let actual = slot_scores(&all_stats, now);
+
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "slot_scores must return the same number of entries as activation_percentile_scores"
+        );
+        for (name, &expected_score) in &expected {
+            let actual_score = actual
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("slot_scores missing entry for '{name}'"));
+            assert!(
+                (actual_score - expected_score).abs() < 1e-10,
+                "slot_scores['{name}'] = {actual_score} but activation_percentile_scores['{name}'] = {expected_score}"
+            );
+        }
+    }
+
+    /// `slot_scores` preserves strict ordering: a higher-frecency env must get a
+    /// higher score than a lower-frecency env.
+    #[test]
+    fn test_slot_scores_ordering_high_beats_low() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+        all_stats.insert("never-used".to_string(), EnvStats::default());
+        all_stats.insert(
+            "recently-used".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = slot_scores(&all_stats, now);
+
+        assert!(
+            result["recently-used"] > result["never-used"],
+            "recently-used must have a higher slot_score than never-used; \
+             recently-used={}, never-used={}",
+            result["recently-used"],
+            result["never-used"]
         );
     }
 }
