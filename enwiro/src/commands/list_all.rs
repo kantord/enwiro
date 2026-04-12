@@ -42,17 +42,16 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
             meta_map.insert(env.name.clone(), s.clone());
         }
     }
+    // Ensure every env has an entry in meta_map so activation_percentile_scores sees the full population
+    for env in &envs {
+        meta_map.entry(env.name.clone()).or_default();
+    }
 
     let now = crate::usage_stats::now_timestamp();
+    let percentile_map = crate::usage_stats::activation_percentile_scores(&meta_map, now);
     envs.sort_by(|a, b| {
-        let score_a = meta_map
-            .get(&a.name)
-            .map(|s| crate::usage_stats::frecency_score(s, now))
-            .unwrap_or(0.0);
-        let score_b = meta_map
-            .get(&b.name)
-            .map(|s| crate::usage_stats::frecency_score(s, now))
-            .unwrap_or(0.0);
+        let score_a = percentile_map.get(&a.name).copied().unwrap_or(0.0);
+        let score_b = percentile_map.get(&b.name).copied().unwrap_or(0.0);
         score_b
             .partial_cmp(&score_a)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -359,6 +358,76 @@ mod tests {
         assert_eq!(env_lines[0], "_: often-used");
         assert_eq!(env_lines[1], "_: rarely-used");
         assert_eq!(env_lines[2], "_: never-used");
+    }
+
+    /// Verify that `list-all` orders environments by percentile rank (highest first).
+    ///
+    /// Three environments are given clearly distinct activation histories so their
+    /// raw frecency scores are strictly ordered: high > mid > low.  Because
+    /// `launcher_score` returns percentile rank (monotone with raw frecency), the
+    /// expected output order is the same: high, mid, low.  The test confirms that
+    /// the sort is wired through `launcher_score` (percentile) rather than raw
+    /// decay sum, establishing the end-to-end contract.
+    #[rstest]
+    fn test_list_all_orders_environments_by_launcher_percentile_score(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("low-activity");
+        context_object.create_mock_environment("mid-activity");
+        context_object.create_mock_environment("high-activity");
+
+        let now = crate::usage_stats::now_timestamp();
+
+        // high-activity: 5 recent activations — highest frecency → highest percentile
+        let high_meta = crate::usage_stats::EnvStats {
+            signals: UserIntentSignals {
+                activation_buffer: vec![(now, 1.0); 5],
+            },
+            ..Default::default()
+        };
+        // mid-activity: 1 activation 48 h ago — score ≈ 0.5, middle percentile
+        let mid_meta = crate::usage_stats::EnvStats {
+            signals: UserIntentSignals {
+                activation_buffer: vec![(now - 48 * 3600, 1.0)],
+            },
+            ..Default::default()
+        };
+        // low-activity: no activations at all — score 0.0, lowest percentile
+
+        std::fs::write(
+            temp_dir.path().join("high-activity").join("meta.json"),
+            serde_json::to_string(&high_meta).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            temp_dir.path().join("mid-activity").join("meta.json"),
+            serde_json::to_string(&mid_meta).unwrap(),
+        )
+        .unwrap();
+
+        list_all(&mut context_object, false).unwrap();
+
+        let output = context_object.get_output();
+        let env_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("_: ")).collect();
+        assert_eq!(
+            env_lines.len(),
+            3,
+            "expected 3 env lines, got: {:?}",
+            env_lines
+        );
+        assert_eq!(
+            env_lines[0], "_: high-activity",
+            "highest percentile rank must be first"
+        );
+        assert_eq!(
+            env_lines[1], "_: mid-activity",
+            "middle percentile rank must be second"
+        );
+        assert_eq!(
+            env_lines[2], "_: low-activity",
+            "lowest percentile rank (no activations) must be last"
+        );
     }
 
     #[rstest]

@@ -150,6 +150,30 @@ pub fn frecency_score(stats: &EnvStats, now: i64) -> f64 {
         .sum()
 }
 
+/// Compute percentile ranks for all environments based on their frecency scores.
+/// For each env, the percentile is: (count of envs with strictly lower score) / total_envs.
+/// Tied envs receive the same rank. Empty input returns empty output.
+pub fn activation_percentile_scores(
+    all_stats: &HashMap<String, EnvStats>,
+    now: i64,
+) -> HashMap<String, f64> {
+    let total = all_stats.len();
+    if total == 0 {
+        return HashMap::new();
+    }
+    let scores: HashMap<&str, f64> = all_stats
+        .iter()
+        .map(|(name, stats)| (name.as_str(), frecency_score(stats, now)))
+        .collect();
+    scores
+        .iter()
+        .map(|(&name, &score)| {
+            let count_below = scores.values().filter(|&&s| s < score).count();
+            (name.to_string(), count_below as f64 / total as f64)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +595,158 @@ mod tests {
                 .activation_buffer
                 .is_empty(),
             "old centralized JSON without activation_buffer must deserialize to an empty buffer"
+        );
+    }
+
+    // ── activation_percentile_scores tests ─────────────────────────────────
+
+    /// An empty input map must produce an empty output map.
+    #[test]
+    fn test_activation_percentile_scores_empty_input() {
+        let all_stats: HashMap<String, EnvStats> = HashMap::new();
+        let now: i64 = 1_700_000_000;
+        let result = activation_percentile_scores(&all_stats, now);
+        assert!(
+            result.is_empty(),
+            "empty input must produce empty output, got {result:?}"
+        );
+    }
+
+    /// When all environments have empty activation buffers their frecency score is
+    /// 0.0. With no env scoring strictly lower than another, every env must receive
+    /// percentile 0.0.
+    #[test]
+    fn test_activation_percentile_scores_all_zeros() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+        all_stats.insert("alpha".to_string(), EnvStats::default());
+        all_stats.insert("beta".to_string(), EnvStats::default());
+
+        let result: HashMap<String, f64> = activation_percentile_scores(&all_stats, now);
+
+        assert_eq!(result.len(), 2);
+        for (name, pct) in result.iter() {
+            let pct: f64 = *pct;
+            assert!(
+                pct.abs() < 1e-10,
+                "env '{name}' has no activations so percentile must be 0.0, got {pct}"
+            );
+        }
+    }
+
+    /// Three environments with distinct scores must each receive a percentile equal
+    /// to (count of envs with strictly lower score) / total_envs.
+    ///
+    /// Setup:
+    ///   - "low"  : empty buffer → score 0.0  → 0 envs below → rank 0/3 = 0.0
+    ///   - "mid"  : 1 activation 48h ago      → score ≈ 0.5 → 1 env below → rank 1/3
+    ///   - "high" : 1 activation at now       → score ≈ 1.0 → 2 envs below → rank 2/3
+    #[test]
+    fn test_activation_percentile_scores_three_varied_scores() {
+        let now: i64 = 1_700_000_000;
+        let forty_eight_hours: i64 = 48 * 3600;
+
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+        all_stats.insert("low".to_string(), EnvStats::default());
+        all_stats.insert(
+            "mid".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now - forty_eight_hours, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "high".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = activation_percentile_scores(&all_stats, now);
+
+        assert_eq!(result.len(), 3);
+        let total = 3.0_f64;
+        assert!(
+            result["low"].abs() < 1e-10,
+            "low must have percentile 0/3 = 0.0, got {}",
+            result["low"]
+        );
+        assert!(
+            (result["mid"] - 1.0 / total).abs() < 1e-10,
+            "mid must have percentile 1/3, got {}",
+            result["mid"]
+        );
+        assert!(
+            (result["high"] - 2.0 / total).abs() < 1e-10,
+            "high must have percentile 2/3, got {}",
+            result["high"]
+        );
+    }
+
+    /// Environments with the same frecency score must receive the same percentile rank.
+    ///
+    /// Setup (3 envs, total = 3):
+    ///   - "zero"   : empty buffer → score 0.0          → rank 0/3 = 0.0
+    ///   - "tied-a" : 1 activation at now → score ≈ 1.0 → 1 env below → rank 1/3
+    ///   - "tied-b" : 1 activation at now → score ≈ 1.0 → 1 env below → rank 1/3
+    ///
+    /// "tied-a" and "tied-b" share the same score, so neither is strictly below
+    /// the other. Both count only "zero" as strictly lower → rank 1/3 each.
+    #[test]
+    fn test_activation_percentile_scores_ties_get_same_rank() {
+        let now: i64 = 1_700_000_000;
+
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+        all_stats.insert("zero".to_string(), EnvStats::default());
+        all_stats.insert(
+            "tied-a".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "tied-b".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = activation_percentile_scores(&all_stats, now);
+
+        assert_eq!(result.len(), 3);
+        assert!(
+            result["zero"].abs() < 1e-10,
+            "zero must have percentile 0/3 = 0.0, got {}",
+            result["zero"]
+        );
+        assert!(
+            (result["tied-a"] - 1.0 / 3.0).abs() < 1e-10,
+            "tied-a must have percentile 1/3, got {}",
+            result["tied-a"]
+        );
+        assert!(
+            (result["tied-b"] - 1.0 / 3.0).abs() < 1e-10,
+            "tied-b must have percentile 1/3 (same as tied-a), got {}",
+            result["tied-b"]
+        );
+        assert!(
+            (result["tied-a"] - result["tied-b"]).abs() < 1e-10,
+            "tied envs must have identical percentile ranks"
         );
     }
 }
