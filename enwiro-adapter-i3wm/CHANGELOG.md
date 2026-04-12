@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.7...enwiro-adapter-i3wm-v0.1.8) - 2026-04-12
+
+### Added
+
+- replace least-score eviction with NetBenefit swap selection
+
+### Other
+
+- replace frecency with percentile slot_score in ManagedEnvInfo
+
 ## [0.1.7](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.6...enwiro-adapter-i3wm-v0.1.7) - 2026-04-11
 
 ### Added
