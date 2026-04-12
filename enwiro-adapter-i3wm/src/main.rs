@@ -1,7 +1,9 @@
 use anyhow::Context;
 use clap::Parser;
+use i3ipc_types::event::{Event, Subscribe};
 use i3ipc_types::reply::Workspace;
 use tokio_i3ipc::I3;
+use tokio_stream::StreamExt;
 
 /// Minimum NetBenefit required to justify evicting a workspace from a single-digit slot.
 /// A swap that yields less than this gain is treated as not worth the disruption.
@@ -20,10 +22,14 @@ struct ManagedEnvInfo {
     slot_score: f64,
 }
 
+#[derive(clap::Args)]
+pub struct ListenArgs {}
+
 #[derive(Parser)]
 enum EnwiroAdapterI3WmCLI {
     GetActiveWorkspaceId(GetActiveWorkspaceIdArgs),
     Activate(ActivateArgs),
+    Listen(ListenArgs),
 }
 
 #[derive(clap::Args)]
@@ -277,6 +283,21 @@ fn extract_environment_name(workspace: &Workspace) -> String {
         .unwrap_or_default()
 }
 
+fn extract_environment_name_from_str(name: &str) -> String {
+    name.split_once(':')
+        .map(|(_, rest)| rest.trim().to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
+fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
+    serde_json::json!({
+        "type": "workspace_switch",
+        "timestamp": timestamp,
+        "env_name": env_name,
+    })
+    .to_string()
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let _guard = enwiro_logging::init_logging("enwiro-adapter-i3wm.log");
@@ -343,6 +364,24 @@ async fn main() -> anyhow::Result<()> {
                 let workspace_name = format!("{}: {}", target_num, args.name);
                 tracing::info!(workspace = %workspace_name, num = target_num, "Creating new workspace");
                 run_i3_command(&mut i3, build_workspace_command(&workspace_name)).await?;
+            }
+        }
+        EnwiroAdapterI3WmCLI::Listen(_) => {
+            let mut i3 = I3::connect().await?;
+            i3.subscribe([Subscribe::Workspace]).await?;
+            let mut listener = i3.listen();
+            loop {
+                if let Some(Ok(Event::Workspace(ws_event))) = listener.next().await
+                    && let Some(current) = ws_event.current
+                {
+                    let raw_name = current.name.unwrap_or_default();
+                    let env_name = extract_environment_name_from_str(&raw_name);
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    println!("{}", format_workspace_switch_event(&env_name, ts));
+                }
             }
         }
     };
@@ -1167,5 +1206,79 @@ mod tests {
                 chars.next();
             }
         }
+    }
+
+    // ── listen subcommand tests ───────────────────────────────────────────────
+
+    /// Test 1: Output of format_workspace_switch_event is valid JSON and has the
+    /// expected keys: `type`, `timestamp`, and `env_name`.
+    #[test]
+    fn test_format_workspace_switch_event_is_valid_json_with_expected_keys() {
+        let output = format_workspace_switch_event("my-project", 1700000000);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output must be valid JSON");
+        assert!(parsed.get("type").is_some(), "missing key: type");
+        assert!(parsed.get("timestamp").is_some(), "missing key: timestamp");
+        assert!(parsed.get("env_name").is_some(), "missing key: env_name");
+    }
+
+    /// Test 2: The `type` field is always the literal string `"workspace_switch"`.
+    #[test]
+    fn test_format_workspace_switch_event_type_is_workspace_switch() {
+        let output = format_workspace_switch_event("any-env", 0);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output must be valid JSON");
+        assert_eq!(
+            parsed["type"].as_str(),
+            Some("workspace_switch"),
+            "type field must be \"workspace_switch\""
+        );
+    }
+
+    /// Test 3: The `env_name` field is passed through as-is (no transformation).
+    #[test]
+    fn test_format_workspace_switch_event_env_name_passthrough() {
+        let env_name = "some-complex-env_name.with.dots";
+        let output = format_workspace_switch_event(env_name, 42);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output must be valid JSON");
+        assert_eq!(
+            parsed["env_name"].as_str(),
+            Some(env_name),
+            "env_name must be passed through unchanged"
+        );
+    }
+
+    /// Test 4: The `timestamp` field round-trips correctly as an i64.
+    #[test]
+    fn test_format_workspace_switch_event_timestamp_roundtrips() {
+        let timestamp: i64 = 1_700_000_000;
+        let output = format_workspace_switch_event("proj", timestamp);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&output).expect("output must be valid JSON");
+        assert_eq!(
+            parsed["timestamp"].as_i64(),
+            Some(timestamp),
+            "timestamp must round-trip as i64"
+        );
+    }
+
+    /// Test 5: The output does NOT end with a trailing newline — the caller
+    /// adds one via `println!`.
+    #[test]
+    fn test_format_workspace_switch_event_no_trailing_newline() {
+        let output = format_workspace_switch_event("proj", 0);
+        assert!(
+            !output.ends_with('\n'),
+            "format_workspace_switch_event must not append a trailing newline; \
+             the caller uses println! to add one"
+        );
+    }
+
+    /// Test 6: The CLI enum has a `Listen` variant that can be constructed.
+    /// This test will fail to compile until the variant and `ListenArgs` exist.
+    #[test]
+    fn test_cli_has_listen_variant() {
+        let _ = EnwiroAdapterI3WmCLI::Listen(ListenArgs {});
     }
 }
