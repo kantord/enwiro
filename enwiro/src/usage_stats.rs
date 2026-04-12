@@ -47,15 +47,25 @@ pub fn load_stats_default() -> UsageStats {
     }
 }
 
-/// Save stats atomically (write tmp + rename).
-fn save_stats(path: &Path, stats: &UsageStats) -> io::Result<()> {
+/// Write bytes to `path` atomically via a `.tmp` staging file.
+/// Parent directories are created automatically.
+///
+/// The staging file is named by replacing `path`'s last extension with `.tmp`
+/// (e.g. `meta.json` → `meta.tmp`, `recipes.cache` → `recipes.tmp`).
+/// Callers that need a different tmp path must not use this function.
+pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_string(stats)?)?;
+    fs::write(&tmp, data)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Serialise stats to JSON and delegate to [`atomic_write`].
+fn save_stats(path: &Path, stats: &UsageStats) -> io::Result<()> {
+    atomic_write(path, serde_json::to_string(stats)?.as_bytes())
 }
 
 /// Record that an environment was activated. Best-effort (errors logged, not propagated).
@@ -85,13 +95,10 @@ pub fn load_env_meta(env_dir: &Path) -> EnvStats {
         .unwrap_or_default()
 }
 
-/// Save per-environment metadata atomically (write tmp + rename).
+/// Serialise per-environment metadata to JSON and delegate to [`atomic_write`].
 fn save_env_meta(env_dir: &Path, meta: &EnvStats) -> io::Result<()> {
     let meta_path = env_dir.join("meta.json");
-    let tmp = meta_path.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_string(meta)?)?;
-    fs::rename(&tmp, &meta_path)?;
-    Ok(())
+    atomic_write(&meta_path, serde_json::to_string(meta)?.as_bytes())
 }
 
 /// Record activation in per-env meta.json. Best-effort.
@@ -135,6 +142,74 @@ pub fn frecency_score(stats: &EnvStats, now: i64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── atomic_write abstraction tests ──────────────────────────────────────
+
+    /// The function must exist and must write the given bytes to the target path.
+    #[test]
+    fn test_atomic_write_creates_file_with_correct_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("output.json");
+        let data = b"{\"hello\": \"world\"}";
+
+        atomic_write(&target, data).expect("atomic_write should succeed");
+
+        let written = fs::read(&target).expect("target file should exist after atomic_write");
+        assert_eq!(written, data);
+    }
+
+    /// The temporary file must NOT remain on disk after a successful write.
+    #[test]
+    fn test_atomic_write_leaves_no_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("output.json");
+        let data = b"some content";
+
+        atomic_write(&target, data).expect("atomic_write should succeed");
+
+        let tmp = target.with_extension("tmp");
+        assert!(
+            !tmp.exists(),
+            "the .tmp staging file should be gone after atomic_write succeeds"
+        );
+    }
+
+    /// Writing the same path twice must overwrite the previous content.
+    #[test]
+    fn test_atomic_write_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("output.json");
+
+        atomic_write(&target, b"first").unwrap();
+        atomic_write(&target, b"second").unwrap();
+
+        let written = fs::read(&target).unwrap();
+        assert_eq!(written, b"second");
+    }
+
+    /// Parent directories must be created automatically (mirrors save_stats behaviour).
+    #[test]
+    fn test_atomic_write_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a").join("b").join("c").join("output.json");
+
+        atomic_write(&target, b"data").expect("atomic_write should create missing parent dirs");
+
+        assert!(target.exists());
+    }
+
+    /// The written bytes must be exactly what was passed in — no extra bytes, no truncation.
+    #[test]
+    fn test_atomic_write_preserves_exact_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("output.bin");
+        let data: Vec<u8> = (0u8..=255).collect();
+
+        atomic_write(&target, &data).unwrap();
+
+        let written = fs::read(&target).unwrap();
+        assert_eq!(written, data);
+    }
 
     #[test]
     fn test_record_and_load() {
