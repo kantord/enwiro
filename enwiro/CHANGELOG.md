@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.22](https://github.com/kantord/enwiro/compare/enwiro-v0.3.21...enwiro-v0.3.22) - 2026-04-12
+
+### Added
+
+- rank environments by activation percentile in list-all
+
+### Other
+
+- replace frecency fields with decay-based activation_buffer
+- group frecency fields into UserIntentSignals struct
+- extract atomic_write helper in usage_stats
+
 ## [0.3.21](https://github.com/kantord/enwiro/compare/enwiro-v0.3.20...enwiro-v0.3.21) - 2026-04-11
 
 ### Added
