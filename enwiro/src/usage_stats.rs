@@ -8,6 +8,8 @@ use std::{fs, io};
 pub struct UserIntentSignals {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub activation_buffer: Vec<(i64, f64)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_buffer: Vec<(i64, f64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -113,12 +115,29 @@ fn save_env_meta(env_dir: &Path, meta: &EnvStats) -> io::Result<()> {
 
 /// Record activation in per-env meta.json. Best-effort.
 pub fn record_activation_per_env(env_dir: &Path) {
+    if !env_dir.is_dir() {
+        return;
+    }
     let mut meta = load_env_meta(env_dir);
     meta.signals.activation_buffer.push((now_timestamp(), 1.0));
     meta.signals.activation_buffer.sort_by(|a, b| b.0.cmp(&a.0));
     meta.signals.activation_buffer.truncate(10);
     if let Err(e) = save_env_meta(env_dir, &meta) {
         tracing::warn!(error = %e, "Could not save environment metadata");
+    }
+}
+
+/// Record a workspace switch event in per-env meta.json. Best-effort.
+pub fn record_switch_per_env(env_dir: &Path, timestamp: i64) {
+    if !env_dir.is_dir() {
+        return;
+    }
+    let mut meta = load_env_meta(env_dir);
+    meta.signals.switch_buffer.push((timestamp, 1.0));
+    meta.signals.switch_buffer.sort_by(|a, b| b.0.cmp(&a.0));
+    meta.signals.switch_buffer.truncate(25);
+    if let Err(e) = save_env_meta(env_dir, &meta) {
+        tracing::warn!(error = %e, "Could not save switch event");
     }
 }
 
@@ -947,6 +966,213 @@ mod tests {
              recently-used={}, never-used={}",
             result["recently-used"],
             result["never-used"]
+        );
+    }
+
+    // ── switch_buffer / record_switch_per_env tests ────────────────────────
+
+    /// `UserIntentSignals` must have a `switch_buffer` field of type `Vec<(i64, f64)>`.
+    /// A freshly default-constructed value must have an empty buffer.
+    #[test]
+    fn test_switch_buffer_field_exists_and_defaults_empty() {
+        let signals = UserIntentSignals::default();
+        assert!(
+            signals.switch_buffer.is_empty(),
+            "switch_buffer must be empty by default"
+        );
+    }
+
+    /// `switch_buffer` must be serialised under that exact JSON key name,
+    /// flattened into the top-level `EnvStats` object.
+    #[test]
+    fn test_env_stats_serializes_switch_buffer_field_name() {
+        let signals = UserIntentSignals {
+            switch_buffer: vec![(1_700_000_000i64, 1.0f64)],
+            ..Default::default()
+        };
+        let stats = EnvStats {
+            signals,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.get("switch_buffer").is_some(),
+            "switch_buffer must appear as a top-level JSON key in EnvStats"
+        );
+    }
+
+    /// `record_switch_per_env` must push a `(timestamp, 1.0)` entry into `switch_buffer`.
+    #[test]
+    fn test_record_switch_per_env_pushes_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.switch_buffer.len(),
+            1,
+            "switch_buffer must have exactly one entry after one call"
+        );
+        let (stored_ts, weight) = meta.signals.switch_buffer[0];
+        assert_eq!(
+            stored_ts, ts,
+            "stored timestamp must match the provided one"
+        );
+        assert!(
+            (weight - 1.0).abs() < 1e-10,
+            "switch_buffer entry weight must be 1.0"
+        );
+    }
+
+    /// Each subsequent call to `record_switch_per_env` must append another entry.
+    #[test]
+    fn test_record_switch_per_env_appends_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_switch_per_env(&env_dir, 1_700_000_001);
+        record_switch_per_env(&env_dir, 1_700_000_002);
+        record_switch_per_env(&env_dir, 1_700_000_003);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.switch_buffer.len(),
+            3,
+            "switch_buffer must grow by one entry per call"
+        );
+        for &(_, weight) in &meta.signals.switch_buffer {
+            assert!((weight - 1.0).abs() < 1e-10, "every weight must be 1.0");
+        }
+    }
+
+    /// The buffer must be kept in descending timestamp order.
+    #[test]
+    fn test_record_switch_per_env_buffer_sorted_descending() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_switch_per_env(&env_dir, 1_700_000_001);
+        record_switch_per_env(&env_dir, 1_700_000_003);
+        record_switch_per_env(&env_dir, 1_700_000_002);
+
+        let meta = load_env_meta(&env_dir);
+        let timestamps: Vec<i64> = meta
+            .signals
+            .switch_buffer
+            .iter()
+            .map(|&(ts, _)| ts)
+            .collect();
+        let mut sorted = timestamps.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(
+            timestamps, sorted,
+            "switch_buffer entries must be in descending timestamp order"
+        );
+    }
+
+    /// The buffer must be capped at N=25: when a 26th entry is recorded,
+    /// the oldest entry is dropped so the buffer stays at length 25.
+    #[test]
+    fn test_switch_buffer_capped_at_twenty_five() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        // Pre-populate the buffer with 25 entries using a fixed old timestamp.
+        let old_ts: i64 = 1_000_000;
+        let mut meta = load_env_meta(&env_dir);
+        for _ in 0..25 {
+            meta.signals.switch_buffer.push((old_ts, 1.0));
+        }
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        // Record one more switch — should trim to 25.
+        let new_ts: i64 = 1_700_000_000;
+        record_switch_per_env(&env_dir, new_ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.switch_buffer.len(),
+            25,
+            "switch_buffer must stay at capacity 25 after a 26th entry"
+        );
+
+        // The newest entry must be present at switch_buffer[0] after descending sort.
+        let newest_ts = meta.signals.switch_buffer[0].0;
+        assert_eq!(
+            newest_ts, new_ts,
+            "newest entry should be present after cap; got ts={newest_ts}"
+        );
+        // The oldest surviving entries must still carry the old timestamp.
+        assert_eq!(
+            meta.signals.switch_buffer.last().unwrap().0,
+            old_ts,
+            "some pre-populated old entries must still be in the buffer after cap"
+        );
+    }
+
+    /// `record_switch_per_env` must not affect `activation_buffer`.
+    #[test]
+    fn test_record_switch_per_env_does_not_touch_activation_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_activation_per_env(&env_dir);
+        record_switch_per_env(&env_dir, 1_700_000_000);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "activation_buffer must be untouched by record_switch_per_env"
+        );
+    }
+
+    /// Old on-disk JSON without `switch_buffer` must deserialize to an empty switch_buffer.
+    #[test]
+    fn test_old_json_without_switch_buffer_gives_empty_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("meta.json"),
+            r#"{"activation_buffer":[[1700000000,1.0]]}"#,
+        )
+        .unwrap();
+
+        let meta = load_env_meta(&env_dir);
+        assert!(
+            meta.signals.switch_buffer.is_empty(),
+            "old JSON without switch_buffer key must deserialize to an empty buffer"
+        );
+    }
+
+    /// `record_switch_per_env` must be a no-op when the environment directory does not exist.
+    /// It must NOT create the directory or write any file — switch events for unknown
+    /// environments are silently discarded.
+    #[test]
+    fn test_record_switch_per_env_does_nothing_for_nonexistent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("nonexistent-env");
+        // Precondition: the directory must not exist before the call.
+        assert!(
+            !env_dir.exists(),
+            "test precondition: env_dir must not exist before calling record_switch_per_env"
+        );
+
+        record_switch_per_env(&env_dir, 1_700_000_000);
+
+        assert!(
+            !env_dir.exists(),
+            "record_switch_per_env must not create the env directory when it does not exist"
         );
     }
 }

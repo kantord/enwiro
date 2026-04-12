@@ -223,6 +223,19 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
     output
 }
 
+/// Parse a JSONL workspace switch event line.
+/// Returns `Some((env_name, timestamp))` if the line is a valid `workspace_switch` event,
+/// or `None` for any other content (wrong type, missing fields, invalid JSON).
+pub fn parse_switch_event(line: &str) -> Option<(String, i64)> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "workspace_switch" {
+        return None;
+    }
+    let env_name = v.get("env_name")?.as_str()?.to_string();
+    let timestamp = v.get("timestamp")?.as_i64()?;
+    Some((env_name, timestamp))
+}
+
 const REFRESH_INTERVAL: Duration = Duration::from_secs(40);
 
 /// Returns true if the cache should be refreshed this cycle.
@@ -251,9 +264,71 @@ pub fn run_daemon() -> anyhow::Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
 
+    // Load config to get workspaces directory
+    let config: crate::config::ConfigurationValues =
+        confy::load("enwiro", "enwiro").unwrap_or_default();
+    let workspaces_directory = config.workspaces_directory.clone();
+
+    // Spawn adapter listen subprocess if an adapter plugin exists
+    let adapter_plugin = get_plugins(PluginKind::Adapter).into_iter().next();
+    let mut listen_child: Option<std::process::Child> = None;
+    if let Some(ref plugin) = adapter_plugin {
+        match std::process::Command::new(&plugin.executable)
+            .arg("listen")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                listen_child = Some(child);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not spawn adapter listen subprocess");
+            }
+        }
+    }
+
+    // Spawn a background reader thread that sends lines from the listen subprocess
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    if let Some(ref mut child) = listen_child
+        && let Some(stdout) = child.stdout.take()
+    {
+        let tx = line_tx.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        if tx.send(l).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
+        // Drain available lines from the listen subprocess
+        loop {
+            match line_rx.try_recv() {
+                Ok(line) => {
+                    if let Some((env_name, timestamp)) = parse_switch_event(&line)
+                        && !env_name.is_empty()
+                    {
+                        let env_dir = std::path::Path::new(&workspaces_directory).join(&env_name);
+                        crate::usage_stats::record_switch_per_env(&env_dir, timestamp);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+
         if should_refresh_cache(check_idle()) {
             // Discover plugins fresh each cycle (new cookbooks may be installed)
             let plugins = get_plugins(PluginKind::Cookbook);
@@ -273,6 +348,9 @@ pub fn run_daemon() -> anyhow::Result<()> {
         while elapsed < REFRESH_INTERVAL {
             if term.load(Ordering::Relaxed) {
                 tracing::info!("Received termination signal, exiting");
+                if let Some(mut child) = listen_child.take() {
+                    let _ = child.kill();
+                }
                 remove_pid_file(&dir);
                 return Ok(());
             }
@@ -637,6 +715,93 @@ mod tests {
         assert!(
             !should_refresh_cache(true),
             "should_refresh_cache(true) must return false: idle user means skip the refresh"
+        );
+    }
+
+    // ── parse_switch_event tests ───────────────────────────────────────────
+
+    /// A valid JSONL workspace switch event line must return Some((env_name, timestamp)).
+    #[test]
+    fn test_parse_switch_event_valid_line() {
+        let line = r#"{"type":"workspace_switch","timestamp":1700000000,"env_name":"my-project"}"#;
+        let result = parse_switch_event(line);
+        assert_eq!(
+            result,
+            Some(("my-project".to_string(), 1700000000i64)),
+            "valid switch event line must parse to (env_name, timestamp)"
+        );
+    }
+
+    /// A line with a different `type` value must return None (not a workspace_switch event).
+    #[test]
+    fn test_parse_switch_event_wrong_type_returns_none() {
+        let line = r#"{"type":"other_event","timestamp":1700000000,"env_name":"my-project"}"#;
+        let result = parse_switch_event(line);
+        assert_eq!(
+            result, None,
+            "event with type != 'workspace_switch' must return None"
+        );
+    }
+
+    /// A line missing the `env_name` field must return None.
+    #[test]
+    fn test_parse_switch_event_missing_env_name_returns_none() {
+        let line = r#"{"type":"workspace_switch","timestamp":1700000000}"#;
+        let result = parse_switch_event(line);
+        assert_eq!(result, None, "line without env_name field must return None");
+    }
+
+    /// A line missing the `timestamp` field must return None.
+    #[test]
+    fn test_parse_switch_event_missing_timestamp_returns_none() {
+        let line = r#"{"type":"workspace_switch","env_name":"my-project"}"#;
+        let result = parse_switch_event(line);
+        assert_eq!(
+            result, None,
+            "line without timestamp field must return None"
+        );
+    }
+
+    /// A line that is not valid JSON at all must return None.
+    #[test]
+    fn test_parse_switch_event_invalid_json_returns_none() {
+        let line = "this is not json at all";
+        let result = parse_switch_event(line);
+        assert_eq!(
+            result, None,
+            "invalid JSON must return None rather than panic"
+        );
+    }
+
+    /// An empty string must return None without panicking.
+    #[test]
+    fn test_parse_switch_event_empty_string_returns_none() {
+        let result = parse_switch_event("");
+        assert_eq!(result, None, "empty string must return None");
+    }
+
+    /// An `env_name` that is an empty string must still be returned as-is.
+    /// The caller decides whether an empty env_name is valid.
+    #[test]
+    fn test_parse_switch_event_empty_env_name_is_returned() {
+        let line = r#"{"type":"workspace_switch","timestamp":1700000000,"env_name":""}"#;
+        let result = parse_switch_event(line);
+        assert_eq!(
+            result,
+            Some(("".to_string(), 1700000000i64)),
+            "empty env_name must still be returned; filtering is the caller's job"
+        );
+    }
+
+    /// Extra unknown fields in the JSON must be ignored (forward compatibility).
+    #[test]
+    fn test_parse_switch_event_extra_fields_are_ignored() {
+        let line = r#"{"type":"workspace_switch","timestamp":1700000000,"env_name":"proj","extra":"ignored","count":42}"#;
+        let result = parse_switch_event(line);
+        assert_eq!(
+            result,
+            Some(("proj".to_string(), 1700000000i64)),
+            "extra unknown fields must not prevent parsing"
         );
     }
 
