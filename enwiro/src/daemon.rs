@@ -225,6 +225,12 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(40);
 
+/// Returns true if the cache should be refreshed this cycle.
+/// The cache is refreshed only when the user is not idle.
+fn should_refresh_cache(is_idle: bool) -> bool {
+    !is_idle
+}
+
 /// Entry point for the daemon. Called when `enwiro daemon` is invoked.
 pub fn run_daemon() -> anyhow::Result<()> {
     // Detach from session
@@ -248,16 +254,18 @@ pub fn run_daemon() -> anyhow::Result<()> {
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
-        // Discover plugins fresh each cycle (new cookbooks may be installed)
-        let plugins = get_plugins(PluginKind::Cookbook);
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
-            .into_iter()
-            .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
-            .collect();
+        if should_refresh_cache(check_idle()) {
+            // Discover plugins fresh each cycle (new cookbooks may be installed)
+            let plugins = get_plugins(PluginKind::Cookbook);
+            let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
+                .into_iter()
+                .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
+                .collect();
 
-        let recipes = collect_all_recipes(&cookbooks);
-        if let Err(e) = write_cache_atomic(&dir, &recipes) {
-            tracing::error!(error = %e, "Failed to write cache");
+            let recipes = collect_all_recipes(&cookbooks);
+            if let Err(e) = write_cache_atomic(&dir, &recipes) {
+                tracing::error!(error = %e, "Failed to write cache");
+            }
         }
 
         // Sleep in 1-second increments, checking for termination signal
@@ -270,12 +278,6 @@ pub fn run_daemon() -> anyhow::Result<()> {
             }
             std::thread::sleep(Duration::from_secs(1));
             elapsed += Duration::from_secs(1);
-        }
-
-        if check_idle() {
-            tracing::info!("User idle threshold reached, exiting");
-            remove_pid_file(&dir);
-            return Ok(());
         }
     }
 }
@@ -618,6 +620,24 @@ mod tests {
         assert_eq!(entries[2].sort_order, 50);
         assert_eq!(entries[3].name, "gh-issue-2");
         assert_eq!(entries[3].sort_order, 50);
+    }
+
+    #[test]
+    fn test_should_refresh_cache_when_not_idle() {
+        // When user is active, the cache refresh should proceed
+        assert!(
+            should_refresh_cache(false),
+            "should_refresh_cache(false) must return true: active user means refresh is needed"
+        );
+    }
+
+    #[test]
+    fn test_should_not_refresh_cache_when_idle() {
+        // When user is idle, the cache refresh should be skipped (but the daemon keeps looping)
+        assert!(
+            !should_refresh_cache(true),
+            "should_refresh_cache(true) must return false: idle user means skip the refresh"
+        );
     }
 
     #[test]
