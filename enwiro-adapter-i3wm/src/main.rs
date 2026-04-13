@@ -89,18 +89,13 @@ enum EvictionChain {
 ///
 /// 3. If a beneficial Y exists → `ThreeElement { victim_name, chain_mover_name, chain_slot: Y, victim_slot: X }`.
 ///    Otherwise → `TwoElement { victim_name, victim_slot: X }`.
-fn find_eviction_chain(
+fn find_eviction_chain_with_map(
     workspaces: &[Workspace],
-    managed_envs: &[ManagedEnvInfo],
+    score_map: &std::collections::HashMap<&str, f64>,
     incoming_score: f64,
 ) -> EvictionChain {
-    let score_map: std::collections::HashMap<&str, f64> = managed_envs
-        .iter()
-        .map(|e| (e.name.as_str(), e.slot_score))
-        .collect();
-
     // Step 1: find the 2-element victim.
-    let victim = match find_eviction_candidate_with_map(workspaces, &score_map, incoming_score) {
+    let victim = match find_eviction_candidate_with_map(workspaces, score_map, incoming_score) {
         Some(v) => v,
         None => return EvictionChain::NoEviction,
     };
@@ -136,6 +131,68 @@ fn find_eviction_chain(
             victim_name,
             victim_slot,
         },
+    }
+}
+
+fn find_eviction_chain(
+    workspaces: &[Workspace],
+    managed_envs: &[ManagedEnvInfo],
+    incoming_score: f64,
+) -> EvictionChain {
+    let score_map: std::collections::HashMap<&str, f64> = managed_envs
+        .iter()
+        .map(|e| (e.name.as_str(), e.slot_score))
+        .collect();
+    find_eviction_chain_with_map(workspaces, &score_map, incoming_score)
+}
+
+/// Compute the effective incoming score to use when deciding eviction.
+///
+/// If a free single-digit slot exists (`free_num <= 9`), the real score is
+/// returned unchanged — no forcing is needed.  If `real_incoming` is already
+/// high enough to trigger a natural eviction, it is also returned unchanged.
+/// Otherwise (all single-digit slots are full and the real score would yield
+/// `NoEviction`), the function returns the minimum score that is just barely
+/// enough to evict the weakest single-digit occupant.
+fn effective_incoming_score(
+    workspaces: &[Workspace],
+    managed_envs: &[ManagedEnvInfo],
+    free_num: i32,
+    real_incoming: f64,
+) -> f64 {
+    // Rule 1: free single-digit slot exists — no forcing needed.
+    if free_num <= 9 {
+        return real_incoming;
+    }
+
+    let score_map: std::collections::HashMap<&str, f64> = managed_envs
+        .iter()
+        .map(|e| (e.name.as_str(), e.slot_score))
+        .collect();
+
+    // Rule 2: real_incoming already triggers a natural eviction — no forcing needed.
+    if find_eviction_chain_with_map(workspaces, &score_map, real_incoming)
+        != EvictionChain::NoEviction
+    {
+        return real_incoming;
+    }
+
+    // Rule 3: force eviction of the weakest single-digit managed occupant.
+    let min_threshold = workspaces
+        .iter()
+        .filter(|ws| ws.num >= 1 && ws.num <= 9)
+        .filter_map(|ws| {
+            let s = *score_map.get(extract_environment_name(ws).as_str())?;
+            // Minimum incoming score needed to evict this occupant:
+            // NetBenefit = (incoming - s) * disc(slot) - STABILITY_THRESHOLD > 0
+            // => incoming > s + STABILITY_THRESHOLD / disc(slot)
+            Some(s + STABILITY_THRESHOLD / disc(ws.num))
+        })
+        .reduce(f64::min);
+
+    match min_threshold {
+        Some(threshold) => threshold + f64::EPSILON,
+        None => real_incoming,
     }
 }
 
@@ -346,7 +403,9 @@ async fn main() -> anyhow::Result<()> {
                     .find(|e| e.name == args.name)
                     .map(|e| e.slot_score)
                     .unwrap_or(0.0);
-                let chain = find_eviction_chain(&workspaces, &managed_envs, incoming_score);
+                let effective_score =
+                    effective_incoming_score(&workspaces, &managed_envs, free_num, incoming_score);
+                let chain = find_eviction_chain(&workspaces, &managed_envs, effective_score);
                 let target_num = match &chain {
                     EvictionChain::NoEviction => free_num,
                     EvictionChain::TwoElement { victim_slot, .. } => *victim_slot,
@@ -1280,5 +1339,144 @@ mod tests {
     #[test]
     fn test_cli_has_listen_variant() {
         let _ = EnwiroAdapterI3WmCLI::Listen(ListenArgs {});
+    }
+
+    // ── effective_incoming_score tests ────────────────────────────────────────
+    //
+    // `effective_incoming_score` is a pure function that decides whether the
+    // real incoming score should be used as-is or inflated to guarantee a
+    // single-digit slot placement when all slots 1–9 are occupied.
+    //
+    // Signature (to be implemented):
+    //   fn effective_incoming_score(
+    //       workspaces: &[Workspace],
+    //       managed_envs: &[ManagedEnvInfo],
+    //       free_num: i32,
+    //       real_incoming: f64,
+    //   ) -> f64
+    //
+    // Rules:
+    //   1. If free_num <= 9 (a free single-digit slot exists) → return real_incoming.
+    //   2. If free_num > 9 AND real_incoming already triggers eviction → return real_incoming.
+    //   3. If free_num > 9 AND real_incoming is too low (NoEviction) → return the minimum
+    //      score needed to evict the lowest-scoring single-digit occupant:
+    //        s_min + STABILITY_THRESHOLD / disc(slot_of_s_min) + ε
+
+    /// EIS-1: When a free single-digit slot exists (free_num ≤ 9), the real
+    /// incoming score is returned unchanged — no forced inflation is needed.
+    ///
+    /// Setup: slots 1–5 occupied (base score 0.9), slot 6 is the first free slot.
+    /// free_num = 6 (≤ 9).  real_incoming = 0.0 (would never evict under normal rules).
+    ///
+    /// Expected: effective_incoming_score(...) == 0.0 (unchanged).
+    #[test]
+    fn test_effective_incoming_score_unchanged_when_free_single_digit_slot_exists() {
+        let workspaces: Vec<Workspace> = (1..=5_i32)
+            .map(|slot| {
+                make_workspace(slot as usize, slot, &format!("{}: env-slot-{}", slot, slot))
+            })
+            .collect();
+        let managed: Vec<ManagedEnvInfo> = (1..=5_i32)
+            .map(|slot| make_managed(&format!("env-slot-{}", slot), 0.9))
+            .collect();
+        let free_num = 6; // first free slot ≤ 9
+        let real_incoming = 0.0_f64;
+
+        let result = effective_incoming_score(&workspaces, &managed, free_num, real_incoming);
+        assert!(
+            (result - real_incoming).abs() < 1e-12,
+            "when a free single-digit slot exists (free_num={free_num}), \
+             effective_incoming_score must return real_incoming ({real_incoming}) unchanged, \
+             got {result}"
+        );
+    }
+
+    /// EIS-2: When free_num > 9 but the real incoming score already triggers
+    /// eviction, the score is returned unchanged — no inflation is needed.
+    ///
+    /// Setup: slots 1–9 all occupied with score 0.5.  free_num = 10 (> 9).
+    /// real_incoming = 0.8.
+    ///
+    /// Verification that eviction fires without inflation:
+    ///   NB(slot 9) = (0.8 − 0.5) × disc(9) − 0.05 ≈ 0.3 × 0.30103 − 0.05 ≈ 0.040 > 0 ✓
+    ///
+    /// Expected: effective_incoming_score(...) == 0.8 (unchanged).
+    #[test]
+    fn test_effective_incoming_score_unchanged_when_real_score_already_evicts() {
+        let (workspaces, managed) = make_full_single_digit(0.5, &[]);
+        let free_num = 10; // no free single-digit slot
+        let real_incoming = 0.8_f64;
+
+        // Precondition: confirm real_incoming naturally triggers eviction.
+        assert!(
+            find_eviction_chain(&workspaces, &managed, real_incoming) != EvictionChain::NoEviction,
+            "precondition: real_incoming={real_incoming} must already trigger eviction"
+        );
+
+        let result = effective_incoming_score(&workspaces, &managed, free_num, real_incoming);
+        assert!(
+            (result - real_incoming).abs() < 1e-12,
+            "when real_incoming already triggers eviction, effective_incoming_score must \
+             return real_incoming ({real_incoming}) unchanged, got {result}"
+        );
+    }
+
+    /// EIS-3: When free_num > 9 AND real_incoming is too low to evict anyone,
+    /// the function returns the minimum score needed to evict the weakest occupant.
+    ///
+    /// Setup: slots 1–9 all occupied.
+    ///   slot 1: score = 0.5 (lowest — this is s_min)
+    ///   slots 2–9: score = 0.9
+    /// free_num = 10 (> 9).  real_incoming = 0.2.
+    ///
+    /// Verification that real_incoming does NOT trigger eviction:
+    ///   NB(slot 1) = (0.2 − 0.5) × disc(1) − 0.05 = −0.3 − 0.05 = −0.35 < 0 ✗
+    ///   All other slots have even higher occupant scores → all NB < 0 → NoEviction.
+    ///
+    /// s_min = 0.5, slot_of_s_min = 1, disc(1) = 1.0
+    /// Threshold = s_min + STABILITY_THRESHOLD / disc(slot_of_s_min)
+    ///           = 0.5 + 0.05 / 1.0 = 0.55
+    ///
+    /// Expected:
+    ///   - result > 0.55 (clears the eviction threshold for slot 1)
+    ///   - find_eviction_chain(workspaces, managed, result) != NoEviction
+    ///   - result is not grossly inflated: result < 0.55 + 1.0 (stays minimal)
+    #[test]
+    fn test_effective_incoming_score_inflated_when_all_slots_full_and_no_natural_eviction() {
+        let overrides = vec![(1, 0.5_f64)]; // slot 1 is the weakest occupant
+        let (workspaces, managed) = make_full_single_digit(0.9, &overrides);
+        let free_num = 10; // no free single-digit slot
+        let real_incoming = 0.2_f64;
+
+        // Precondition: confirm real_incoming does NOT trigger eviction.
+        assert_eq!(
+            find_eviction_chain(&workspaces, &managed, real_incoming),
+            EvictionChain::NoEviction,
+            "precondition: real_incoming={real_incoming} must NOT trigger eviction"
+        );
+
+        // s_min = 0.5 at slot 1; disc(1) = 1.0; threshold = 0.55
+        let s_min = 0.5_f64;
+        let threshold = s_min + STABILITY_THRESHOLD / disc(1);
+
+        let result = effective_incoming_score(&workspaces, &managed, free_num, real_incoming);
+
+        assert!(
+            result > threshold,
+            "inflated score must clear the eviction threshold for slot 1 \
+             (threshold={threshold:.6}), got {result:.6}"
+        );
+
+        assert!(
+            find_eviction_chain(&workspaces, &managed, result) != EvictionChain::NoEviction,
+            "using the inflated score must trigger eviction (find_eviction_chain must \
+             not return NoEviction), got result={result:.6}"
+        );
+
+        assert!(
+            result < threshold + 1.0,
+            "inflated score must stay minimal (within 1.0 of the threshold={threshold:.6}), \
+             got {result:.6} — the function should not grossly over-inflate"
+        );
     }
 }
