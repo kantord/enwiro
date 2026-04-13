@@ -109,7 +109,19 @@ fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyho
             let mut opts = git2::WorktreeAddOptions::new();
             opts.reference(Some(&reference));
             repo.worktree(&wt_name, &wt_path, Some(&opts))
-                .with_context(|| format!("Could not create worktree for branch {}", branch_name))?;
+                .map_err(|err| {
+                    if err.class() == git2::ErrorClass::Worktree && err.message().contains("already checked out") {
+                        anyhow::anyhow!(
+                            "Branch '{}' is already checked out in another worktree — switch away from it first",
+                            branch_name
+                        )
+                    } else {
+                        anyhow::anyhow!(err).context(format!(
+                            "Could not create worktree for branch {}",
+                            branch_name
+                        ))
+                    }
+                })?;
 
             tracing::debug!(path = %wt_path.display(), branch = %branch_name, "Created worktree");
             Ok(wt_path)
@@ -802,6 +814,73 @@ mod tests {
             recipes.contains_key("my-project@feature-y"),
             "Unchecked-out branch should appear: {:?}",
             recipes.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// When `cook()` is called for a branch that is already checked out in the
+    /// main worktree (i.e. the current HEAD branch), the cookbook must surface
+    /// a human-readable error that explicitly names the branch and tells the user
+    /// it is already checked out — not just a raw git2 internal error string.
+    ///
+    /// git2 already says "reference is already checked out" internally, but the
+    /// cookbook must wrap this with an explicit context message of the form
+    /// "Branch '<name>' is already checked out" so the branch name is
+    /// prominently visible in the top-level error message without requiring the
+    /// user to parse the full chain or the technical `refs/heads/...` path.
+    ///
+    /// This test fails today because the wrapper context is
+    /// "Could not create worktree for branch <name>" — which does not say
+    /// "already checked out".  The outermost error (shown with `{}`) must
+    /// already contain that phrase.
+    #[test]
+    fn test_cook_already_checked_out_branch_gives_actionable_error() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = create_repo_with_commit(&repo_path);
+
+        // Determine the name of the HEAD branch (commonly "master" or "main").
+        let head_branch_name = repo.head().unwrap().shorthand().unwrap().to_string();
+
+        // The HEAD branch is already checked out in the main worktree.  Attempting to
+        // create a new worktree for the same branch must fail — and the outermost
+        // error message (displayed with `{}`, NOT `{:#}`) must immediately tell the
+        // user both the branch name and that it is already checked out.
+        let wt_dir = tmp.path().join("worktrees");
+        let config = config_with_worktree_dir(
+            tmp.path().join("*").to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+        );
+
+        let recipe_name = format!("my-project@{}", head_branch_name);
+        let result = resolve_recipe_path(&config, &recipe_name);
+
+        assert!(
+            result.is_err(),
+            "cook() for an already-checked-out branch must return an error"
+        );
+
+        let err = result.unwrap_err();
+
+        // The OUTERMOST error message (shown to the user by default, `{}` format)
+        // must include both the branch name and "already checked out".
+        // Using `{:#}` (full chain) is not enough — the outermost layer must be
+        // self-explanatory so that the notification (which uses `{}`) is actionable.
+        let outermost_msg = err.to_string();
+        assert!(
+            outermost_msg.to_lowercase().contains("already checked out"),
+            "the outermost error message (displayed with `{{}}`) must say 'already \
+             checked out' so the user sees it immediately without inspecting the full \
+             chain; got outermost: {outermost_msg:?}\n\
+             Hint: detect the 'already checked out' condition from git2 and return \
+             an explicit error like \"Branch '{}' is already checked out\"",
+            head_branch_name
+        );
+        assert!(
+            outermost_msg.contains(&head_branch_name),
+            "the outermost error message must include the branch name '{}'; \
+             got: {outermost_msg:?}",
+            head_branch_name
         );
     }
 
