@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.25](https://github.com/kantord/enwiro/compare/enwiro-v0.3.24...enwiro-v0.3.25) - 2026-04-13
+
+### Fixed
+
+- surface full error chain in notifications and handle branch already checked out
+- list-all no longer kills user-managed daemon on every invocation
+
 ## [0.3.24](https://github.com/kantord/enwiro/compare/enwiro-v0.3.23...enwiro-v0.3.24) - 2026-04-13
 
 ### Added
