@@ -86,18 +86,11 @@ fn read_pid_file(runtime_dir: &Path) -> Option<(i32, Option<SystemTime>)> {
     Some((pid, mtime))
 }
 
-/// Write the current process PID and binary mtime to the PID file.
+/// Write the current process PID to the PID file.
 pub fn write_pid_file(runtime_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(runtime_dir).context("Could not create runtime directory")?;
     let pid_path = runtime_dir.join("daemon.pid");
-    let exe_mtime_secs = get_current_exe_mtime()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs());
-    let content = match exe_mtime_secs {
-        Some(secs) => format!("{}\n{}", std::process::id(), secs),
-        None => std::process::id().to_string(),
-    };
-    fs::write(&pid_path, content).context("Could not write PID file")?;
+    fs::write(&pid_path, std::process::id().to_string()).context("Could not write PID file")?;
     Ok(())
 }
 
@@ -113,59 +106,12 @@ pub fn remove_pid_file(runtime_dir: &Path) {
 
 /// Check if a daemon is currently running by reading the PID file and
 /// sending signal 0 (no-op) to the process.
+#[allow(dead_code)]
 pub fn is_daemon_running(runtime_dir: &Path) -> bool {
     match read_pid_file(runtime_dir) {
         Some((pid, _)) => unsafe { libc::kill(pid, 0) == 0 },
         None => false,
     }
-}
-
-fn get_current_exe_mtime() -> Option<SystemTime> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| fs::metadata(p).ok())
-        .and_then(|m| m.modified().ok())
-}
-
-/// Returns true if the running daemon's binary is older than the current executable.
-fn needs_restart_with_mtime(
-    runtime_dir: &Path,
-    get_exe_mtime: impl Fn() -> Option<SystemTime>,
-) -> bool {
-    let stored_mtime = match read_pid_file(runtime_dir) {
-        Some((_, Some(t))) => t,
-        _ => return false,
-    };
-    match get_exe_mtime() {
-        Some(current) => current > stored_mtime,
-        None => false,
-    }
-}
-
-/// Spawn the daemon as a detached background process.
-/// Returns Ok(true) if a new daemon was spawned, Ok(false) if one was already running.
-pub fn ensure_daemon_running(runtime_dir: &Path) -> anyhow::Result<bool> {
-    if is_daemon_running(runtime_dir) {
-        if needs_restart_with_mtime(runtime_dir, get_current_exe_mtime) {
-            tracing::info!("Binary updated, restarting daemon");
-            if let Some((pid, _)) = read_pid_file(runtime_dir) {
-                unsafe { libc::kill(pid, libc::SIGTERM) };
-            }
-        } else {
-            return Ok(false);
-        }
-    }
-
-    tracing::info!("Spawning background daemon");
-    std::process::Command::new(std::env::current_exe()?)
-        .arg("daemon")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("Could not spawn daemon process")?;
-
-    Ok(true)
 }
 
 /// A cached recipe with its cookbook's priority, used for global sorting.
@@ -467,12 +413,8 @@ mod tests {
         assert!(!is_daemon_running(dir.path()));
     }
 
-    fn write_test_pid_file(dir: &Path, pid: i32, mtime_secs: Option<u64>) {
-        let content = match mtime_secs {
-            Some(secs) => format!("{}\n{}", pid, secs),
-            None => pid.to_string(),
-        };
-        std::fs::write(dir.join("daemon.pid"), content).unwrap();
+    fn write_test_pid_file(dir: &Path, pid: i32) {
+        std::fs::write(dir.join("daemon.pid"), pid.to_string()).unwrap();
     }
 
     #[test]
@@ -485,62 +427,14 @@ mod tests {
     }
 
     #[test]
-    fn test_write_pid_file_includes_mtime() {
-        let dir = tempfile::tempdir().unwrap();
-        write_pid_file(dir.path()).unwrap();
-        let content = std::fs::read_to_string(dir.path().join("daemon.pid")).unwrap();
-        let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 2, "PID file should have PID and mtime lines");
-        assert!(
-            lines[0].trim().parse::<u32>().is_ok(),
-            "First line should be a PID"
-        );
-        assert!(
-            lines[1].trim().parse::<u64>().is_ok(),
-            "Second line should be a mtime timestamp"
-        );
-    }
-
-    #[test]
     fn test_remove_pid_file_does_not_remove_other_pid() {
         let dir = tempfile::tempdir().unwrap();
-        write_test_pid_file(dir.path(), 999999, None);
+        write_test_pid_file(dir.path(), 999999);
         remove_pid_file(dir.path());
         assert!(
             dir.path().join("daemon.pid").exists(),
             "Should not remove another process's PID file"
         );
-    }
-
-    #[test]
-    fn test_needs_restart_when_binary_is_newer() {
-        let dir = tempfile::tempdir().unwrap();
-        write_test_pid_file(dir.path(), 999999, Some(1000));
-        let new_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(2000);
-        assert!(needs_restart_with_mtime(dir.path(), || Some(new_mtime)));
-    }
-
-    #[test]
-    fn test_no_restart_when_binary_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        write_test_pid_file(dir.path(), 999999, Some(1000));
-        let same_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
-        assert!(!needs_restart_with_mtime(dir.path(), || Some(same_mtime)));
-    }
-
-    #[test]
-    fn test_no_restart_when_no_mtime_stored() {
-        let dir = tempfile::tempdir().unwrap();
-        write_test_pid_file(dir.path(), 999999, None);
-        let new_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(2000);
-        assert!(!needs_restart_with_mtime(dir.path(), || Some(new_mtime)));
-    }
-
-    #[test]
-    fn test_no_restart_when_exe_mtime_unavailable() {
-        let dir = tempfile::tempdir().unwrap();
-        write_test_pid_file(dir.path(), 999999, Some(1000));
-        assert!(!needs_restart_with_mtime(dir.path(), || None));
     }
 
     #[test]
