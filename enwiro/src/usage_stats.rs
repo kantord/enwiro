@@ -133,9 +133,32 @@ pub fn record_switch_per_env(env_dir: &Path, timestamp: i64) {
         return;
     }
     let mut meta = load_env_meta(env_dir);
+
+    // Compute the most recent signal timestamp across both buffers, before the current push.
+    let last_activation_ts = meta
+        .signals
+        .activation_buffer
+        .iter()
+        .map(|&(ts, _)| ts)
+        .max();
+    let last_switch_ts = meta.signals.switch_buffer.iter().map(|&(ts, _)| ts).max();
+    let last_signal_ts = [last_activation_ts, last_switch_ts]
+        .into_iter()
+        .flatten()
+        .max();
+
     meta.signals.switch_buffer.push((timestamp, 1.0));
     meta.signals.switch_buffer.sort_by(|a, b| b.0.cmp(&a.0));
     meta.signals.switch_buffer.truncate(25);
+
+    // If the gap since the last signal exceeds 8 hours, inject a synthetic activation.
+    const EIGHT_HOURS: i64 = 28800;
+    if last_signal_ts.is_none_or(|last| timestamp - last > EIGHT_HOURS) {
+        meta.signals.activation_buffer.push((timestamp, 0.4));
+        meta.signals.activation_buffer.sort_by(|a, b| b.0.cmp(&a.0));
+        meta.signals.activation_buffer.truncate(10);
+    }
+
     if let Err(e) = save_env_meta(env_dir, &meta) {
         tracing::warn!(error = %e, "Could not save switch event");
     }
@@ -169,6 +192,31 @@ pub fn frecency_score(stats: &EnvStats, now: i64) -> f64 {
         .sum()
 }
 
+/// Compute a two-component exponential-decay score from a workspace-switch buffer.
+/// Fast component: 6h half-life. Slow component: 48h half-life.
+/// `score = 0.5 * fast_sum + 0.5 * slow_sum`
+/// Each entry `(timestamp, weight)` contributes `weight * exp(-λ * elapsed_seconds)`.
+#[allow(dead_code)]
+pub fn switch_score(buffer: &[(i64, f64)], now: i64) -> f64 {
+    let lambda_fast = std::f64::consts::LN_2 / (6.0 * 3600.0);
+    let lambda_slow = std::f64::consts::LN_2 / (48.0 * 3600.0);
+    let fast_sum: f64 = buffer
+        .iter()
+        .map(|&(ts, weight)| {
+            let age = (now - ts).max(0) as f64;
+            weight * (-lambda_fast * age).exp()
+        })
+        .sum();
+    let slow_sum: f64 = buffer
+        .iter()
+        .map(|&(ts, weight)| {
+            let age = (now - ts).max(0) as f64;
+            weight * (-lambda_slow * age).exp()
+        })
+        .sum();
+    0.5 * fast_sum + 0.5 * slow_sum
+}
+
 /// Compute percentile ranks for all environments based on their frecency scores.
 /// For each env, the percentile is: (count of envs with strictly lower score) / total_envs.
 /// Tied envs receive the same rank. Empty input returns empty output.
@@ -193,18 +241,60 @@ pub fn activation_percentile_scores(
         .collect()
 }
 
+/// Compute percentile ranks for all environments based on their switch scores.
+/// Mirrors [`activation_percentile_scores`] but uses `switch_score` instead of `frecency_score`.
+fn switch_percentile_scores(
+    all_stats: &HashMap<String, EnvStats>,
+    now: i64,
+) -> HashMap<String, f64> {
+    let total = all_stats.len();
+    if total == 0 {
+        return HashMap::new();
+    }
+    let scores: HashMap<&str, f64> = all_stats
+        .iter()
+        .map(|(name, stats)| {
+            (
+                name.as_str(),
+                switch_score(&stats.signals.switch_buffer, now),
+            )
+        })
+        .collect();
+    scores
+        .iter()
+        .map(|(&name, &score)| {
+            let count_below = scores.values().filter(|&&s| s < score).count();
+            (name.to_string(), count_below as f64 / total as f64)
+        })
+        .collect()
+}
+
 /// Score function for the launcher UI (`list-all`).
-/// Returns percentile ranks identical to [`activation_percentile_scores`].
-/// Callers should use this named wrapper so the intent is explicit at call sites.
+/// Blends activation and switch percentile signals: 0.8 × activation + 0.2 × switch.
 pub fn launcher_score(all_stats: &HashMap<String, EnvStats>, now: i64) -> HashMap<String, f64> {
-    activation_percentile_scores(all_stats, now)
+    let activation = activation_percentile_scores(all_stats, now);
+    let switch = switch_percentile_scores(all_stats, now);
+    activation
+        .into_iter()
+        .map(|(name, act)| {
+            let sw = switch.get(&name).copied().unwrap_or(0.0);
+            (name, 0.8 * act + 0.2 * sw)
+        })
+        .collect()
 }
 
 /// Score function for workspace slot assignment (`activate`).
-/// Returns percentile ranks identical to [`activation_percentile_scores`].
-/// Callers should use this named wrapper so the intent is explicit at call sites.
+/// Blends activation and switch percentile signals: 0.2 × activation + 0.8 × switch.
 pub fn slot_scores(all_stats: &HashMap<String, EnvStats>, now: i64) -> HashMap<String, f64> {
-    activation_percentile_scores(all_stats, now)
+    let activation = activation_percentile_scores(all_stats, now);
+    let switch = switch_percentile_scores(all_stats, now);
+    activation
+        .into_iter()
+        .map(|(name, act)| {
+            let sw = switch.get(&name).copied().unwrap_or(0.0);
+            (name, 0.2 * act + 0.8 * sw)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -798,56 +888,6 @@ mod tests {
         );
     }
 
-    /// `launcher_score` must return the same result as `activation_percentile_scores`
-    /// for any input — it is a semantically identical thin wrapper.
-    #[test]
-    fn test_launcher_score_matches_activation_percentile_scores() {
-        let now: i64 = 1_700_000_000;
-        let forty_eight_hours: i64 = 48 * 3600;
-
-        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
-        all_stats.insert("low".to_string(), EnvStats::default());
-        all_stats.insert(
-            "mid".to_string(),
-            EnvStats {
-                signals: UserIntentSignals {
-                    activation_buffer: vec![(now - forty_eight_hours, 1.0)],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        all_stats.insert(
-            "high".to_string(),
-            EnvStats {
-                signals: UserIntentSignals {
-                    activation_buffer: vec![(now, 1.0)],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-
-        let expected = activation_percentile_scores(&all_stats, now);
-        let actual = launcher_score(&all_stats, now);
-
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "launcher_score must return the same number of entries as activation_percentile_scores"
-        );
-        for (name, &expected_score) in &expected {
-            let actual_score = actual
-                .get(name)
-                .copied()
-                .unwrap_or_else(|| panic!("launcher_score missing entry for '{name}'"));
-            assert!(
-                (actual_score - expected_score).abs() < 1e-10,
-                "launcher_score['{name}'] = {actual_score} but activation_percentile_scores['{name}'] = {expected_score}"
-            );
-        }
-    }
-
     /// `launcher_score` preserves strict ordering: a higher-frecency env must get a
     /// higher score than a lower-frecency env.
     #[test]
@@ -890,56 +930,6 @@ mod tests {
         );
     }
 
-    /// `slot_scores` must return the same result as `activation_percentile_scores`
-    /// for any input — it is a semantically identical thin wrapper.
-    #[test]
-    fn test_slot_scores_matches_activation_percentile_scores() {
-        let now: i64 = 1_700_000_000;
-        let forty_eight_hours: i64 = 48 * 3600;
-
-        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
-        all_stats.insert("low".to_string(), EnvStats::default());
-        all_stats.insert(
-            "mid".to_string(),
-            EnvStats {
-                signals: UserIntentSignals {
-                    activation_buffer: vec![(now - forty_eight_hours, 1.0)],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        all_stats.insert(
-            "high".to_string(),
-            EnvStats {
-                signals: UserIntentSignals {
-                    activation_buffer: vec![(now, 1.0)],
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-
-        let expected = activation_percentile_scores(&all_stats, now);
-        let actual = slot_scores(&all_stats, now);
-
-        assert_eq!(
-            actual.len(),
-            expected.len(),
-            "slot_scores must return the same number of entries as activation_percentile_scores"
-        );
-        for (name, &expected_score) in &expected {
-            let actual_score = actual
-                .get(name)
-                .copied()
-                .unwrap_or_else(|| panic!("slot_scores missing entry for '{name}'"));
-            assert!(
-                (actual_score - expected_score).abs() < 1e-10,
-                "slot_scores['{name}'] = {actual_score} but activation_percentile_scores['{name}'] = {expected_score}"
-            );
-        }
-    }
-
     /// `slot_scores` preserves strict ordering: a higher-frecency env must get a
     /// higher score than a lower-frecency env.
     #[test]
@@ -966,6 +956,178 @@ mod tests {
              recently-used={}, never-used={}",
             result["recently-used"],
             result["never-used"]
+        );
+    }
+
+    // ── slot_scores / launcher_score blended-signal tests ─────────────────
+
+    /// `slot_scores` must weight the switch percentile 4× more heavily than the
+    /// activation percentile (0.8 vs 0.2). In a 2-env map where "switch-only"
+    /// has recent switches but zero activations, and "activation-only" has recent
+    /// activations but zero switches, "switch-only" must win slot_scores.
+    #[test]
+    fn test_slot_scores_weights_switch_4x_more_than_activation() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+
+        // "activation-only": high activation percentile, zero switch events
+        all_stats.insert(
+            "activation-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    switch_buffer: vec![],
+                },
+                ..Default::default()
+            },
+        );
+        // "switch-only": zero activation events, high switch percentile
+        all_stats.insert(
+            "switch-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![],
+                    switch_buffer: vec![(now, 1.0)],
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = slot_scores(&all_stats, now);
+
+        assert!(
+            result["switch-only"] > result["activation-only"],
+            "switch-only must outscore activation-only in slot_scores \
+             (switch weight=0.8 > activation weight=0.2); \
+             switch-only={}, activation-only={}",
+            result["switch-only"],
+            result["activation-only"]
+        );
+    }
+
+    /// `launcher_score` must weight the activation percentile 4× more heavily than the
+    /// switch percentile (0.8 vs 0.2). In a 2-env map where "activation-only" has
+    /// recent activations but zero switches, and "switch-only" has recent switches but
+    /// zero activations, "activation-only" must win launcher_score.
+    #[test]
+    fn test_launcher_score_weights_activation_4x_more_than_switch() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+
+        // "activation-only": high activation percentile, zero switch events
+        all_stats.insert(
+            "activation-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    switch_buffer: vec![],
+                },
+                ..Default::default()
+            },
+        );
+        // "switch-only": zero activation events, high switch percentile
+        all_stats.insert(
+            "switch-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![],
+                    switch_buffer: vec![(now, 1.0)],
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = launcher_score(&all_stats, now);
+
+        assert!(
+            result["activation-only"] > result["switch-only"],
+            "activation-only must outscore switch-only in launcher_score \
+             (activation weight=0.8 > switch weight=0.2); \
+             activation-only={}, switch-only={}",
+            result["activation-only"],
+            result["switch-only"]
+        );
+    }
+
+    /// An env with many activations but no switch events must score higher under
+    /// `launcher_score` than under `slot_scores` — because launcher_score weights
+    /// activation at 0.8 while slot_scores weights it at only 0.2.
+    #[test]
+    fn test_activation_only_env_scores_higher_in_launcher_than_slot() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+
+        all_stats.insert(
+            "activation-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    switch_buffer: vec![],
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "switch-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![],
+                    switch_buffer: vec![(now, 1.0)],
+                },
+                ..Default::default()
+            },
+        );
+
+        let slot = slot_scores(&all_stats, now);
+        let launcher = launcher_score(&all_stats, now);
+
+        assert!(
+            launcher["activation-only"] > slot["activation-only"],
+            "activation-only must score higher under launcher_score than slot_scores; \
+             launcher={}, slot={}",
+            launcher["activation-only"],
+            slot["activation-only"]
+        );
+    }
+
+    /// An env with many switch events but no activations must score higher under
+    /// `slot_scores` than under `launcher_score` — because slot_scores weights
+    /// switch at 0.8 while launcher_score weights it at only 0.2.
+    #[test]
+    fn test_switch_only_env_scores_higher_in_slot_than_launcher() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+
+        all_stats.insert(
+            "activation-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    switch_buffer: vec![],
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "switch-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![],
+                    switch_buffer: vec![(now, 1.0)],
+                },
+                ..Default::default()
+            },
+        );
+
+        let slot = slot_scores(&all_stats, now);
+        let launcher = launcher_score(&all_stats, now);
+
+        assert!(
+            slot["switch-only"] > launcher["switch-only"],
+            "switch-only must score higher under slot_scores than launcher_score; \
+             slot={}, launcher={}",
+            slot["switch-only"],
+            launcher["switch-only"]
         );
     }
 
@@ -1173,6 +1335,405 @@ mod tests {
         assert!(
             !env_dir.exists(),
             "record_switch_per_env must not create the env directory when it does not exist"
+        );
+    }
+
+    // ── synthetic activation on switch tests ──────────────────────────────
+
+    /// When both `activation_buffer` and `switch_buffer` are empty (no prior signals),
+    /// a call to `record_switch_per_env` must inject a synthetic activation entry
+    /// `(timestamp, 0.4)` into `activation_buffer`, because inactivity is unbounded
+    /// (trivially exceeds the 8-hour threshold).
+    #[test]
+    fn test_record_switch_per_env_adds_synthetic_activation_when_no_prior_signals() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "activation_buffer must contain exactly one synthetic entry after the first-ever switch"
+        );
+        let (entry_ts, entry_weight) = meta.signals.activation_buffer[0];
+        assert_eq!(
+            entry_ts, ts,
+            "synthetic activation timestamp must match the switch timestamp"
+        );
+        assert!(
+            (entry_weight - 0.4).abs() < 1e-10,
+            "synthetic activation weight must be 0.4, got {entry_weight}"
+        );
+    }
+
+    /// When the env's last activation is more than 8 hours before `timestamp`,
+    /// a call to `record_switch_per_env` must inject a synthetic activation entry
+    /// `(timestamp, 0.4)` into `activation_buffer`.
+    #[test]
+    fn test_record_switch_per_env_adds_synthetic_activation_when_last_activation_over_8h_ago() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        let eight_hours_plus_one: i64 = 8 * 3600 + 1;
+        let old_activation_ts = ts - eight_hours_plus_one;
+
+        // Pre-populate activation_buffer with one old activation (>8h before ts).
+        let mut meta = load_env_meta(&env_dir);
+        meta.signals
+            .activation_buffer
+            .push((old_activation_ts, 1.0));
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        // activation_buffer must now have 2 entries: the old one + the synthetic one.
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            2,
+            "activation_buffer must gain a synthetic entry when last activation was >8h ago"
+        );
+        // The newest entry (at index 0 after descending sort) must be the synthetic one.
+        let (newest_ts, newest_weight) = meta.signals.activation_buffer[0];
+        assert_eq!(
+            newest_ts, ts,
+            "synthetic activation timestamp must match the switch timestamp"
+        );
+        assert!(
+            (newest_weight - 0.4).abs() < 1e-10,
+            "synthetic activation weight must be 0.4, got {newest_weight}"
+        );
+    }
+
+    /// When the env's last switch is more than 8 hours before `timestamp` and
+    /// `activation_buffer` is empty, `record_switch_per_env` must inject a synthetic
+    /// activation `(timestamp, 0.4)` because the switch buffer's most-recent entry
+    /// determines inactivity.
+    #[test]
+    fn test_record_switch_per_env_adds_synthetic_activation_when_last_switch_over_8h_ago() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        let eight_hours_plus_one: i64 = 8 * 3600 + 1;
+        let old_switch_ts = ts - eight_hours_plus_one;
+
+        // Pre-populate only switch_buffer with one old entry (>8h before ts);
+        // activation_buffer remains empty.
+        let mut meta = load_env_meta(&env_dir);
+        meta.signals.switch_buffer.push((old_switch_ts, 1.0));
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "activation_buffer must contain one synthetic entry when last switch was >8h ago"
+        );
+        let (entry_ts, entry_weight) = meta.signals.activation_buffer[0];
+        assert_eq!(
+            entry_ts, ts,
+            "synthetic activation timestamp must match the switch timestamp"
+        );
+        assert!(
+            (entry_weight - 0.4).abs() < 1e-10,
+            "synthetic activation weight must be 0.4, got {entry_weight}"
+        );
+    }
+
+    /// When the env's most recent signal (activation or switch) is within 8 hours of
+    /// `timestamp`, `record_switch_per_env` must NOT inject a synthetic activation entry.
+    #[test]
+    fn test_record_switch_per_env_no_synthetic_activation_when_last_signal_within_8h() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        let one_hour: i64 = 3600;
+        let recent_activation_ts = ts - one_hour; // 1h before switch → within 8h
+
+        // Pre-populate activation_buffer with a recent activation (within 8h).
+        let mut meta = load_env_meta(&env_dir);
+        meta.signals
+            .activation_buffer
+            .push((recent_activation_ts, 1.0));
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        // activation_buffer must still have exactly 1 entry — the original; no synthetic added.
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "activation_buffer must remain unchanged when last signal was within 8h"
+        );
+        let (entry_ts, entry_weight) = meta.signals.activation_buffer[0];
+        assert_eq!(
+            entry_ts, recent_activation_ts,
+            "the only entry must be the pre-existing activation, not a synthetic one"
+        );
+        assert!(
+            (entry_weight - 1.0).abs() < 1e-10,
+            "pre-existing activation weight must still be 1.0, got {entry_weight}"
+        );
+    }
+
+    // ── synthetic-activation boundary / mixed-buffer tests ────────────────
+
+    /// T1a: when the gap is exactly 8 hours (28800s), the threshold is NOT crossed
+    /// (`>` is strict), so no synthetic activation must be injected.
+    #[test]
+    fn test_record_switch_per_env_no_synthetic_at_exact_8h_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        const EIGHT_HOURS: i64 = 28800;
+        let boundary_activation_ts = ts - EIGHT_HOURS; // gap == 28800, condition is false
+
+        let mut meta = load_env_meta(&env_dir);
+        meta.signals
+            .activation_buffer
+            .push((boundary_activation_ts, 1.0));
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "activation_buffer must NOT gain a synthetic entry when gap == 28800 (boundary is exclusive)"
+        );
+        assert_eq!(
+            meta.signals.activation_buffer[0].0, boundary_activation_ts,
+            "the only entry must still be the pre-existing one, not a synthetic"
+        );
+    }
+
+    /// T1b: when the gap is exactly 28801s (one second past 8 hours), the threshold IS crossed
+    /// (`timestamp - last > 28800` is true), so a synthetic activation must be injected.
+    #[test]
+    fn test_record_switch_per_env_synthetic_injected_at_28801s_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        let just_over_ts = ts - 28801; // gap == 28801, condition is true
+
+        let mut meta = load_env_meta(&env_dir);
+        meta.signals.activation_buffer.push((just_over_ts, 1.0));
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            2,
+            "activation_buffer must gain a synthetic entry when gap == 28801 (just over threshold)"
+        );
+        let (newest_ts, newest_weight) = meta.signals.activation_buffer[0];
+        assert_eq!(
+            newest_ts, ts,
+            "synthetic activation timestamp must match the switch timestamp"
+        );
+        assert!(
+            (newest_weight - 0.4).abs() < 1e-10,
+            "synthetic activation weight must be 0.4, got {newest_weight}"
+        );
+    }
+
+    /// T2a: `activation_buffer` has an old entry (>8h) but `switch_buffer` has a recent
+    /// entry (<8h). The max of both is recent, so no synthetic activation must be injected.
+    /// This verifies that `last_switch_ts` participates in the max computation.
+    #[test]
+    fn test_record_switch_per_env_no_synthetic_when_switch_buffer_is_recent_activation_is_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        let old_activation_ts = ts - (8 * 3600 + 1); // >8h ago
+        let recent_switch_ts = ts - 3600; // 1h ago (within 8h)
+
+        let mut meta = load_env_meta(&env_dir);
+        meta.signals
+            .activation_buffer
+            .push((old_activation_ts, 1.0));
+        meta.signals.switch_buffer.push((recent_switch_ts, 1.0));
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "activation_buffer must NOT gain a synthetic entry when switch_buffer has a recent entry (1h ago)"
+        );
+        assert_eq!(
+            meta.signals.activation_buffer[0].0, old_activation_ts,
+            "the only entry must still be the original old activation, not a synthetic"
+        );
+    }
+
+    /// T2b: `switch_buffer` has an old entry (>8h) but `activation_buffer` has a recent
+    /// entry (<8h). The max of both is recent, so no synthetic activation must be injected.
+    /// This verifies that `last_activation_ts` participates in the max computation.
+    #[test]
+    fn test_record_switch_per_env_no_synthetic_when_activation_buffer_is_recent_switch_is_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let ts: i64 = 1_700_000_000;
+        let old_switch_ts = ts - (8 * 3600 + 1); // >8h ago
+        let recent_activation_ts = ts - 3600; // 1h ago (within 8h)
+
+        let mut meta = load_env_meta(&env_dir);
+        meta.signals.switch_buffer.push((old_switch_ts, 1.0));
+        meta.signals
+            .activation_buffer
+            .push((recent_activation_ts, 1.0));
+        save_env_meta(&env_dir, &meta).unwrap();
+
+        record_switch_per_env(&env_dir, ts);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.activation_buffer.len(),
+            1,
+            "activation_buffer must NOT gain a synthetic entry when activation_buffer has a recent entry (1h ago)"
+        );
+        assert_eq!(
+            meta.signals.activation_buffer[0].0, recent_activation_ts,
+            "the only entry must still be the original recent activation, not a synthetic"
+        );
+    }
+
+    // ── switch_score tests ─────────────────────────────────────────────────
+
+    /// `switch_score` must return 0.0 for an empty buffer.
+    #[test]
+    fn test_switch_score_empty_buffer_is_zero() {
+        let now: i64 = 1_700_000_000;
+        let score = switch_score(&[], now);
+        assert!(
+            score.abs() < 1e-10,
+            "switch_score for an empty buffer must be 0.0, got {score}"
+        );
+    }
+
+    /// A single entry with weight 1.0 recorded at `now` (elapsed = 0) must yield
+    /// exactly 1.0: each decay factor is e^0 = 1.0, so fast_sum = 1.0, slow_sum = 1.0,
+    /// and 0.5 * 1.0 + 0.5 * 1.0 = 1.0.
+    #[test]
+    fn test_switch_score_single_entry_at_now_is_one() {
+        let now: i64 = 1_700_000_000;
+        let score = switch_score(&[(now, 1.0)], now);
+        assert!(
+            (score - 1.0).abs() < 1e-6,
+            "switch_score for a single entry at now must be ≈ 1.0, got {score}"
+        );
+    }
+
+    /// A single entry recorded exactly 6 hours ago:
+    /// - fast component (6h half-life): e^(-ln(2)/6h * 6h) = 0.5 → fast_sum = 0.5
+    /// - slow component (48h half-life): e^(-ln(2)/48h * 6h) = 2^(-1/8) ≈ 0.9170
+    /// Final score = 0.5 * 0.5 + 0.5 * 2^(-1/8)
+    #[test]
+    fn test_switch_score_single_entry_6h_ago_blends_correctly() {
+        let now: i64 = 1_700_000_000;
+        let six_hours: i64 = 6 * 3600;
+        let buffer = [(now - six_hours, 1.0)];
+
+        let score = switch_score(&buffer, now);
+
+        let fast_sum = 0.5_f64; // e^(-ln2) = 0.5 (exactly one fast half-life)
+        let slow_lambda = std::f64::consts::LN_2 / (48.0 * 3600.0);
+        let slow_sum = (-slow_lambda * six_hours as f64).exp();
+        let expected = 0.5 * fast_sum + 0.5 * slow_sum;
+        assert!(
+            (score - expected).abs() < 1e-6,
+            "switch_score for single entry 6h ago must be ≈ {expected:.6}, got {score:.6}"
+        );
+    }
+
+    /// A single entry recorded exactly 48 hours ago:
+    /// - slow component (48h half-life): decays to 0.5
+    /// - fast component (6h half-life): decays to 2^(-8) = 1/256
+    /// Final score = 0.5 * (1/256) + 0.5 * 0.5
+    #[test]
+    fn test_switch_score_single_entry_48h_ago_blends_correctly() {
+        let now: i64 = 1_700_000_000;
+        let forty_eight_hours: i64 = 48 * 3600;
+        let buffer = [(now - forty_eight_hours, 1.0)];
+
+        let score = switch_score(&buffer, now);
+
+        let fast_lambda = std::f64::consts::LN_2 / (6.0 * 3600.0);
+        let fast_sum = (-fast_lambda * forty_eight_hours as f64).exp(); // 2^(-8) = 1/256
+        let slow_sum = 0.5_f64; // exactly one 48h half-life
+        let expected = 0.5 * fast_sum + 0.5 * slow_sum;
+        assert!(
+            (score - expected).abs() < 1e-6,
+            "switch_score for single entry 48h ago must be ≈ {expected:.8}, got {score:.8}"
+        );
+    }
+
+    /// T1 — Weight != 1.0: a single entry at `now` with weight=2.0 must return
+    /// exactly double the score of the same entry with weight=1.0.
+    /// If `weight *` were dropped the two scores would be identical.
+    #[test]
+    fn test_switch_score_weight_doubles_score() {
+        let now: i64 = 1_700_000_000;
+        let score_w1 = switch_score(&[(now, 1.0)], now);
+        let score_w2 = switch_score(&[(now, 2.0)], now);
+        assert!(
+            (score_w2 - 2.0 * score_w1).abs() < 1e-10,
+            "weight=2.0 must yield exactly twice weight=1.0: got {score_w1} vs {score_w2}"
+        );
+    }
+
+    /// T2 — Multi-entry summation: two entries both at `now` with weight=1.0 each
+    /// must return 2.0 (elapsed=0 → each contributes its weight directly).
+    /// A regression that took only `.first()` or `.last()` would return 1.0.
+    #[test]
+    fn test_switch_score_two_entries_at_now_sum_to_two() {
+        let now: i64 = 1_700_000_000;
+        let buffer = [(now, 1.0), (now, 1.0)];
+        let score = switch_score(&buffer, now);
+        assert!(
+            (score - 2.0).abs() < 1e-10,
+            "two entries at now with weight=1.0 each must sum to 2.0, got {score}"
+        );
+    }
+
+    /// T3 — Future-timestamp clamping: an entry one hour in the future must yield
+    /// the same score as an entry at `now` (elapsed clamped to 0, not negative).
+    /// A regression removing `.max(0)` would inflate the score via exp(+λ*3600).
+    #[test]
+    fn test_switch_score_future_timestamp_clamped_to_now() {
+        let now: i64 = 1_700_000_000;
+        let score_now = switch_score(&[(now, 1.0)], now);
+        let score_future = switch_score(&[(now + 3600, 1.0)], now);
+        assert!(
+            (score_future - score_now).abs() < 1e-10,
+            "future timestamp must clamp to elapsed=0; expected ≈{score_now}, got {score_future}"
         );
     }
 }
