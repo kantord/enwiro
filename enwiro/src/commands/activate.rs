@@ -178,8 +178,8 @@ mod tests {
             env_y_info.slot_score
         );
         assert!(
-            (env_x_info.slot_score - 0.5).abs() < 1e-10,
-            "env-x must have slot_score 0.5 (rank 1/2), got {}",
+            (env_x_info.slot_score - 0.1).abs() < 1e-10,
+            "env-x must have slot_score 0.1 (0.2×activation_rank_0.5 + 0.8×switch_rank_0.0), got {}",
             env_x_info.slot_score
         );
 
@@ -267,10 +267,11 @@ mod tests {
             idle.slot_score
         );
 
-        // active-env has 1 env strictly below (idle-env) out of 2 total → rank 1/2 = 0.5
+        // active-env: activation_percentile=0.5, switch_percentile=0.0 (no switch history)
+        // slot_score = 0.2×0.5 + 0.8×0.0 = 0.1
         assert!(
-            (active.slot_score - 0.5).abs() < 1e-10,
-            "active-env must have slot_score 0.5 (rank 1/2), got {}",
+            (active.slot_score - 0.1).abs() < 1e-10,
+            "active-env must have slot_score 0.1 (0.2×0.5 + 0.8×0.0), got {}",
             active.slot_score
         );
 
