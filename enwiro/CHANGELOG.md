@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.24](https://github.com/kantord/enwiro/compare/enwiro-v0.3.23...enwiro-v0.3.24) - 2026-04-13
+
+### Added
+
+- blend switch and activation signals into slot_score and launcher_score
+- daemon runs always, idle only gates recipe cache refresh
+
+### Other
+
+- daemon spawns listen subprocess and records workspace switch events
+
 ## [0.3.23](https://github.com/kantord/enwiro/compare/enwiro-v0.3.22...enwiro-v0.3.23) - 2026-04-12
 
 ### Other
