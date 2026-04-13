@@ -88,25 +88,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
         None => daemon::runtime_dir()?,
     };
 
-    // 3. Ensure daemon is running (spawns if needed; skip in test mode)
-    if context.cache_dir.is_none() {
-        match daemon::ensure_daemon_running(&runtime_dir) {
-            Ok(true) => {
-                tracing::info!("Started background recipe cache daemon");
-                context
-                    .notifier
-                    .notify_success("Recipe cache daemon started");
-            }
-            Ok(false) => {
-                tracing::debug!("Daemon already running");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Could not ensure daemon is running");
-            }
-        }
-    }
-
-    // 4. Read from cache if available, otherwise synchronous fallback
+    // 3. Read from cache if available, otherwise synchronous fallback
     let recipes = match daemon::read_cached_recipes(&runtime_dir) {
         Ok(Some(cached)) => cached,
         Ok(None) => {
