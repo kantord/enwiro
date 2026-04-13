@@ -46,14 +46,14 @@ pub fn activate<W: Write>(
     if let Err(e) = context.adapter.activate(&args.name, &managed_envs) {
         context
             .notifier
-            .notify_error(&format!("Failed to activate workspace: {}", e));
+            .notify_error(&format!("Failed to activate workspace: {:#}", e));
         return Err(e).context("Could not activate workspace");
     }
 
     // Ensure the environment exists on disk (cook from recipe if needed)
     if let Err(e) = context.get_or_cook_environment(&Some(args.name.clone())) {
         context.notifier.notify_error(&format!(
-            "Could not set up environment '{}': {}",
+            "Could not set up environment '{}': {:#}",
             args.name, e
         ));
         tracing::warn!(error = %e, "Could not set up environment");
@@ -364,6 +364,72 @@ mod tests {
         assert!(logs[0].starts_with("ERROR:"));
     }
 
+    /// An adapter whose `activate()` returns a multi-level anyhow error chain so that
+    /// the leaf detail (`"leaf i3 IPC error: broken pipe"`) is distinct from the
+    /// outer wrapper (`"Could not switch to workspace"`).
+    ///
+    /// Used by `test_adapter_error_notification_includes_leaf_detail` to prove that the
+    /// notification at line 49 of activate.rs must use `{:#}`, not `{}`.
+    struct ChainedErrorAdapter;
+
+    impl crate::commands::adapter::EnwiroAdapterTrait for ChainedErrorAdapter {
+        fn get_active_environment_name(&self) -> anyhow::Result<String> {
+            Ok("some-env".to_string())
+        }
+
+        fn activate(
+            &self,
+            _name: &str,
+            _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
+        ) -> anyhow::Result<()> {
+            let leaf = anyhow::anyhow!("leaf i3 IPC error: broken pipe");
+            Err(leaf).map_err(|e| e.context("outer: Could not switch to workspace"))
+        }
+    }
+
+    /// When `adapter.activate()` fails with a multi-level anyhow error chain, the
+    /// desktop notification **must** include the leaf error detail — not just the
+    /// outermost wrapper message.
+    ///
+    /// Currently `activate.rs` line 49 formats the error with `{}`, which shows only
+    /// the outermost context layer.  The fix is to use `{:#}`, which renders the full
+    /// chain.  This test fails under the current `{}` formatting because the leaf
+    /// `"leaf i3 IPC error: broken pipe"` does not appear in the notification.
+    #[rstest]
+    fn test_adapter_error_notification_includes_leaf_detail(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut ctx, _, notifications) = context_object;
+
+        ctx.adapter = Box::new(ChainedErrorAdapter);
+
+        let result = activate(
+            &mut ctx,
+            ActivateArgs {
+                name: "my-project".to_string(),
+            },
+        );
+
+        // adapter failure propagates as an error result
+        assert!(result.is_err());
+
+        let logs = notifications.borrow();
+        let error_notifications: Vec<_> = logs.iter().filter(|l| l.starts_with("ERROR:")).collect();
+        assert_eq!(
+            error_notifications.len(),
+            1,
+            "expected exactly one error notification"
+        );
+
+        let msg = &error_notifications[0];
+        assert!(
+            msg.contains("leaf i3 IPC error: broken pipe"),
+            "notification must include the leaf error detail from the full error chain, \
+             but got: {msg:?}\n\
+             Hint: use `{{:#}}` instead of `{{}}` when formatting the adapter error in activate.rs line 49"
+        );
+    }
+
     #[rstest]
     fn test_activate_notifies_on_cooking_failure(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
@@ -384,6 +450,79 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].starts_with("ERROR:"));
         assert!(logs[0].contains("unknown"));
+    }
+
+    /// A cookbook whose `cook()` returns a multi-level anyhow error chain so that
+    /// the leaf detail (`"leaf git2 error: reference is locked"`) is distinct from the
+    /// outer wrapper (`"Could not create worktree"`).
+    ///
+    /// This struct is used by `test_cook_error_notification_includes_leaf_detail` to
+    /// prove that the notification message must include the full chain — i.e. the format
+    /// specifier must be `{:#}`, not `{}`.
+    struct ChainedErrorCookbook {
+        cookbook_name: String,
+        recipe_name: String,
+    }
+
+    impl crate::client::CookbookTrait for ChainedErrorCookbook {
+        fn list_recipes(&self) -> anyhow::Result<Vec<crate::client::Recipe>> {
+            Ok(vec![crate::client::Recipe::new(&self.recipe_name)])
+        }
+
+        fn cook(&self, _recipe: &str) -> anyhow::Result<String> {
+            let leaf = anyhow::anyhow!("leaf git2 error: reference is locked");
+            Err(leaf).map_err(|e| e.context("outer: Could not create worktree"))
+        }
+
+        fn name(&self) -> &str {
+            &self.cookbook_name
+        }
+    }
+
+    /// When `cookbook.cook()` fails with a multi-level anyhow error chain, the
+    /// desktop notification **must** include the leaf error detail — not just the
+    /// outermost wrapper message.
+    ///
+    /// Currently `activate.rs` formats the error with `{}`, which shows only the
+    /// outermost context layer.  The fix is to use `{:#}`, which renders the full
+    /// chain.  This test fails under the current `{}` formatting because the leaf
+    /// `"leaf git2 error: reference is locked"` does not appear in the notification.
+    #[rstest]
+    fn test_cook_error_notification_includes_leaf_detail(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut ctx, _, notifications) = context_object;
+
+        ctx.cookbooks = vec![Box::new(ChainedErrorCookbook {
+            cookbook_name: "git".to_string(),
+            recipe_name: "my-project".to_string(),
+        })];
+
+        let result = activate(
+            &mut ctx,
+            ActivateArgs {
+                name: "my-project".to_string(),
+            },
+        );
+
+        // activate succeeds at the adapter level; only cooking fails
+        assert!(result.is_ok());
+
+        let logs = notifications.borrow();
+        let error_notifications: Vec<_> = logs.iter().filter(|l| l.starts_with("ERROR:")).collect();
+        assert_eq!(
+            error_notifications.len(),
+            1,
+            "expected exactly one error notification"
+        );
+
+        let msg = &error_notifications[0];
+        assert!(
+            msg.contains("leaf git2 error: reference is locked"),
+            "notification must include the leaf error detail from the full error chain, \
+             but got: {msg:?}\n\
+             Hint: use `{{:#}}` instead of `{{}}` when formatting the error in activate.rs"
+        );
     }
 
     #[rstest]
