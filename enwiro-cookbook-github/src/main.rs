@@ -166,14 +166,18 @@ fn parse_recipe_name(name: &str) -> anyhow::Result<(&str, u64)> {
 /// - `"is:pr is:open"` for pull requests
 /// - `"is:issue is:open assignee:@me"` for assigned issues
 fn build_search_query(repos: &[String], type_filter: &str) -> String {
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
-    let date_str = cutoff.format("%Y-%m-%d").to_string();
     let repo_filters: Vec<String> = repos.iter().map(|r| format!("repo:{}", r)).collect();
+    let date_qualifier = if type_filter.contains("is:issue") {
+        String::new()
+    } else {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        format!(" updated:>{}", cutoff.format("%Y-%m-%d"))
+    };
     format!(
-        "{} {} updated:>{} sort:updated-desc",
+        "{} {}{} sort:updated-desc",
         type_filter,
         repo_filters.join(" "),
-        date_str
+        date_qualifier,
     )
 }
 
@@ -643,6 +647,32 @@ mod tests {
         assert!(query.contains("is:open"));
         assert!(query.contains("assignee:@me"));
         assert!(query.contains("sort:updated-desc"));
+    }
+
+    #[test]
+    fn test_build_search_query_issue_omits_date_filter() {
+        // Assigned issues should never be silently excluded by a date filter —
+        // old issues that are still assigned should always appear.
+        let repos = vec!["kantord/enwiro".to_string()];
+        let query = build_search_query(&repos, "is:issue is:open assignee:@me");
+        assert!(
+            !query.contains("updated:>"),
+            "Issue query must NOT include a date filter, but got: {}",
+            query
+        );
+    }
+
+    #[test]
+    fn test_build_search_query_pr_retains_date_filter() {
+        // PRs are expected to be recent; keep the 30-day staleness window so
+        // the result set stays manageable.
+        let repos = vec!["kantord/enwiro".to_string()];
+        let query = build_search_query(&repos, "is:pr is:open");
+        assert!(
+            query.contains("updated:>"),
+            "PR query MUST include a date filter, but got: {}",
+            query
+        );
     }
 
     #[test]
