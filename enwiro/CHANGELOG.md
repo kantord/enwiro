@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.26](https://github.com/kantord/enwiro/compare/enwiro-v0.3.25...enwiro-v0.3.26) - 2026-04-16
+
+### Fixed
+
+- *(enwiro-adapter-i3wm)* always place newly activated workspace in shortcut zone
+
 ## [0.3.25](https://github.com/kantord/enwiro/compare/enwiro-v0.3.24...enwiro-v0.3.25) - 2026-04-13
 
 ### Fixed
