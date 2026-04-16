@@ -270,6 +270,29 @@ const SEARCH_QUERY: &str = r#"query($searchQuery: String!) {
   }
 }"#;
 
+fn interpret_gh_output(
+    stdout: &[u8],
+    stderr: &[u8],
+    success: bool,
+) -> anyhow::Result<Vec<GithubItem>> {
+    if !success {
+        let stderr_str = String::from_utf8_lossy(stderr);
+        if stderr_str.contains("GitHub search returned 100 results (the maximum)") {
+            tracing::warn!(
+                "GitHub search returned 100 results (the maximum). Some results may be missing."
+            );
+        } else {
+            anyhow::bail!(
+                "gh api graphql failed: {}. Is gh authenticated? (try: gh auth login)",
+                stderr_str
+            );
+        }
+    }
+
+    let stdout_str = String::from_utf8(stdout.to_vec()).context("gh produced invalid UTF-8")?;
+    parse_search_response(&stdout_str)
+}
+
 fn search_github(repos: &[String], type_filter: &str) -> anyhow::Result<Vec<GithubItem>> {
     if repos.is_empty() {
         return Ok(Vec::new());
@@ -292,24 +315,7 @@ fn search_github(repos: &[String], type_filter: &str) -> anyhow::Result<Vec<Gith
              (https://cli.github.com/, then run: gh auth login)",
         )?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "gh api graphql failed: {}. Is gh authenticated? (try: gh auth login)",
-            stderr
-        );
-    }
-
-    let stdout = String::from_utf8(output.stdout).context("gh produced invalid UTF-8")?;
-    let items = parse_search_response(&stdout)?;
-
-    if items.len() >= 100 {
-        eprintln!(
-            "Warning: GitHub search returned 100 results (the maximum). Some results may be missing."
-        );
-    }
-
-    Ok(items)
+    interpret_gh_output(&output.stdout, &output.stderr, output.status.success())
 }
 
 fn sort_items_by_date(items: &mut [GithubItem]) {
@@ -1193,6 +1199,74 @@ mod tests {
         assert_eq!(compute_sort_order(0, 3), 0);
         assert_eq!(compute_sort_order(1, 3), 50);
         assert_eq!(compute_sort_order(2, 3), 100);
+    }
+
+    // --- interpret_gh_output tests ---
+
+    /// Minimal valid GraphQL JSON with one PR node, used as a fixture for the
+    /// truncation-warning tests below.
+    fn gh_output_with_one_pr() -> Vec<u8> {
+        r#"{
+            "data": {
+                "search": {
+                    "nodes": [
+                        {
+                            "number": 42,
+                            "title": "Fix the thing",
+                            "headRefName": "fix-thing",
+                            "updatedAt": "2026-02-14T13:10:29Z",
+                            "repository": { "nameWithOwner": "kantord/enwiro" }
+                        }
+                    ]
+                }
+            }
+        }"#
+        .as_bytes()
+        .to_vec()
+    }
+
+    /// When gh exits non-zero AND stderr contains the 100-result truncation
+    /// warning AND stdout is valid JSON, `interpret_gh_output` must return the
+    /// parsed items instead of an error.
+    #[test]
+    fn test_interpret_gh_output_truncation_warning_returns_partial_results() {
+        let stdout = gh_output_with_one_pr();
+        let stderr =
+            b"GitHub search returned 100 results (the maximum). Some results may be missing."
+                .to_vec();
+
+        // success = false simulates a non-zero exit code
+        let result = interpret_gh_output(&stdout, &stderr, false);
+
+        assert!(
+            result.is_ok(),
+            "Expected Ok with partial results, got Err: {:?}",
+            result.unwrap_err()
+        );
+        let items = result.unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "Expected 1 parsed item from partial results, got {}",
+            items.len()
+        );
+        assert_eq!(items[0].number, 42);
+    }
+
+    /// When gh exits non-zero AND stderr does NOT contain the truncation
+    /// warning, `interpret_gh_output` must still return an error (the original
+    /// bail! behaviour must be preserved for real failures).
+    #[test]
+    fn test_interpret_gh_output_real_failure_still_errors() {
+        let stdout = gh_output_with_one_pr();
+        let stderr = b"some other gh error: authentication failed".to_vec();
+
+        let result = interpret_gh_output(&stdout, &stderr, false);
+
+        assert!(
+            result.is_err(),
+            "Expected Err for a real gh failure, but got Ok"
+        );
     }
 }
 
