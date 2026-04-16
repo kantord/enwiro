@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
-use crate::client::CachedRecipe;
+use crate::client::{CachedRecipe, EnvScores};
 use crate::context::CommandContext;
 use crate::daemon;
 use crate::usage_stats::EnvStats;
@@ -49,6 +49,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
 
     let now = crate::usage_stats::now_timestamp();
     let percentile_map = crate::usage_stats::launcher_score(&meta_map, now);
+    let slot_map = crate::usage_stats::slot_scores(&meta_map, now);
     envs.sort_by(|a, b| {
         let score_a = percentile_map.get(&a.name).copied().unwrap_or(0.0);
         let score_b = percentile_map.get(&b.name).copied().unwrap_or(0.0);
@@ -59,11 +60,14 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
     });
     for env in &envs {
         if json {
+            let launcher = percentile_map.get(&env.name).copied().unwrap_or(0.0);
+            let slot = slot_map.get(&env.name).copied().unwrap_or(0.0);
             let cached = CachedRecipe {
                 cookbook: "_".to_string(),
                 name: env.name.clone(),
                 description: meta_map.get(&env.name).and_then(|s| s.description.clone()),
                 sort_order: 0,
+                scores: Some(EnvScores { launcher, slot }),
             };
             let line = serde_json::to_string(&cached).unwrap();
             writeln!(context.writer, "{}", line).context("Could not write to output")?;
@@ -584,6 +588,156 @@ mod tests {
             entries
                 .iter()
                 .any(|e| e.cookbook == "git" && e.name == "repo-a")
+        );
+    }
+
+    /// Existing environment entries in `list-all --json` output must include a `scores`
+    /// object with `launcher` (f64) and `slot` (f64) fields.
+    #[rstest]
+    fn test_list_all_json_env_entry_has_scores_object(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("my-env");
+        context_object.cookbooks = vec![];
+
+        list_all(&mut context_object, true).unwrap();
+
+        let output = context_object.get_output();
+        // Parse as raw JSON values to check field presence and type
+        let entries: Vec<serde_json::Value> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let env_entry = entries
+            .iter()
+            .find(|e| e["cookbook"] == "_" && e["name"] == "my-env")
+            .expect("expected an entry for my-env with cookbook=_");
+
+        let scores = env_entry
+            .get("scores")
+            .expect("env entry must have a 'scores' field");
+
+        assert!(
+            scores.get("launcher").is_some(),
+            "scores must have a 'launcher' field, got: {scores}"
+        );
+        assert!(
+            scores["launcher"].is_f64() || scores["launcher"].is_number(),
+            "scores.launcher must be a number, got: {}",
+            scores["launcher"]
+        );
+
+        assert!(
+            scores.get("slot").is_some(),
+            "scores must have a 'slot' field, got: {scores}"
+        );
+        assert!(
+            scores["slot"].is_f64() || scores["slot"].is_number(),
+            "scores.slot must be a number, got: {}",
+            scores["slot"]
+        );
+    }
+
+    /// Recipe entries (cookbook != "_") in `list-all --json` output must NOT have a `scores`
+    /// field — scores are only meaningful for existing environments.
+    #[rstest]
+    fn test_list_all_json_recipe_entry_has_no_scores_field(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]))];
+
+        list_all(&mut context_object, true).unwrap();
+
+        let output = context_object.get_output();
+        let entries: Vec<serde_json::Value> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let recipe_entry = entries
+            .iter()
+            .find(|e| e["cookbook"] == "git" && e["name"] == "repo-a")
+            .expect("expected a recipe entry for git: repo-a");
+
+        assert!(
+            recipe_entry.get("scores").is_none(),
+            "recipe entry must NOT have a 'scores' field, got: {recipe_entry}"
+        );
+    }
+
+    /// An environment with higher frecency must have higher `scores.launcher` and
+    /// `scores.slot` than a never-used environment in `list-all --json` output.
+    #[rstest]
+    fn test_list_all_json_higher_frecency_env_has_higher_scores(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("often-used");
+        context_object.create_mock_environment("never-used");
+        context_object.cookbooks = vec![];
+
+        // Give "often-used" a high activation history
+        let now = crate::usage_stats::now_timestamp();
+        let often_meta = crate::usage_stats::EnvStats {
+            signals: UserIntentSignals {
+                activation_buffer: vec![(now, 1.0); 5],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let often_dir = temp_dir.path().join("often-used");
+        std::fs::write(
+            often_dir.join("meta.json"),
+            serde_json::to_string(&often_meta).unwrap(),
+        )
+        .unwrap();
+        // "never-used" has no meta.json — default empty stats
+
+        list_all(&mut context_object, true).unwrap();
+
+        let output = context_object.get_output();
+        let entries: Vec<serde_json::Value> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let often_entry = entries
+            .iter()
+            .find(|e| e["cookbook"] == "_" && e["name"] == "often-used")
+            .expect("expected entry for often-used");
+        let never_entry = entries
+            .iter()
+            .find(|e| e["cookbook"] == "_" && e["name"] == "never-used")
+            .expect("expected entry for never-used");
+
+        let often_launcher = often_entry["scores"]["launcher"]
+            .as_f64()
+            .expect("often-used must have scores.launcher as f64");
+        let never_launcher = never_entry["scores"]["launcher"]
+            .as_f64()
+            .expect("never-used must have scores.launcher as f64");
+
+        assert!(
+            often_launcher > never_launcher,
+            "often-used (launcher={often_launcher}) must outscore never-used (launcher={never_launcher})"
+        );
+
+        let often_slot = often_entry["scores"]["slot"]
+            .as_f64()
+            .expect("often-used must have scores.slot as f64");
+        let never_slot = never_entry["scores"]["slot"]
+            .as_f64()
+            .expect("never-used must have scores.slot as f64");
+
+        assert!(
+            often_slot >= never_slot,
+            "often-used (slot={often_slot}) must not score below never-used (slot={never_slot})"
         );
     }
 }

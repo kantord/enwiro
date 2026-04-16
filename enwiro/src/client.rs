@@ -25,7 +25,13 @@ pub struct Recipe {
     pub sort_order: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct EnvScores {
+    pub launcher: f64,
+    pub slot: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedRecipe {
     pub cookbook: String,
     pub name: String,
@@ -33,6 +39,8 @@ pub struct CachedRecipe {
     pub description: Option<String>,
     #[serde(default)]
     pub sort_order: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scores: Option<EnvScores>,
 }
 
 impl Recipe {

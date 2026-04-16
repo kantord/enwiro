@@ -90,7 +90,7 @@ fn record_activation_to(path: &Path, env_name: &str) {
     entry
         .signals
         .activation_buffer
-        .sort_by(|a, b| b.0.cmp(&a.0));
+        .sort_by_key(|b| std::cmp::Reverse(b.0));
     entry.signals.activation_buffer.truncate(10);
     if let Err(e) = save_stats(path, &stats) {
         tracing::warn!(error = %e, "Could not save usage stats");
@@ -120,7 +120,9 @@ pub fn record_activation_per_env(env_dir: &Path) {
     }
     let mut meta = load_env_meta(env_dir);
     meta.signals.activation_buffer.push((now_timestamp(), 1.0));
-    meta.signals.activation_buffer.sort_by(|a, b| b.0.cmp(&a.0));
+    meta.signals
+        .activation_buffer
+        .sort_by_key(|b| std::cmp::Reverse(b.0));
     meta.signals.activation_buffer.truncate(10);
     if let Err(e) = save_env_meta(env_dir, &meta) {
         tracing::warn!(error = %e, "Could not save environment metadata");
@@ -148,14 +150,18 @@ pub fn record_switch_per_env(env_dir: &Path, timestamp: i64) {
         .max();
 
     meta.signals.switch_buffer.push((timestamp, 1.0));
-    meta.signals.switch_buffer.sort_by(|a, b| b.0.cmp(&a.0));
+    meta.signals
+        .switch_buffer
+        .sort_by_key(|b| std::cmp::Reverse(b.0));
     meta.signals.switch_buffer.truncate(25);
 
     // If the gap since the last signal exceeds 8 hours, inject a synthetic activation.
     const EIGHT_HOURS: i64 = 28800;
     if last_signal_ts.is_none_or(|last| timestamp - last > EIGHT_HOURS) {
         meta.signals.activation_buffer.push((timestamp, 0.4));
-        meta.signals.activation_buffer.sort_by(|a, b| b.0.cmp(&a.0));
+        meta.signals
+            .activation_buffer
+            .sort_by_key(|b| std::cmp::Reverse(b.0));
         meta.signals.activation_buffer.truncate(10);
     }
 

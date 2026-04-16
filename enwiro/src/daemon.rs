@@ -136,6 +136,7 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
                             name: recipe.name,
                             description: recipe.description,
                             sort_order: recipe.sort_order,
+                            scores: None,
                         },
                         priority: cookbook.priority(),
                     });
@@ -221,6 +222,8 @@ pub fn run_daemon() -> anyhow::Result<()> {
     if let Some(ref plugin) = adapter_plugin {
         match std::process::Command::new(&plugin.executable)
             .arg("listen")
+            .arg("--debounce-secs")
+            .arg("5")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
