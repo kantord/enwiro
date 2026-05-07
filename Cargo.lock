@@ -553,6 +553,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "enwiro-adapter-tmux"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "enwiro-logging",
+ "tracing",
+]
+
+[[package]]
 name = "enwiro-bridge-rofi"
 version = "0.1.7"
 dependencies = [
