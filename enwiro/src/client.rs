@@ -72,6 +72,12 @@ pub trait CookbookTrait {
     fn priority(&self) -> u32 {
         DEFAULT_PRIORITY
     }
+    /// Return optional gear configuration JSON for the given recipe.
+    /// If `Some(json)` is returned after cooking, it will be written to
+    /// `gear.json` inside the environment directory.
+    fn gear(&self, _recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
 }
 
 /// Sort cookbooks by priority (lower first), then alphabetically by name.

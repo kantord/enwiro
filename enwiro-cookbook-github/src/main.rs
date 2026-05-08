@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -44,6 +45,7 @@ pub struct GithubItem {
 enum EnwiroCookbookGithub {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
+    Gear(GearArgs),
     Metadata,
 }
 
@@ -52,6 +54,11 @@ pub struct ListRecipesArgs {}
 
 #[derive(clap::Args)]
 pub struct CookArgs {
+    recipe_name: String,
+}
+
+#[derive(clap::Args)]
+pub struct GearArgs {
     recipe_name: String,
 }
 
@@ -1268,6 +1275,187 @@ mod tests {
             "Expected Err for a real gh failure, but got Ok"
         );
     }
+
+    // --- gear subcommand tests ---
+
+    /// `build_github_url` must produce the correct pull-request URL when given
+    /// a PR kind.
+    #[test]
+    fn test_build_github_url_for_pr() {
+        let repo_config = RepoConfig {
+            repo: "kantord/enwiro".to_string(),
+            local_path: PathBuf::from("/tmp/fake"),
+        };
+        let url = build_github_url(
+            &repo_config,
+            &GithubItemKind::PullRequest {
+                head_ref_name: "fix-thing".to_string(),
+            },
+            42,
+        );
+        assert_eq!(url, "https://github.com/kantord/enwiro/pull/42");
+    }
+
+    /// `build_github_url` must produce the correct issue URL when given an
+    /// Issue kind.
+    #[test]
+    fn test_build_github_url_for_issue() {
+        let repo_config = RepoConfig {
+            repo: "kantord/enwiro".to_string(),
+            local_path: PathBuf::from("/tmp/fake"),
+        };
+        let url = build_github_url(&repo_config, &GithubItemKind::Issue, 309);
+        assert_eq!(url, "https://github.com/kantord/enwiro/issues/309");
+    }
+
+    /// When a PR worktree directory exists (path contains "pr" prefix), `gear`
+    /// must output a JSON object `{"pull-request": {"open": "<pr_url>"}}` to
+    /// stdout and return Ok.
+    #[test]
+    fn test_gear_outputs_pull_request_url_when_pr_worktree_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let local_path = tmp.path().join("enwiro");
+        std::fs::create_dir(&local_path).unwrap();
+
+        let repo_config = RepoConfig {
+            repo: "kantord/enwiro".to_string(),
+            local_path: local_path.clone(),
+        };
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+        };
+
+        // Create the PR worktree directory so the existence check passes
+        let pr_path = worktree_path(&config, &repo_config, "enwiro", "pr", 42).unwrap();
+        std::fs::create_dir_all(&pr_path).unwrap();
+
+        let mut output = Vec::new();
+        gear_with_writer(&config, &repo_config, "enwiro", 42, &mut output).unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "pull-request": { "open": "https://github.com/kantord/enwiro/pull/42" }
+            })
+        );
+    }
+
+    /// When an issue worktree directory exists (path contains "issue" prefix),
+    /// `gear` must output `{"issue": {"open": "<issue_url>"}}` to stdout and
+    /// return Ok.
+    #[test]
+    fn test_gear_outputs_issue_url_when_issue_worktree_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let local_path = tmp.path().join("enwiro");
+        std::fs::create_dir(&local_path).unwrap();
+
+        let repo_config = RepoConfig {
+            repo: "kantord/enwiro".to_string(),
+            local_path: local_path.clone(),
+        };
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+        };
+
+        // Create the issue worktree directory so the existence check passes
+        let issue_path = worktree_path(&config, &repo_config, "enwiro", "issue", 309).unwrap();
+        std::fs::create_dir_all(&issue_path).unwrap();
+
+        let mut output = Vec::new();
+        gear_with_writer(&config, &repo_config, "enwiro", 309, &mut output).unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "issue": { "open": "https://github.com/kantord/enwiro/issues/309" }
+            })
+        );
+    }
+
+    /// When neither a PR nor an issue worktree exists, `gear` must return an
+    /// error (the recipe has not been cooked yet).
+    #[test]
+    fn test_gear_errors_when_no_worktree_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let local_path = tmp.path().join("enwiro");
+        std::fs::create_dir(&local_path).unwrap();
+
+        let repo_config = RepoConfig {
+            repo: "kantord/enwiro".to_string(),
+            local_path: local_path.clone(),
+        };
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+        };
+
+        // No worktree directories created
+        let mut output = Vec::new();
+        let result = gear_with_writer(&config, &repo_config, "enwiro", 42, &mut output);
+        assert!(
+            result.is_err(),
+            "Expected error when no worktree exists, but got Ok"
+        );
+    }
+}
+
+fn build_github_url(repo_config: &RepoConfig, kind: &GithubItemKind, number: u64) -> String {
+    match kind {
+        GithubItemKind::PullRequest { .. } => {
+            format!("https://github.com/{}/pull/{}", repo_config.repo, number)
+        }
+        GithubItemKind::Issue => {
+            format!("https://github.com/{}/issues/{}", repo_config.repo, number)
+        }
+    }
+}
+
+fn gear_with_writer<W: Write>(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+    number: u64,
+    writer: &mut W,
+) -> anyhow::Result<()> {
+    let pr_path = worktree_path(config, repo_config, repo_str, "pr", number)?;
+    if pr_path.exists() {
+        let url = build_github_url(
+            repo_config,
+            &GithubItemKind::PullRequest {
+                head_ref_name: String::new(),
+            },
+            number,
+        );
+        let json = serde_json::json!({ "pull-request": { "open": url } });
+        writer.write_all(serde_json::to_string(&json)?.as_bytes())?;
+        return Ok(());
+    }
+
+    let issue_path = worktree_path(config, repo_config, repo_str, "issue", number)?;
+    if issue_path.exists() {
+        let url = build_github_url(repo_config, &GithubItemKind::Issue, number);
+        let json = serde_json::json!({ "issue": { "open": url } });
+        writer.write_all(serde_json::to_string(&json)?.as_bytes())?;
+        return Ok(());
+    }
+
+    anyhow::bail!("No worktree found for {}#{}", repo_str, number)
+}
+
+fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
+    let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
+    let repo_config = resolve_repo_config(repo_str)?;
+    gear_with_writer(
+        config,
+        &repo_config,
+        repo_str,
+        number,
+        &mut std::io::stdout(),
+    )
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1284,6 +1472,9 @@ fn main() -> anyhow::Result<()> {
         }
         EnwiroCookbookGithub::Cook(args) => {
             cook(&config, args)?;
+        }
+        EnwiroCookbookGithub::Gear(args) => {
+            gear(&config, args)?;
         }
         EnwiroCookbookGithub::Metadata => {
             println!(r#"{{"defaultPriority":30}}"#);
