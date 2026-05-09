@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.7...enwiro-bridge-rofi-v0.1.8) - 2026-05-09
+
+### Added
+
+- shorten binary name to enw
+
 ## [0.1.7](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.6...enwiro-bridge-rofi-v0.1.7) - 2026-04-03
 
 ### Fixed

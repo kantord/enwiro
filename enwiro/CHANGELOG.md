@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.27](https://github.com/kantord/enwiro/compare/enwiro-v0.3.26...enwiro-v0.3.27) - 2026-05-09
+
+### Added
+
+- shorten binary name to enw
+
 ## [0.3.26](https://github.com/kantord/enwiro/compare/enwiro-v0.3.25...enwiro-v0.3.26) - 2026-04-16
 
 ### Fixed

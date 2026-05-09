@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.26"
+version = "0.3.27"
 dependencies = [
  "anyhow",
  "assertables",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-i3wm"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-tmux"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-rofi"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "enwiro-logging",
