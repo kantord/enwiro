@@ -62,7 +62,7 @@ just install-dev                                   # Reinstall all your enwiro p
 Then test with:
 
 ```bash
-enwiro list-all          # List environments and recipes
-enwiro list-environments # List only environments
-enwiro activate <name>   # Activate an environment
+enw list-all          # List environments and recipes
+enw list-environments # List only environments
+enw activate <name>   # Activate an environment
 ```

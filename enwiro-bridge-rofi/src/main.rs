@@ -22,8 +22,8 @@ fn enwiro_bin() -> anyhow::Result<PathBuf> {
     }
     let exe = env::current_exe().context("could not determine own executable path")?;
     let dir = exe.parent().context("executable has no parent directory")?;
-    let bin = dir.join("enwiro");
-    tracing::debug!(path = %bin.display(), "Resolved enwiro binary from exe parent");
+    let bin = dir.join("enw");
+    tracing::debug!(path = %bin.display(), "Resolved enw binary from exe parent");
     Ok(bin)
 }
 

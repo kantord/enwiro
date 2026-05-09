@@ -71,17 +71,17 @@ as the environment name.
 An environment serves as a working directory for your applications, such as your
 terminal or your code editor. To run a command inside an environment, switch to a
 desktop workspace with a name matching the name of the environment you want to use
-and run  `enwiro wrap <COMMAND> [-- [COMMAND_ARGS]...]`. If no matching environment
+and run  `enw wrap <COMMAND> [-- [COMMAND_ARGS]...]`. If no matching environment
 is found but a matching recipe exists, the environment will be created automatically.
 If no environment or recipe is found, it will default to using your home directory.
 
-You can also use `enwiro activate <NAME>` to switch to (or create) a workspace for
-a given environment. This is the complement to `enwiro wrap`: while `wrap` runs a
+You can also use `enw activate <NAME>` to switch to (or create) a workspace for
+a given environment. This is the complement to `enw wrap`: while `wrap` runs a
 command inside an environment, `activate` selects which environment is active in
 your desktop.
 
 An environment variable `ENWIRO_ENV` containing the `enwiro` environment name
-will also be added before running commands with `enwiro wrap ...`.
+will also be added before running commands with `enw wrap ...`.
 
 An environment could be linked to:
 
@@ -133,7 +133,7 @@ A background daemon keeps recipe listings cached to avoid blocking the UI on slo
 cookbook plugins (e.g., GitHub API calls). Start it with:
 
 ```
-enwiro daemon
+enw daemon
 ```
 
 - Recipes are refreshed every 5 minutes while the user is active

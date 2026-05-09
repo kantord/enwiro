@@ -44,7 +44,7 @@ Only managed workspaces participate as swap candidates.
 
 ## Two rebalancing contexts
 
-### 1. Activate path (`enwiro activate <name>`)
+### 1. Activate path (`enw activate <name>`)
 
 Triggered by an explicit user action: the user is asking for a specific environment
 right now.

@@ -92,8 +92,8 @@ fn parse_managed_envs(json_lines: &str) -> Vec<ManagedEnvInfo> {
 fn fetch_managed_envs() -> Vec<ManagedEnvInfo> {
     let enwiro_bin = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("enwiro")))
-        .unwrap_or_else(|| std::path::PathBuf::from("enwiro"));
+        .and_then(|p| p.parent().map(|d| d.join("enw")))
+        .unwrap_or_else(|| std::path::PathBuf::from("enw"));
     let output = std::process::Command::new(&enwiro_bin)
         .args(["list-all", "--json"])
         .output();

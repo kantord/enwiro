@@ -240,7 +240,7 @@ if __name__ == "__main__":
 
 ## How It All Fits Together
 
-When a user runs `enwiro list-all`, here's what happens:
+When a user runs `enw list-all`, here's what happens:
 
 1. Enwiro discovers all `enwiro-cookbook-*` binaries on `$PATH`.
 2. It calls `metadata` on each to learn their priority (falling back to 50).
@@ -270,5 +270,5 @@ When a user activates a recipe:
 - **Don't worry about metadata.** If you skip the `metadata` subcommand
   entirely, your cookbook will still work — it just gets the default priority of
   50.
-- **Recipe names are identifiers.** Users type them (e.g., `enwiro activate
+- **Recipe names are identifiers.** Users type them (e.g., `enw activate
   my-project`), so keep them short and filesystem-friendly. Avoid spaces.
