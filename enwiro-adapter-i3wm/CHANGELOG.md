@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.10...enwiro-adapter-i3wm-v0.1.11) - 2026-05-09
+
+### Added
+
+- shorten binary name to enw
+
 ## [0.1.10](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.9...enwiro-adapter-i3wm-v0.1.10) - 2026-04-16
 
 ### Fixed
