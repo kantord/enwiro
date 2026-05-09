@@ -17,4 +17,4 @@ rofi -show enwiro -modi "enwiro:enwiro-bridge-rofi"
 ```
 
 This will list all available environments and recipes. Selecting an entry
-runs `enwiro activate` to switch to (or create) the corresponding workspace.
+runs `enw activate` to switch to (or create) the corresponding workspace.

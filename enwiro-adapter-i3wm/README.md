@@ -15,7 +15,7 @@ to switch workspaces using your usual keyboard shortcuts.
 
 ## Activating environments
 
-When you run `enwiro activate <NAME>`, the adapter will switch to the
+When you run `enw activate <NAME>`, the adapter will switch to the
 workspace that has the matching environment name. If no such workspace
 exists, a new one is created using the lowest available number
 (e.g. `3: my-project`).
@@ -23,10 +23,10 @@ exists, a new one is created using the lowest available number
 ## Using enwiro from i3 keybindings
 
 i3 keybindings don't go through a login shell, so `~/.cargo/bin` may not be
-on `PATH`. Use the full path to enwiro in your i3 config:
+on `PATH`. Use the full path to enw in your i3 config:
 
 ```
-bindsym $mod+Return exec ~/.cargo/bin/enwiro wrap i3-sensible-terminal
+bindsym $mod+Return exec ~/.cargo/bin/enw wrap i3-sensible-terminal
 ```
 
 Enwiro will automatically discover its plugins (adapters and cookbooks)

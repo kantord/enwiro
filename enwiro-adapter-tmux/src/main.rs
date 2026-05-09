@@ -112,7 +112,7 @@ fn new_session_args(name: &str, shell: &str) -> Vec<String> {
         "-d".to_string(),
         "-s".to_string(),
         name.to_string(),
-        format!("enwiro wrap {shell}"),
+        format!("enw wrap {shell}"),
     ]
 }
 
@@ -350,8 +350,8 @@ mod tests {
         let args = new_session_args("myproject", "/bin/bash");
         assert_eq!(
             args.last().unwrap(),
-            "enwiro wrap /bin/bash",
-            "last argument must be the startup command 'enwiro wrap <shell>'"
+            "enw wrap /bin/bash",
+            "last argument must be the startup command 'enw wrap <shell>'"
         );
     }
 
@@ -366,7 +366,7 @@ mod tests {
         );
         assert_eq!(
             args.last().unwrap(),
-            "enwiro wrap /bin/zsh",
+            "enw wrap /bin/zsh",
             "startup command must embed the provided shell path"
         );
     }

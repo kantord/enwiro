@@ -5,17 +5,24 @@ install-dev:
     echo "Building workspace in release mode..."
     cargo build --workspace --release
     # Kill the background daemon so the binary isn't held open
-    pkill -x enwiro && sleep 0.2 || true
+    pkill -x enw && sleep 0.2 || true
     installed=$(cargo install --list | grep -E '^enwiro' | awk '{print $1}')
     for crate in $installed; do
         [ "$crate" = "enwiro-logging" ] && continue
-        bin="target/release/$crate"
+        # The `enwiro` crate produces a binary named `enw`; all other crates
+        # produce a binary matching their crate name.
+        if [ "$crate" = "enwiro" ]; then
+            bin_name="enw"
+        else
+            bin_name="$crate"
+        fi
+        bin="target/release/$bin_name"
         if [ ! -f "$bin" ]; then
-            echo "WARNING: $crate binary not found, skipping"
+            echo "WARNING: $bin_name binary not found, skipping"
             continue
         fi
-        dest="${CARGO_HOME:-$HOME/.cargo}/bin/$crate"
-        echo "Installing $crate..."
+        dest="${CARGO_HOME:-$HOME/.cargo}/bin/$bin_name"
+        echo "Installing $bin_name..."
         rm -f "$dest"
         cp "$bin" "$dest"
     done
