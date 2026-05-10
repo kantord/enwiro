@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-/// Wire version of the gear schema. Bumped when [`GearFileData`] /
-/// [`Gear`] / [`WebEntry`] change shape. Cookbook authors should set
-/// `GearFileData { version: SCHEMA_VERSION, ... }` to ride future
-/// upgrades rather than hardcoding a literal.
+/// Wire version of the gear schema. Bumped when any of the gear wire types
+/// ([`GearFileData`], [`Gear`], [`WebEntry`], [`GuiEntry`]) change shape.
+/// Cookbook authors should set `GearFileData { version: SCHEMA_VERSION, ... }`
+/// to ride future upgrades rather than hardcoding a literal.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Subdirectory inside an env where gear files live. Each cookbook drops
@@ -46,7 +46,7 @@ fn deserialize_supported_version<'de, D: serde::Deserializer<'de>>(de: D) -> Res
 /// deserialize it via serde. Does not carry runtime metadata like the
 /// file path - see `GearFile` for the on-disk-loaded wrapper.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct GearFileData {
     #[serde(deserialize_with = "deserialize_supported_version")]
     pub version: u32,
@@ -89,18 +89,32 @@ impl GearFile {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Gear {
     pub description: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub web: HashMap<String, WebEntry>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub linux_gui: HashMap<String, GuiEntry>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WebEntry {
     pub description: String,
     pub url: String,
+}
+
+/// A native Linux GUI app entry inside a [`Gear`]. `command` is the argv
+/// to spawn (e.g. `["obsidian"]`); `command[0]` is the binary name.
+///
+/// Assumed to be a single-instance app: re-spawning a running app is
+/// typically a no-op or raises the existing window, so callers may safely
+/// fire-and-forget without deduplicating themselves.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct GuiEntry {
+    pub command: Vec<String>,
 }
 
 /// All gear collected for an env, merged across every `gear.d/*.json`
@@ -198,10 +212,12 @@ impl LoadedGear {
 #[cfg(test)]
 mod tests {
     mod schema {
-        use super::super::{Gear, GearFileData, WebEntry};
+        use super::super::{Gear, GearFileData, GuiEntry, WebEntry};
         use rstest::rstest;
 
         /// Sample valid JSON document conforming to the gear schema.
+        /// Exercises both entry kinds (web URL and linux-gui command) so
+        /// the comprehensive deserialization test covers each.
         fn valid_full_schema_json() -> &'static str {
             r#"{
                 "version": 1,
@@ -212,6 +228,14 @@ mod tests {
                             "page": {
                                 "description": "Open the PR page",
                                 "url": "https://github.com/kantord/enwiro/pull/309"
+                            }
+                        }
+                    },
+                    "obsidian": {
+                        "description": "Obsidian notes",
+                        "linux-gui": {
+                            "app": {
+                                "command": ["obsidian"]
                             }
                         }
                     }
@@ -227,8 +251,8 @@ mod tests {
             assert_eq!(parsed.version, 1, "version field must round-trip as 1");
             assert_eq!(
                 parsed.gear.len(),
-                1,
-                "expected exactly one entry in the gear map"
+                2,
+                "expected one web gear and one linux-gui gear"
             );
 
             let pr_gear: &Gear = parsed.gear.get("pr").expect("`pr` gear must be present");
@@ -245,6 +269,23 @@ mod tests {
                 .expect("`page` web entry must be present");
             assert_eq!(page.description, "Open the PR page");
             assert_eq!(page.url, "https://github.com/kantord/enwiro/pull/309");
+
+            let obsidian_gear: &Gear = parsed
+                .gear
+                .get("obsidian")
+                .expect("`obsidian` gear must be present");
+            assert_eq!(obsidian_gear.description, "Obsidian notes");
+            assert_eq!(
+                obsidian_gear.linux_gui.len(),
+                1,
+                "expected exactly one entry in the linux-gui map"
+            );
+
+            let app: &GuiEntry = obsidian_gear
+                .linux_gui
+                .get("app")
+                .expect("`app` gui entry must be present");
+            assert_eq!(app.command, vec!["obsidian"]);
         }
 
         /// All schema-violation cases share the shape "feed JSON, expect
@@ -271,6 +312,14 @@ mod tests {
             r#"{ "version": 1, "gear": { "pr": { "description": "x",
                 "web": { "page": { "description": "Open the page",
                     "url": "https://example.com", "rogue": "value" } } } } }"#
+        )]
+        #[case::gui_entry_no_command(
+            r#"{ "version": 1, "gear": { "obsidian": { "description": "x",
+                "linux-gui": { "app": {} } } } }"#
+        )]
+        #[case::unknown_field_in_gui_entry(
+            r#"{ "version": 1, "gear": { "obsidian": { "description": "x",
+                "linux-gui": { "app": { "command": ["obsidian"], "rogue": 42 } } } } }"#
         )]
         #[case::unsupported_schema_version(r#"{ "version": 999, "gear": {} }"#)]
         fn rejects_invalid_schema(#[case] json: &str) {
@@ -299,6 +348,36 @@ mod tests {
                 cli_only.web.is_empty(),
                 "absent `web` field must default to empty map, got {} entries",
                 cli_only.web.len()
+            );
+        }
+
+        #[test]
+        fn gear_entry_without_linux_gui_field_succeeds_with_empty_map() {
+            let json = r#"{
+                "version": 1,
+                "gear": {
+                    "web-only": {
+                        "description": "A gear that has only web entries",
+                        "web": {
+                            "page": {
+                                "description": "Open the page",
+                                "url": "https://example.com"
+                            }
+                        }
+                    }
+                }
+            }"#;
+
+            let parsed: GearFileData = serde_json::from_str(json)
+                .expect("missing `linux-gui` should default to empty map, not error");
+            let gear = parsed
+                .gear
+                .get("web-only")
+                .expect("`web-only` gear must be present");
+            assert!(
+                gear.linux_gui.is_empty(),
+                "absent `linux-gui` field must default to empty map, got {} entries",
+                gear.linux_gui.len()
             );
         }
     }
