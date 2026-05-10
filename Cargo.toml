@@ -8,6 +8,7 @@ members = [
     "enwiro-cookbook-chezmoi",
     "enwiro-cookbook-git",
     "enwiro-cookbook-github",
+    "enwiro-cookbook-obsidian",
     "enwiro-sdk",
 ]
 
