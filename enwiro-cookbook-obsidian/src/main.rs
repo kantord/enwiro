@@ -120,26 +120,33 @@ fn single_app_gear(description: &str, binary: &str) -> enwiro_sdk::gear::Gear {
     use enwiro_sdk::gear::{Gear, GuiEntry};
     Gear {
         description: description.to_string(),
-        web: HashMap::new(),
         linux_gui: HashMap::from([(
             "app".to_string(),
             GuiEntry {
                 command: vec![binary.to_string()],
             },
         )]),
+        ..Default::default()
     }
 }
 
-/// Build the gear file this cookbook emits. Obsidian is always included
-/// (the recipe wouldn't exist without `obsidian.json`); zotero rides along
-/// when its binary is installed.
-fn build_gear_file(zotero_available: bool) -> enwiro_sdk::gear::GearFileData {
+/// Build the gear file this cookbook emits. Each app is included only when
+/// its binary is on `PATH` at gear-emit time; the i3 adapter also re-checks
+/// at activation time so a stale gear file (binary removed after emission)
+/// is handled gracefully.
+fn build_gear_file(
+    obsidian_available: bool,
+    zotero_available: bool,
+) -> enwiro_sdk::gear::GearFileData {
     use enwiro_sdk::gear::{GearFileData, SCHEMA_VERSION};
 
-    let mut gear = HashMap::from([(
-        "obsidian".to_string(),
-        single_app_gear("Obsidian", OBSIDIAN_BINARY),
-    )]);
+    let mut gear = HashMap::new();
+    if obsidian_available {
+        gear.insert(
+            "obsidian".to_string(),
+            single_app_gear("Obsidian", OBSIDIAN_BINARY),
+        );
+    }
     if zotero_available {
         gear.insert(
             "zotero".to_string(),
@@ -152,12 +159,14 @@ fn build_gear_file(zotero_available: bool) -> enwiro_sdk::gear::GearFileData {
     }
 }
 
-/// Validate the recipe and write the gear JSON to `writer`. `zotero_available`
-/// is injected so tests can exercise both paths without depending on the host
-/// `PATH`; the CLI handler passes `which::which("zotero").is_ok()`.
+/// Validate the recipe and write the gear JSON to `writer`. The two
+/// `_available` flags are injected so tests can exercise every gating
+/// combination without depending on the host `PATH`; the CLI handler in
+/// `cmd_gear` passes the result of `which::which`.
 fn gear_from_json<W: std::io::Write>(
     recipe_name: &str,
     json: &str,
+    obsidian_available: bool,
     zotero_available: bool,
     writer: &mut W,
 ) -> Result<()> {
@@ -165,7 +174,7 @@ fn gear_from_json<W: std::io::Write>(
     // known vault, the user got the name wrong and we shouldn't emit anything.
     cook_from_json(recipe_name, json)?;
 
-    let file = build_gear_file(zotero_available);
+    let file = build_gear_file(obsidian_available, zotero_available);
     serde_json::to_writer(writer, &file).context("Failed to serialize gear")?;
     Ok(())
 }
@@ -221,8 +230,22 @@ fn cmd_cook(recipe_name: &str) -> Result<()> {
 
 fn cmd_gear(recipe_name: &str) -> Result<()> {
     let json = read_obsidian_json()?;
+    // The cookbook-side `which` checks suppress emit-time entries for apps
+    // that aren't installed - keeps the gear file clean and avoids
+    // activation-time warnings. The i3 adapter ALSO checks `which` before
+    // spawning each command (see `enwiro-adapter-i3wm::spawn_gui_commands`):
+    // that's the real safety net for stale gear files where a binary was
+    // installed at emit time but removed before activation. Both layers are
+    // intentional, not redundant.
+    let obsidian_available = which::which(OBSIDIAN_BINARY).is_ok();
     let zotero_available = which::which(ZOTERO_BINARY).is_ok();
-    gear_from_json(recipe_name, &json, zotero_available, &mut std::io::stdout())
+    gear_from_json(
+        recipe_name,
+        &json,
+        obsidian_available,
+        zotero_available,
+        &mut std::io::stdout(),
+    )
 }
 
 fn main() -> Result<()> {
@@ -513,10 +536,21 @@ mod tests {
         /// emitted JSON matches `expected`. Centralizes the boilerplate
         /// (output buffer, recipe name, fixture JSON) so individual tests
         /// stay declarative.
-        fn assert_gear_emits(zotero_available: bool, expected: serde_json::Value) {
+        fn assert_gear_emits(
+            obsidian_available: bool,
+            zotero_available: bool,
+            expected: serde_json::Value,
+        ) {
             let json = single_vault_json("mynotes");
             let mut output = Vec::new();
-            gear_from_json("obsidian#mynotes", &json, zotero_available, &mut output).unwrap();
+            gear_from_json(
+                "obsidian#mynotes",
+                &json,
+                obsidian_available,
+                zotero_available,
+                &mut output,
+            )
+            .unwrap();
             let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
             assert_eq!(parsed, expected);
         }
@@ -524,6 +558,7 @@ mod tests {
         #[test]
         fn emits_obsidian_only_when_zotero_missing() {
             assert_gear_emits(
+                true,
                 false,
                 serde_json::json!({
                     "version": 1,
@@ -540,8 +575,28 @@ mod tests {
         }
 
         #[test]
+        fn emits_zotero_only_when_obsidian_missing() {
+            assert_gear_emits(
+                false,
+                true,
+                serde_json::json!({
+                    "version": 1,
+                    "gear": {
+                        "zotero": {
+                            "description": "Zotero",
+                            "linux-gui": {
+                                "app": { "command": ["zotero"] }
+                            }
+                        }
+                    }
+                }),
+            );
+        }
+
+        #[test]
         fn emits_obsidian_and_zotero_when_both_available() {
             assert_gear_emits(
+                true,
                 true,
                 serde_json::json!({
                     "version": 1,
@@ -564,10 +619,22 @@ mod tests {
         }
 
         #[test]
+        fn emits_empty_gear_when_neither_available() {
+            assert_gear_emits(
+                false,
+                false,
+                serde_json::json!({
+                    "version": 1,
+                    "gear": {}
+                }),
+            );
+        }
+
+        #[test]
         fn returns_error_when_recipe_unknown() {
             let json = single_vault_json("mynotes");
             let mut output = Vec::new();
-            let result = gear_from_json("obsidian#nonexistent", &json, true, &mut output);
+            let result = gear_from_json("obsidian#nonexistent", &json, true, true, &mut output);
             assert!(
                 result.is_err(),
                 "gear emission must fail for an unknown recipe",

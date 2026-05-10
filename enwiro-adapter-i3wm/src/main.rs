@@ -284,6 +284,12 @@ fn build_gui_payload(enw_binary: &str, env_name: &str, argv: &[String]) -> Optio
 /// skipped so partially-installed setups (e.g. obsidian present, zotero
 /// absent) still activate cleanly. Best-effort like `open_gear_urls`:
 /// activation never fails on auto-open issues.
+///
+/// Cookbooks ALSO check `which` at gear-emit time (see e.g.
+/// `enwiro-cookbook-obsidian::cmd_gear`) to keep their gear files clean.
+/// This adapter-side check is the safety net for stale gear files - a
+/// binary that was installed at emit time but removed before activation.
+/// Both layers are intentional, not redundant.
 fn spawn_gui_commands(gear: &serde_json::Value, env_name: &str) {
     let commands = collect_gui_commands(gear);
     if commands.is_empty() {

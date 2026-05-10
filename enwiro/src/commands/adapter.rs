@@ -127,8 +127,7 @@ mod tests {
             "pr".into(),
             Gear {
                 description: "PR #1".into(),
-                web: HashMap::new(),
-                linux_gui: HashMap::new(),
+                ..Default::default()
             },
         );
         let payload = ActivatePayload::from_owned(envs, &gear);

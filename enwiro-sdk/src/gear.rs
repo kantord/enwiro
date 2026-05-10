@@ -8,6 +8,10 @@ use tracing::warn;
 /// ([`GearFileData`], [`Gear`], [`WebEntry`], [`GuiEntry`]) change shape.
 /// Cookbook authors should set `GearFileData { version: SCHEMA_VERSION, ... }`
 /// to ride future upgrades rather than hardcoding a literal.
+///
+/// All gear wire structs use `#[serde(rename_all = "kebab-case")]`, so any
+/// multi-word field added in the future will serialize with hyphens (e.g.
+/// `linux_gui` → `linux-gui`). Single-word fields are unaffected.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Subdirectory inside an env where gear files live. Each cookbook drops
@@ -88,7 +92,7 @@ impl GearFile {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Gear {
     pub description: String,
