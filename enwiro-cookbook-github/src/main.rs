@@ -646,6 +646,7 @@ fn build_gear_file_for_kind(
     let gear_entry = Gear {
         description: format!("{} #{number} on {repo}", kind.description_prefix),
         web: HashMap::from([("page".to_string(), page)]),
+        ..Default::default()
     };
     GearFileData {
         version: SCHEMA_VERSION,

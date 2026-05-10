@@ -117,6 +117,36 @@ fn collect_web_urls(gear: &serde_json::Value) -> Vec<String> {
     urls
 }
 
+/// Walk a merged gear JSON object and collect every
+/// `gear.<name>.linux-gui.<entry>.command` as an argv vector. Empty argvs and
+/// non-string elements are filtered out so callers can assume each returned
+/// vector has at least a binary at index 0 and is fully UTF-8.
+fn collect_gui_commands(gear: &serde_json::Value) -> Vec<Vec<String>> {
+    let Some(obj) = gear.as_object() else {
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    for gear_value in obj.values() {
+        let Some(gui) = gear_value.get("linux-gui").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for entry in gui.values() {
+            let Some(arr) = entry.get("command").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let argv: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            if argv.is_empty() {
+                continue;
+            }
+            commands.push(argv);
+        }
+    }
+    commands
+}
+
 /// POSIX-shell-quote a single argument: leave it bare if every character is in
 /// a conservative safe set, otherwise wrap in single quotes (escaping any
 /// internal `'`). i3 invokes `exec`'s payload via `sh -c`, so every component
@@ -220,6 +250,68 @@ fn open_gear_urls(gear: &serde_json::Value, command_template: &[String], env_nam
         };
         match std::process::Command::new("i3-msg").arg(&payload).spawn() {
             Ok(_) => tracing::info!(payload = %payload, "Spawned open command via i3-msg exec"),
+            Err(e) => {
+                tracing::warn!(error = %e, payload = %payload, "Failed to invoke i3-msg exec");
+            }
+        }
+    }
+}
+
+/// Build the `"exec <enw> wrap <argv[0]> <env> -- <argv[1..]>"` string for
+/// one linux-gui command. Returns `None` only if `argv` is empty (collectors
+/// already filter that case; this is belt-and-suspenders).
+fn build_gui_payload(enw_binary: &str, env_name: &str, argv: &[String]) -> Option<String> {
+    let (binary, args) = argv.split_first()?;
+    let mut parts: Vec<String> = vec![
+        enw_binary.to_string(),
+        "wrap".into(),
+        binary.clone(),
+        env_name.to_string(),
+        "--".into(),
+    ];
+    parts.extend(args.iter().cloned());
+    let inner = parts
+        .iter()
+        .map(|p| shell_quote(p))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!("exec {inner}"))
+}
+
+/// Spawn every linux-gui command collected from gear, via
+/// `i3-msg exec -- <enw> wrap <argv> <env>`. Each command's binary is
+/// PATH-resolved via `which::which` first; missing binaries are logged and
+/// skipped so partially-installed setups (e.g. obsidian present, zotero
+/// absent) still activate cleanly. Best-effort like `open_gear_urls`:
+/// activation never fails on auto-open issues.
+///
+/// Cookbooks ALSO check `which` at gear-emit time (see e.g.
+/// `enwiro-cookbook-obsidian::cmd_gear`) to keep their gear files clean.
+/// This adapter-side check is the safety net for stale gear files - a
+/// binary that was installed at emit time but removed before activation.
+/// Both layers are intentional, not redundant.
+fn spawn_gui_commands(gear: &serde_json::Value, env_name: &str) {
+    let commands = collect_gui_commands(gear);
+    if commands.is_empty() {
+        return;
+    }
+    let enw_binary = resolve_enw_binary();
+    for argv in commands {
+        if let Err(e) = which::which(&argv[0]) {
+            tracing::warn!(
+                binary = %argv[0],
+                error = %e,
+                "Skipping linux-gui spawn: binary not found on PATH",
+            );
+            continue;
+        }
+        let Some(payload) = build_gui_payload(&enw_binary, env_name, &argv) else {
+            continue;
+        };
+        match std::process::Command::new("i3-msg").arg(&payload).spawn() {
+            Ok(_) => {
+                tracing::info!(payload = %payload, "Spawned linux-gui command via i3-msg exec")
+            }
             Err(e) => {
                 tracing::warn!(error = %e, payload = %payload, "Failed to invoke i3-msg exec");
             }
@@ -605,6 +697,7 @@ async fn activate_new_workspace(
         .map(|p| load_web_open_command(&p))
         .unwrap_or_else(default_web_open_command);
     open_gear_urls(&payload.gear, &web_open_command, env_name);
+    spawn_gui_commands(&payload.gear, env_name);
 
     Ok(())
 }
@@ -1233,6 +1326,156 @@ mod tests {
             "first token after `exec` must be an absolute path - i3 spawns via its own \
              session PATH which typically does not include the install dir, so a bare \
              name like `enw` fails silently. Got first token: {first_token}; full payload: {payload}"
+        );
+        assert_eq!(
+            first_path.file_name().and_then(|n| n.to_str()),
+            Some("enw"),
+            "first token must point at the `enw` binary; got {first_token}"
+        );
+    }
+
+    /// `collect_gui_commands` walks `gear.<name>.linux-gui.<entry>.command` for
+    /// every gear in the merged map and returns each argv as a `Vec<String>`.
+    #[test]
+    fn test_collect_gui_commands_gathers_every_argv() {
+        let gear = serde_json::json!({
+            "obsidian": {
+                "description": "Obsidian notes",
+                "linux-gui": {
+                    "app": {"command": ["obsidian"]}
+                }
+            },
+            "zotero": {
+                "description": "Zotero references",
+                "linux-gui": {
+                    "app": {"command": ["zotero", "--no-splash"]}
+                }
+            }
+        });
+
+        let mut commands = collect_gui_commands(&gear);
+        commands.sort();
+
+        assert_eq!(
+            commands,
+            vec![
+                vec!["obsidian".to_string()],
+                vec!["zotero".to_string(), "--no-splash".to_string()],
+            ]
+        );
+    }
+
+    /// Missing or null gear must yield an empty command list, not a panic.
+    /// Mirrors the same property exercised for `collect_web_urls`.
+    #[test]
+    fn test_collect_gui_commands_handles_null_and_missing_gracefully() {
+        assert!(collect_gui_commands(&serde_json::Value::Null).is_empty());
+        assert!(collect_gui_commands(&serde_json::json!({})).is_empty());
+        assert!(
+            collect_gui_commands(&serde_json::json!({
+                "pr": {"description": "no linux-gui"}
+            }))
+            .is_empty()
+        );
+    }
+
+    /// An empty `command` array is a wire-format mistake (every argv needs
+    /// at least a binary). Filter it out at collection time so downstream
+    /// callers can `argv[0]` without checking.
+    #[test]
+    fn test_collect_gui_commands_skips_empty_command_arrays() {
+        let gear = serde_json::json!({
+            "broken": {
+                "description": "Broken entry",
+                "linux-gui": {
+                    "app": {"command": []}
+                }
+            }
+        });
+        assert!(collect_gui_commands(&gear).is_empty());
+    }
+
+    /// Non-string elements inside `command` are skipped silently. Schema
+    /// validation rejects this at the SDK layer, but the adapter walks the
+    /// gear value as raw JSON so it must defend against malformed data on
+    /// the floor (e.g. a hand-written gear file that slipped through).
+    #[test]
+    fn test_collect_gui_commands_filters_non_string_elements() {
+        let gear = serde_json::json!({
+            "mixed": {
+                "description": "Mixed types in command",
+                "linux-gui": {
+                    "app": {"command": ["obsidian", 42, null, "--flag"]}
+                }
+            }
+        });
+        let commands = collect_gui_commands(&gear);
+        assert_eq!(
+            commands,
+            vec![vec!["obsidian".to_string(), "--flag".to_string()]]
+        );
+    }
+
+    /// `build_gui_payload` produces the full `exec <enw> wrap <argv[0]> <env>
+    /// -- <argv[1..]>` shape that `enw wrap`'s clap parser expects, with no
+    /// template substitution (the argv IS the command).
+    #[test]
+    fn test_build_gui_payload_emits_full_invocation() {
+        let argv = vec!["obsidian".to_string()];
+        let payload = build_gui_payload("enw", "my-env", &argv)
+            .expect("build_gui_payload must yield Some for non-empty argv");
+        assert_eq!(payload, "exec enw wrap obsidian my-env --");
+    }
+
+    /// Args after `argv[0]` are preserved positionally, with `--` separating
+    /// them from the `enw wrap` framing arguments.
+    #[test]
+    fn test_build_gui_payload_preserves_args() {
+        let argv = vec!["zotero".to_string(), "--no-splash".to_string()];
+        let payload = build_gui_payload("enw", "my-env", &argv).unwrap();
+        assert_eq!(payload, "exec enw wrap zotero my-env -- --no-splash");
+    }
+
+    /// Env names with shell metacharacters are quoted so `sh -c` can't
+    /// reinterpret them. Same property `test_payload_for_quotes_env_name_with_spaces`
+    /// exercises for the URL flow, repeated here because the GUI flow
+    /// constructs its payload independently.
+    #[test]
+    fn test_build_gui_payload_quotes_env_name_with_spaces() {
+        let argv = vec!["obsidian".to_string()];
+        let payload = build_gui_payload("enw", "my env", &argv).unwrap();
+        assert!(
+            payload.contains("'my env'"),
+            "payload must single-quote env names containing spaces; got: {payload}"
+        );
+    }
+
+    /// An empty argv yields `None`. Collectors filter empty argvs upstream;
+    /// this is the defensive return that keeps a hand-rolled caller from
+    /// producing a malformed `enw wrap` invocation.
+    #[test]
+    fn test_build_gui_payload_returns_none_for_empty_argv() {
+        let argv: Vec<String> = vec![];
+        assert!(build_gui_payload("enw", "env", &argv).is_none());
+    }
+
+    /// Regression: `build_gui_payload` must hand `i3-msg` an absolute `enw`
+    /// path when constructed via `resolve_enw_binary`. See the URL-flow
+    /// counterpart for the why.
+    #[test]
+    fn test_build_gui_payload_uses_absolute_enw_path() {
+        let argv = vec!["obsidian".to_string()];
+        let enw_binary = resolve_enw_binary();
+        let payload = build_gui_payload(&enw_binary, "my-env", &argv).unwrap();
+
+        let after_exec = payload
+            .strip_prefix("exec ")
+            .unwrap_or_else(|| panic!("payload must begin with 'exec '; got {payload}"));
+        let first_token = after_exec.split_whitespace().next().unwrap_or("");
+        let first_path = std::path::Path::new(first_token);
+        assert!(
+            first_path.is_absolute(),
+            "first token after `exec` must be an absolute path. Got first token: {first_token}; full payload: {payload}"
         );
         assert_eq!(
             first_path.file_name().and_then(|n| n.to_str()),
