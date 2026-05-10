@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/kantord/enwiro/compare/enwiro-cookbook-chezmoi-v0.1.3...enwiro-cookbook-chezmoi-v0.1.4) - 2026-05-10
+
+### Added
+
+- add basic gear feature (web only) ([#311](https://github.com/kantord/enwiro/pull/311))
+
 ## [0.1.3](https://github.com/kantord/enwiro/compare/enwiro-cookbook-chezmoi-v0.1.2...enwiro-cookbook-chezmoi-v0.1.3) - 2026-04-03
 
 ### Added

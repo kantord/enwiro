@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.7...enwiro-cookbook-github-v0.1.8) - 2026-05-10
+
+### Added
+
+- allow recipe gear to run linux gui apps ([#344](https://github.com/kantord/enwiro/pull/344))
+- add basic gear feature (web only) ([#311](https://github.com/kantord/enwiro/pull/311))
+
 ## [0.1.7](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.6...enwiro-cookbook-github-v0.1.7) - 2026-04-16
 
 ### Fixed
