@@ -117,6 +117,7 @@ pub fn read_gear_dir(env_dir: &Path) -> anyhow::Result<HashMap<String, Gear>> {
 mod tests {
     mod schema {
         use super::super::{Gear, GearFile, WebEntry};
+        use rstest::rstest;
 
         /// Sample valid JSON document conforming to the gear schema.
         fn valid_full_schema_json() -> &'static str {
@@ -134,15 +135,6 @@ mod tests {
                     }
                 }
             }"#
-        }
-
-        /// Assert that `json` fails to deserialize as a `GearFile`. The `why`
-        /// string is a one-line description of what makes the document
-        /// invalid (missing field, unknown field, etc.) and is surfaced in
-        /// the panic message so failures point at the violated constraint.
-        fn assert_schema_rejects(json: &str, why: &str) {
-            let result: Result<GearFile, _> = serde_json::from_str(json);
-            assert!(result.is_err(), "{why}, got: {result:?}");
         }
 
         #[test]
@@ -173,28 +165,34 @@ mod tests {
             assert_eq!(page.url, "https://github.com/kantord/enwiro/pull/309");
         }
 
-        #[test]
-        fn errors_when_top_level_version_is_missing() {
-            assert_schema_rejects(
-                r#"{ "gear": { "pr": { "description": "x", "web": {} } } }"#,
-                "missing top-level `version` must fail to deserialize",
-            );
-        }
-
-        #[test]
-        fn errors_when_top_level_gear_is_missing() {
-            assert_schema_rejects(
-                r#"{ "version": 1 }"#,
-                "missing top-level `gear` must fail to deserialize",
-            );
-        }
-
-        #[test]
-        fn errors_when_gear_entry_has_no_description() {
-            assert_schema_rejects(
-                r#"{ "version": 1, "gear": { "pr": { "web": {} } } }"#,
-                "gear entry without `description` must fail to deserialize",
-            );
+        /// All schema-violation cases share the shape "feed JSON, expect
+        /// `Err`". The case label names the violated rule so failures point
+        /// at the actual constraint.
+        #[rstest]
+        #[case::version_missing(r#"{ "gear": { "pr": { "description": "x", "web": {} } } }"#)]
+        #[case::gear_missing(r#"{ "version": 1 }"#)]
+        #[case::gear_entry_no_description(r#"{ "version": 1, "gear": { "pr": { "web": {} } } }"#)]
+        #[case::web_entry_no_url(
+            r#"{ "version": 1, "gear": { "pr": { "description": "x",
+                "web": { "page": { "description": "Open the page" } } } } }"#
+        )]
+        #[case::web_entry_no_description(
+            r#"{ "version": 1, "gear": { "pr": { "description": "x",
+                "web": { "page": { "url": "https://example.com" } } } } }"#
+        )]
+        #[case::unknown_top_level_field(r#"{ "version": 1, "gear": {}, "extra_top_level": true }"#)]
+        #[case::unknown_field_in_gear_entry(
+            r#"{ "version": 1, "gear": { "pr": {
+                "description": "x", "web": {}, "rogue": 42 } } }"#
+        )]
+        #[case::unknown_field_in_web_entry(
+            r#"{ "version": 1, "gear": { "pr": { "description": "x",
+                "web": { "page": { "description": "Open the page",
+                    "url": "https://example.com", "rogue": "value" } } } } }"#
+        )]
+        fn rejects_invalid_schema(#[case] json: &str) {
+            let result: Result<GearFile, _> = serde_json::from_str(json);
+            assert!(result.is_err(), "expected rejection, got: {result:?}");
         }
 
         #[test]
@@ -218,51 +216,6 @@ mod tests {
                 cli_only.web.is_empty(),
                 "absent `web` field must default to empty map, got {} entries",
                 cli_only.web.len()
-            );
-        }
-
-        #[test]
-        fn errors_when_web_entry_has_no_url() {
-            assert_schema_rejects(
-                r#"{ "version": 1, "gear": { "pr": { "description": "x",
-                    "web": { "page": { "description": "Open the page" } } } } }"#,
-                "web entry without `url` must fail to deserialize",
-            );
-        }
-
-        #[test]
-        fn errors_when_web_entry_has_no_description() {
-            assert_schema_rejects(
-                r#"{ "version": 1, "gear": { "pr": { "description": "x",
-                    "web": { "page": { "url": "https://example.com" } } } } }"#,
-                "web entry without `description` must fail to deserialize",
-            );
-        }
-
-        #[test]
-        fn errors_on_unknown_field_at_top_level() {
-            assert_schema_rejects(
-                r#"{ "version": 1, "gear": {}, "extra_top_level": true }"#,
-                "unknown top-level field must fail (`deny_unknown_fields`)",
-            );
-        }
-
-        #[test]
-        fn errors_on_unknown_field_inside_gear_entry() {
-            assert_schema_rejects(
-                r#"{ "version": 1, "gear": { "pr": {
-                    "description": "x", "web": {}, "rogue": 42 } } }"#,
-                "unknown field inside a gear entry must fail (`deny_unknown_fields`)",
-            );
-        }
-
-        #[test]
-        fn errors_on_unknown_field_inside_web_entry() {
-            assert_schema_rejects(
-                r#"{ "version": 1, "gear": { "pr": { "description": "x",
-                    "web": { "page": { "description": "Open the page",
-                        "url": "https://example.com", "rogue": "value" } } } } }"#,
-                "unknown field inside a web entry must fail (`deny_unknown_fields`)",
             );
         }
     }

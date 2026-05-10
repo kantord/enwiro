@@ -545,6 +545,7 @@ dependencies = [
  "confy",
  "enwiro-sdk",
  "i3ipc-types",
+ "rstest",
  "serde",
  "serde_json",
  "tempfile",
@@ -632,6 +633,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "home",
+ "rstest",
  "serde",
  "serde_json",
  "tempfile",

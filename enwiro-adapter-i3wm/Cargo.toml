@@ -23,4 +23,5 @@ toml = "0.9"
 tracing.workspace = true
 
 [dev-dependencies]
+rstest = "0.26.0"
 tempfile = "3.25.0"

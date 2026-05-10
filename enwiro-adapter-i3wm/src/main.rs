@@ -146,13 +146,6 @@ fn collect_web_urls(gear: &serde_json::Value) -> Vec<String> {
 
 /// Substitute `{url}` in each element of the command template, yielding
 /// the final argv to pass to `Command::new`.
-fn substitute_url(command_template: &[String], url: &str) -> Vec<String> {
-    command_template
-        .iter()
-        .map(|arg| arg.replace("{url}", url))
-        .collect()
-}
-
 /// POSIX-shell-quote a single argument: leave it bare if every character is in
 /// a conservative safe set, otherwise wrap in single quotes (escaping any
 /// internal `'`). i3 invokes `exec`'s payload via `sh -c`, so every component
@@ -188,77 +181,73 @@ fn resolve_enw_binary() -> String {
         .unwrap_or_else(|| "enw".to_string())
 }
 
-/// Build the shell command string passed to `i3-msg exec`. Wraps the user's
-/// `web_open_command` (already URL-substituted) inside `<enw> wrap <env> --`
-/// so the spawned process inherits cwd/`ENWIRO_ENV` from `enw wrap` while i3
-/// supplies daemonization and graphical-session env normalization.
-fn build_wrap_invocation(
-    enw_binary: &str,
-    env_name: &str,
-    web_command: &[String],
-) -> Option<String> {
-    let (command_name, child_args) = web_command.split_first()?;
-    let mut parts: Vec<String> = vec![
-        enw_binary.to_string(),
-        "wrap".into(),
-        command_name.clone(),
-        env_name.to_string(),
-        "--".into(),
-    ];
-    parts.extend_from_slice(child_args);
-    Some(
-        parts
+/// Builds the per-URL `i3-msg exec` payload for a single activation, given
+/// the activation-level constants (binary, env name, configured open
+/// command). One instance is constructed per `open_gear_urls` call and then
+/// queried per URL.
+///
+/// Wraps the user's `web_open_command` inside
+/// `<absolute-enw> wrap <env> -- <command...>` so the spawned process
+/// inherits `cwd` / `ENWIRO_ENV` from `enw wrap`, while `i3-msg exec`
+/// supplies daemonization and graphical-session env normalization. The
+/// absolute `enw` path is critical: i3's session `PATH` typically lacks
+/// `~/.cargo/bin`, so a bare `enw` would fail `sh -c "enw …"` with exit
+/// 127 — silently, because i3's IPC has already returned success.
+struct WrapPayloadBuilder<'a> {
+    enw_binary: String,
+    env_name: &'a str,
+    command_template: &'a [String],
+}
+
+impl<'a> WrapPayloadBuilder<'a> {
+    fn new(env_name: &'a str, command_template: &'a [String]) -> Self {
+        Self {
+            enw_binary: resolve_enw_binary(),
+            env_name,
+            command_template,
+        }
+    }
+
+    /// Construct the full `"exec <enw> wrap <env> -- <substituted-cmd>"`
+    /// string for one URL. Returns `None` only if `command_template` is
+    /// empty (no binary to wrap) — callers should have guarded already.
+    fn payload_for(&self, url: &str) -> Option<String> {
+        let (command_name, child_args) = self.command_template.split_first()?;
+        let mut parts: Vec<String> = vec![
+            self.enw_binary.clone(),
+            "wrap".into(),
+            command_name.replace("{url}", url),
+            self.env_name.to_string(),
+            "--".into(),
+        ];
+        parts.extend(child_args.iter().map(|a| a.replace("{url}", url)));
+        let inner = parts
             .iter()
             .map(|p| shell_quote(p))
             .collect::<Vec<_>>()
-            .join(" "),
-    )
+            .join(" ");
+        Some(format!("exec {inner}"))
+    }
 }
 
 /// Spawn the configured open command for every URL collected from gear, via
-/// `i3-msg exec -- <enw> wrap <env> -- <command>`. Failures are logged and do
-/// not interrupt the activation flow.
-/// Build the list of `i3-msg` payloads (`"exec <wrap-invocation>"`) to spawn
-/// for every URL collected from gear. Pure: takes the `enw` binary path
-/// explicitly so tests can supply a known value and assert it is threaded
-/// through verbatim.
-fn build_i3_exec_payloads(
-    gear: &serde_json::Value,
-    command_template: &[String],
-    env_name: &str,
-    enw_binary: &str,
-) -> Vec<String> {
-    collect_web_urls(gear)
-        .into_iter()
-        .filter_map(|url| {
-            let argv = substitute_url(command_template, &url);
-            build_wrap_invocation(enw_binary, env_name, &argv)
-                .map(|wrap_cmd| format!("exec {}", wrap_cmd))
-        })
-        .collect()
-}
-
-/// Production composition: resolve the `enw` binary path and assemble every
-/// i3-msg payload. Tested directly so the absolute-path contract is locked
-/// at the actual call site `open_gear_urls` uses, not just at the helpers.
-fn compose_gear_payloads(
-    gear: &serde_json::Value,
-    command_template: &[String],
-    env_name: &str,
-) -> Vec<String> {
-    let enw_binary = resolve_enw_binary();
-    build_i3_exec_payloads(gear, command_template, env_name, &enw_binary)
-}
-
-/// Spawn the configured open command for every URL collected from gear, via
-/// `i3-msg exec -- <enw> wrap <env> -- <command>`. Failures are logged and do
-/// not interrupt the activation flow.
+/// `i3-msg exec -- <enw> wrap <env> -- <command>`. Best-effort: failures are
+/// logged and do not interrupt activation. Reads top-down: collect URLs,
+/// bail if none, bail if no command, build payloads, spawn each.
 fn open_gear_urls(gear: &serde_json::Value, command_template: &[String], env_name: &str) {
-    if command_template.is_empty() && !collect_web_urls(gear).is_empty() {
-        tracing::warn!("web_open_command is empty, skipping gear URLs");
+    let urls = collect_web_urls(gear);
+    if urls.is_empty() {
         return;
     }
-    for payload in compose_gear_payloads(gear, command_template, env_name) {
+    if command_template.is_empty() {
+        tracing::warn!(skipped = urls.len(), "web_open_command is empty");
+        return;
+    }
+    let builder = WrapPayloadBuilder::new(env_name, command_template);
+    for url in urls {
+        let Some(payload) = builder.payload_for(&url) else {
+            continue;
+        };
         match std::process::Command::new("i3-msg").arg(&payload).spawn() {
             Ok(_) => tracing::info!(payload = %payload, "Spawned open command via i3-msg exec"),
             Err(e) => {
@@ -732,6 +721,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use i3ipc_types::reply::Rect;
+    use rstest::rstest;
 
     fn make_workspace(id: usize, num: i32, name: &str) -> Workspace {
         Workspace {
@@ -1137,21 +1127,6 @@ mod tests {
         assert!(collect_web_urls(&serde_json::json!({"pr": {"description": "no web"}})).is_empty());
     }
 
-    /// `substitute_url` replaces every occurrence of `{url}` in each argv
-    /// element. Other characters are left intact so command flags survive.
-    #[test]
-    fn test_substitute_url_replaces_placeholder_in_each_arg() {
-        let template = vec!["chromium".to_string(), "--app={url}".to_string()];
-        let out = substitute_url(&template, "https://example.com/x");
-        assert_eq!(
-            out,
-            vec![
-                "chromium".to_string(),
-                "--app=https://example.com/x".to_string(),
-            ]
-        );
-    }
-
     /// The default open command must use chromium app-mode so each URL
     /// opens in a fresh chromeless window placed in the current i3 workspace.
     #[test]
@@ -1164,90 +1139,22 @@ mod tests {
         );
     }
 
-    /// `shell_quote` leaves alphanumeric / common-punctuation args bare so
-    /// readable command lines stay readable. URL-style args qualify.
-    #[test]
-    fn test_shell_quote_leaves_safe_args_bare() {
-        assert_eq!(shell_quote("chromium"), "chromium");
-        assert_eq!(
-            shell_quote("--app=https://example.com/path"),
-            "--app=https://example.com/path"
-        );
-    }
-
-    /// `shell_quote` wraps args containing whitespace or shell metacharacters
-    /// in single quotes so `sh -c` can't reinterpret them.
-    #[test]
-    fn test_shell_quote_wraps_unsafe_args() {
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-        assert_eq!(shell_quote("$HOME"), "'$HOME'");
-        assert_eq!(shell_quote("{url}"), "'{url}'");
-    }
-
-    /// Single quotes inside an arg are escaped via the POSIX `'\''`
-    /// idiom — close-quote, escaped quote, reopen-quote.
-    #[test]
-    fn test_shell_quote_escapes_internal_single_quote() {
-        assert_eq!(shell_quote("it's"), r"'it'\''s'");
-    }
-
-    /// `build_wrap_invocation` produces the exact `<enw> wrap <command> <env>
-    /// -- <args>` shape that `enw wrap`'s clap parser expects, with the
-    /// command's first element becoming `command_name` and the rest passed
-    /// through as `child_args`.
-    #[test]
-    fn test_build_wrap_invocation_basic_shape() {
-        let out = build_wrap_invocation(
-            "enw",
-            "my-env",
-            &[
-                "chromium".to_string(),
-                "--app=https://example.com".to_string(),
-            ],
-        );
-        assert_eq!(
-            out.as_deref(),
-            Some("enw wrap chromium my-env -- --app=https://example.com")
-        );
-    }
-
-    /// Args with shell metacharacters (e.g. spaces in a custom open command)
-    /// are quoted so they reach the spawned process intact.
-    #[test]
-    fn test_build_wrap_invocation_quotes_unsafe_args() {
-        let out = build_wrap_invocation(
-            "enw",
-            "my env",
-            &["chromium".to_string(), "--app=hello world".to_string()],
-        );
-        assert_eq!(
-            out.as_deref(),
-            Some("enw wrap chromium 'my env' -- '--app=hello world'")
-        );
-    }
-
-    /// An empty command template yields `None` — caller skips with a warn
-    /// rather than producing a malformed `enw wrap` invocation.
-    #[test]
-    fn test_build_wrap_invocation_returns_none_for_empty_template() {
-        assert!(build_wrap_invocation("enw", "env", &[]).is_none());
-    }
-
-    /// An absolute path for `enw` is preserved verbatim in the produced
-    /// shell string. Critical for the i3-msg exec path: i3 inherits its own
-    /// session PATH (no `~/.cargo/bin`), so the adapter must hand i3 an
-    /// absolute path rather than a bare `enw`.
-    #[test]
-    fn test_build_wrap_invocation_uses_absolute_enw_path() {
-        let out = build_wrap_invocation(
-            "/home/u/.cargo/bin/enw",
-            "my-env",
-            &["chromium".to_string(), "--app={url}".to_string()],
-        );
-        assert_eq!(
-            out.as_deref(),
-            Some("/home/u/.cargo/bin/enw wrap chromium my-env -- '--app={url}'")
-        );
+    /// `shell_quote` cases:
+    /// - alphanumeric / common-punctuation args stay bare so readable command
+    ///   lines stay readable;
+    /// - whitespace and shell metacharacters force single-quote wrapping so
+    ///   `sh -c` can't reinterpret them;
+    /// - internal single quotes are escaped via the POSIX `'\''` idiom
+    ///   (close-quote, escaped quote, reopen-quote).
+    #[rstest]
+    #[case::bare_alphanumeric("chromium", "chromium")]
+    #[case::bare_url("--app=https://example.com/path", "--app=https://example.com/path")]
+    #[case::wraps_space("hello world", "'hello world'")]
+    #[case::wraps_dollar("$HOME", "'$HOME'")]
+    #[case::wraps_brace("{url}", "'{url}'")]
+    #[case::escapes_single_quote("it's", r"'it'\''s'")]
+    fn test_shell_quote_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(shell_quote(input), expected);
     }
 
     /// `resolve_enw_binary` must produce an absolute path so the spawned
@@ -1268,51 +1175,73 @@ mod tests {
         );
     }
 
-    /// `build_i3_exec_payloads` yields exactly one `exec`-prefixed payload per
-    /// URL in the gear, threading the supplied `enw` path through verbatim.
-    /// Pure-helper test: a known absolute path is expected to appear in the
-    /// payload as-is.
+    /// `WrapPayloadBuilder::payload_for` produces the full `exec <enw> wrap
+    /// <command> <env> -- <substituted-args>` shape that `enw wrap`'s clap
+    /// parser expects, with `{url}` substituted into every argv element and
+    /// shell-unsafe characters quoted.
     #[test]
-    fn test_build_i3_exec_payloads_threads_enw_path_per_url() {
-        let gear = serde_json::json!({
-            "a": {"web": {"page": {"url": "https://example.com/a"}}},
-            "b": {"web": {"page": {"url": "https://example.com/b"}}},
-        });
+    fn test_payload_for_substitutes_url_and_quotes_args() {
         let template = vec!["chromium".to_string(), "--app={url}".to_string()];
-        let payloads = build_i3_exec_payloads(&gear, &template, "env", "/abs/enw");
-
-        assert_eq!(payloads.len(), 2, "one payload per URL; got {payloads:?}");
-        for p in &payloads {
-            assert!(
-                p.starts_with("exec /abs/enw "),
-                "payload must thread the supplied enw path; got {p}"
-            );
-        }
+        let builder = WrapPayloadBuilder {
+            enw_binary: "enw".to_string(),
+            env_name: "my-env",
+            command_template: &template,
+        };
+        let payload = builder
+            .payload_for("https://example.com/x")
+            .expect("payload_for must yield Some for non-empty template");
+        assert_eq!(
+            payload,
+            "exec enw wrap chromium my-env -- --app=https://example.com/x"
+        );
     }
 
-    /// **Regression test for the i3-PATH bug.** The composition that
-    /// `open_gear_urls` actually uses must hand i3 an *absolute* path to the
-    /// `enw` binary. With a bare name (e.g. `enw`), `i3-msg exec` runs the
-    /// payload via i3's own session PATH, which on a typical setup does not
-    /// include `~/.cargo/bin` — `sh -c "enw …"` fails silently with exit 127
-    /// while i3's IPC has already returned success.
-    ///
-    /// Anti-overfitting: this asserts only the *property* (absolute path,
-    /// pointing at `enw`), not the exact payload string.
+    /// Env names with shell metacharacters are quoted so `sh -c` can't
+    /// reinterpret them. Same property exercised more pointedly than via
+    /// `shell_quote` alone, since this checks the integration where it
+    /// actually matters.
     #[test]
-    fn test_compose_gear_payloads_uses_absolute_enw_path() {
-        let gear = serde_json::json!({
-            "test": {"web": {"page": {"url": "https://example.com/x"}}}
-        });
+    fn test_payload_for_quotes_env_name_with_spaces() {
         let template = vec!["chromium".to_string(), "--app={url}".to_string()];
-        let payloads = compose_gear_payloads(&gear, &template, "my-env");
-
-        assert_eq!(
-            payloads.len(),
-            1,
-            "expected one payload per URL; got {payloads:?}"
+        let builder = WrapPayloadBuilder {
+            enw_binary: "enw".to_string(),
+            env_name: "my env",
+            command_template: &template,
+        };
+        let payload = builder.payload_for("https://example.com").unwrap();
+        assert!(
+            payload.contains("'my env'"),
+            "payload must single-quote env names containing spaces; got: {payload}"
         );
-        let payload = &payloads[0];
+    }
+
+    /// An empty command template yields `None`. Caller is responsible for
+    /// guarding upfront; this is the defensive return that keeps a misuse
+    /// from producing a malformed `enw wrap` invocation.
+    #[test]
+    fn test_payload_for_returns_none_for_empty_template() {
+        let template: Vec<String> = vec![];
+        let builder = WrapPayloadBuilder {
+            enw_binary: "enw".to_string(),
+            env_name: "env",
+            command_template: &template,
+        };
+        assert!(builder.payload_for("https://example.com").is_none());
+    }
+
+    /// **Regression test for the i3-PATH bug.** The payload `open_gear_urls`
+    /// actually hands to `i3-msg` must point at an *absolute* `enw` path.
+    /// With a bare name, `i3-msg exec` runs `sh -c "enw …"` via i3's session
+    /// PATH (no `~/.cargo/bin`) and fails with exit 127 — silently, because
+    /// the IPC has already returned success.
+    ///
+    /// Asserts the *property* (absolute path, pointing at `enw`) rather than
+    /// the exact payload string, so quoting/format tweaks don't break it.
+    #[test]
+    fn test_payload_for_uses_absolute_enw_path() {
+        let template = vec!["chromium".to_string(), "--app={url}".to_string()];
+        let builder = WrapPayloadBuilder::new("my-env", &template);
+        let payload = builder.payload_for("https://example.com/x").unwrap();
 
         // Must be an i3 exec command starting with an absolute path. Bare names
         // (the bug this test guards against) would not start with `/`.
@@ -1359,36 +1288,21 @@ mod tests {
         );
     }
 
-    /// A missing config file is the dominant production case (most users
-    /// won't write one). Must yield the default rather than panicking.
-    #[test]
-    fn test_load_web_open_command_returns_default_when_file_missing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let missing = dir.path().join("does-not-exist.toml");
-        assert_eq!(load_web_open_command(&missing), default_web_open_command());
-    }
-
-    /// A malformed TOML file must not crash activation — fall through to the
-    /// default and let activation continue.
-    #[test]
-    fn test_load_web_open_command_returns_default_on_malformed_toml() {
+    /// `load_web_open_command` falls back to the default whenever the user
+    /// config can't supply a value:
+    /// - missing file (dominant production case — most users don't write one);
+    /// - malformed TOML (must not crash activation);
+    /// - valid TOML without the field (users may configure other fields).
+    #[rstest]
+    #[case::file_missing(None)]
+    #[case::malformed_toml(Some("this is = not [valid toml"))]
+    #[case::field_absent(Some("# unrelated comment\n"))]
+    fn test_load_web_open_command_falls_back_to_default(#[case] file_contents: Option<&str>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let toml_path = dir.path().join("adapter-i3wm.toml");
-        std::fs::write(&toml_path, "this is = not [valid toml").expect("write toml");
-        assert_eq!(
-            load_web_open_command(&toml_path),
-            default_web_open_command()
-        );
-    }
-
-    /// A valid TOML with no `web_open_command` field returns the default,
-    /// so users can configure other future adapter fields without losing
-    /// the chromium app-mode default for URL opens.
-    #[test]
-    fn test_load_web_open_command_returns_default_when_field_absent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let toml_path = dir.path().join("adapter-i3wm.toml");
-        std::fs::write(&toml_path, "# unrelated comment\n").expect("write toml");
+        if let Some(contents) = file_contents {
+            std::fs::write(&toml_path, contents).expect("write toml");
+        }
         assert_eq!(
             load_web_open_command(&toml_path),
             default_web_open_command()
