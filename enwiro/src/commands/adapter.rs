@@ -158,7 +158,10 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
 
-        assert_eq!(json["version"], 1, "payload must include version: 1");
+        assert_eq!(
+            json["version"], ACTIVATE_PAYLOAD_VERSION,
+            "payload must include the current ACTIVATE_PAYLOAD_VERSION"
+        );
         assert!(
             json["managed_envs"].is_array(),
             "payload must include managed_envs as an array"

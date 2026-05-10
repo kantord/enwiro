@@ -56,7 +56,20 @@ pub fn activate<W: Write>(
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
-    let gear = enwiro_sdk::gear::read_gear_dir(&env_dir).unwrap_or_default();
+    // Gear is best-effort: a missing `gear.d/` is normal (most envs have none),
+    // but any other failure (malformed file with a hard error, gear-name
+    // collision across files, I/O error) deserves a user-visible notification
+    // so it doesn't get masked by a silent default.
+    let gear = match enwiro_sdk::gear::read_gear_dir(&env_dir) {
+        Ok(g) => g,
+        Err(e) => {
+            context
+                .notifier
+                .notify_error(&format!("Could not read gear for '{}': {:#}", args.name, e));
+            tracing::warn!(error = %e, "Could not read gear, continuing without it");
+            std::collections::HashMap::new()
+        }
+    };
     if let Err(e) = context.adapter.activate(&args.name, &managed_envs, &gear) {
         context
             .notifier
