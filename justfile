@@ -4,8 +4,16 @@ install-dev:
     set -euo pipefail
     echo "Building workspace in release mode..."
     cargo build --workspace --release
-    # Kill the background daemon so the binary isn't held open
-    pkill -x enw && sleep 0.2 || true
+    # Stop the daemon so the binary isn't held open. Use systemctl when the
+    # unit exists so the lifecycle stays in sync with how it normally runs;
+    # fall back to pkill for users running `enw daemon` directly.
+    daemon_was_active=0
+    if systemctl --user is-active --quiet enwiro-daemon.service 2>/dev/null; then
+        daemon_was_active=1
+        systemctl --user stop enwiro-daemon.service
+    else
+        pkill -x enw && sleep 0.2 || true
+    fi
     installed=$(cargo install --list | grep -E '^enwiro' | awk '{print $1}')
     for crate in $installed; do
         [ "$crate" = "enwiro-logging" ] && continue
@@ -26,6 +34,12 @@ install-dev:
         rm -f "$dest"
         cp "$bin" "$dest"
     done
+    # Bring the daemon back up if we stopped it. Skipped silently when the
+    # unit isn't present (pkill path handled above doesn't auto-restart).
+    if [ "$daemon_was_active" = "1" ]; then
+        echo "Restarting enwiro-daemon..."
+        systemctl --user start enwiro-daemon.service
+    fi
 
 # Install all currently-installed enwiro binaries from crates.io
 install-release:
