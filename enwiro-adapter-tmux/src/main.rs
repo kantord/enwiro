@@ -55,7 +55,7 @@ fn get_shell() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-adapter-tmux.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-adapter-tmux.log");
     let args = EnwiroAdapterTmuxCli::parse();
     match args {
         EnwiroAdapterTmuxCli::GetActiveWorkspaceId => {

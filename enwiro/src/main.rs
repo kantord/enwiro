@@ -49,11 +49,11 @@ fn main() -> anyhow::Result<()> {
 
     // Daemon subcommand runs independently — it manages its own plugin discovery
     if matches!(args, EnwiroCli::Daemon) {
-        let _guard = enwiro_logging::init_logging("enwiro-daemon.log");
+        let _guard = enwiro_sdk::init_logging("enwiro-daemon.log");
         return daemon::run_daemon();
     }
 
-    let _guard = enwiro_logging::init_logging("enwiro.log");
+    let _guard = enwiro_sdk::init_logging("enwiro.log");
 
     let config: ConfigurationValues =
         confy::load("enwiro", "enwiro").context("Could not load configuration")?;

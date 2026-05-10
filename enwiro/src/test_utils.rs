@@ -58,7 +58,8 @@ pub mod test_utilities {
         fn activate(
             &self,
             name: &str,
-            _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
+            _managed_envs: &[enwiro_sdk::adapter::ManagedEnvInfo],
+            _gear: &std::collections::HashMap<String, enwiro_sdk::gear::Gear>,
         ) -> anyhow::Result<()> {
             self.activated.borrow_mut().push(name.to_string());
             Ok(())
@@ -79,6 +80,7 @@ pub mod test_utilities {
         pub recipes: Vec<Recipe>,
         pub cook_results: std::collections::HashMap<String, String>,
         pub priority: u32,
+        pub gear_json: Option<serde_json::Value>,
     }
 
     impl FakeCookbook {
@@ -91,7 +93,13 @@ pub mod test_utilities {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
                 priority: 50,
+                gear_json: None,
             }
+        }
+
+        pub fn with_gear(mut self, gear: serde_json::Value) -> Self {
+            self.gear_json = Some(gear);
+            self
         }
 
         pub fn new_with_descriptions(
@@ -113,6 +121,7 @@ pub mod test_utilities {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
                 priority: 50,
+                gear_json: None,
             }
         }
 
@@ -165,6 +174,10 @@ pub mod test_utilities {
 
         fn priority(&self) -> u32 {
             self.priority
+        }
+
+        fn gear(&self, _recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
+            Ok(self.gear_json.clone())
         }
     }
 

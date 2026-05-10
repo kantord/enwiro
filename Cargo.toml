@@ -8,14 +8,14 @@ members = [
     "enwiro-cookbook-chezmoi",
     "enwiro-cookbook-git",
     "enwiro-cookbook-github",
-    "enwiro-logging",
+    "enwiro-sdk",
 ]
 
 [workspace.package]
 repository = "https://github.com/kantord/enwiro"
 
 [workspace.dependencies]
-enwiro-logging = { path = "enwiro-logging", version = "0.1.0" }
+enwiro-sdk = { path = "enwiro-sdk", version = "0.1.0" }
 home = "0.5.9"
 tracing = "0.1"
 tracing-appender = "0.2"

@@ -2,8 +2,8 @@ use anyhow::Context;
 use std::io::Write;
 use std::path::Path;
 
-use crate::commands::adapter::ManagedEnvInfo;
 use crate::context::CommandContext;
+use enwiro_sdk::adapter::ManagedEnvInfo;
 
 #[derive(clap::Args)]
 #[command(
@@ -43,14 +43,11 @@ pub fn activate<W: Write>(
     args: ActivateArgs,
 ) -> anyhow::Result<()> {
     let managed_envs = build_managed_envs(context);
-    if let Err(e) = context.adapter.activate(&args.name, &managed_envs) {
-        context
-            .notifier
-            .notify_error(&format!("Failed to activate workspace: {:#}", e));
-        return Err(e).context("Could not activate workspace");
-    }
+    let flat_name = args.name.replace('/', "-");
+    let env_dir = Path::new(&context.config.workspaces_directory).join(&flat_name);
 
-    // Ensure the environment exists on disk (cook from recipe if needed)
+    // Cook before adapter.activate so any gear written during cook is available
+    // when the adapter switches workspace and (optionally) acts on it.
     if let Err(e) = context.get_or_cook_environment(&Some(args.name.clone())) {
         context.notifier.notify_error(&format!(
             "Could not set up environment '{}': {:#}",
@@ -59,8 +56,27 @@ pub fn activate<W: Write>(
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
-    let flat_name = args.name.replace('/', "-");
-    let env_dir = Path::new(&context.config.workspaces_directory).join(&flat_name);
+    // Gear is best-effort: a missing `gear.d/` is normal (most envs have none),
+    // but any other failure (malformed file with a hard error, gear-name
+    // collision across files, I/O error) deserves a user-visible notification
+    // so it doesn't get masked by a silent default.
+    let gear = match enwiro_sdk::gear::LoadedGear::from_env_dir(&env_dir) {
+        Ok(g) => g.into_map(),
+        Err(e) => {
+            context
+                .notifier
+                .notify_error(&format!("Could not read gear for '{}': {:#}", args.name, e));
+            tracing::warn!(error = %e, "Could not read gear, continuing without it");
+            std::collections::HashMap::new()
+        }
+    };
+    if let Err(e) = context.adapter.activate(&args.name, &managed_envs, &gear) {
+        context
+            .notifier
+            .notify_error(&format!("Failed to activate workspace: {:#}", e));
+        return Err(e).context("Could not activate workspace");
+    }
+
     if env_dir.is_dir() && !env_dir.is_symlink() {
         crate::usage_stats::record_activation_per_env(&env_dir);
     } else {
@@ -90,23 +106,20 @@ mod tests {
             Ok("some-env".to_string())
         }
 
-        fn activate(&self, _name: &str, managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()> {
+        fn activate(
+            &self,
+            _name: &str,
+            managed_envs: &[ManagedEnvInfo],
+            _gear: &std::collections::HashMap<String, enwiro_sdk::gear::Gear>,
+        ) -> anyhow::Result<()> {
             *self.captured.borrow_mut() = managed_envs.to_vec();
             Ok(())
         }
     }
 
-    /// Verify that `build_managed_envs` is wired to `slot_scores` from `usage_stats`.
-    ///
-    /// This test checks two things:
-    /// 1. `crate::usage_stats::slot_scores` is a callable public symbol (compile-time check).
-    /// 2. The `slot_score` values passed to the adapter by `activate` / `build_managed_envs`
-    ///    are consistent with what `slot_scores` returns for the same input data, establishing
-    ///    that the caller is wired to `slot_scores` rather than some other scoring function.
-    ///
-    /// Two environments are created; one receives a recent activation.  `slot_scores` is called
-    /// directly with the same metadata to derive expected values.  The captured adapter args
-    /// must match those expected values.
+    /// `build_managed_envs` must derive each `slot_score` from
+    /// `usage_stats::slot_scores`. Computes expected scores via a direct
+    /// `slot_scores` call and compares against what the adapter received.
     #[rstest]
     fn test_build_managed_envs_uses_slot_scores(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
@@ -186,98 +199,6 @@ mod tests {
         drop(temp_dir);
     }
 
-    /// `build_managed_envs` must set `slot_score` from percentile rank, not raw frecency.
-    ///
-    /// Setup: two environments on disk; "active-env" has one recent activation, "idle-env" has
-    /// none. After `activate` is called:
-    ///   - "active-env" must have slot_score > "idle-env" slot_score (it ranked higher)
-    ///   - Both scores must be in the range [0.0, 1.0) — valid percentile fractions
-    ///   - "idle-env" must have slot_score == 0.0 (no activations → lowest percentile)
-    ///   - "active-env" must have slot_score == 0.5 (1 env strictly below out of 2 total)
-    #[rstest]
-    fn test_build_managed_envs_uses_percentile_scores(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (temp_dir, mut ctx, _, _) = context_object;
-
-        // Create two environments on disk
-        ctx.create_mock_environment("active-env");
-        ctx.create_mock_environment("idle-env");
-
-        // Record a recent activation for "active-env" so its frecency > 0
-        let active_env_dir =
-            std::path::Path::new(&ctx.config.workspaces_directory).join("active-env");
-        crate::usage_stats::record_activation_per_env(&active_env_dir);
-
-        // Install the capturing adapter
-        let captured = std::rc::Rc::new(std::cell::RefCell::new(vec![]));
-        ctx.adapter = Box::new(CapturingAdapter {
-            captured: captured.clone(),
-        });
-
-        let result = activate(
-            &mut ctx,
-            ActivateArgs {
-                name: "active-env".to_string(),
-            },
-        );
-        assert!(result.is_ok());
-
-        let infos = captured.borrow();
-        assert_eq!(
-            infos.len(),
-            2,
-            "Both environments must appear in managed_envs"
-        );
-
-        let active = infos
-            .iter()
-            .find(|e| e.name == "active-env")
-            .expect("active-env must be present");
-        let idle = infos
-            .iter()
-            .find(|e| e.name == "idle-env")
-            .expect("idle-env must be present");
-
-        // Percentile scores must be in [0.0, 1.0)
-        assert!(
-            active.slot_score >= 0.0 && active.slot_score < 1.0,
-            "active-env slot_score must be in [0.0, 1.0), got {}",
-            active.slot_score
-        );
-        assert!(
-            idle.slot_score >= 0.0 && idle.slot_score < 1.0,
-            "idle-env slot_score must be in [0.0, 1.0), got {}",
-            idle.slot_score
-        );
-
-        // active-env has higher frecency → higher percentile rank
-        assert!(
-            active.slot_score > idle.slot_score,
-            "active-env (has recent activation) must have higher slot_score than idle-env; \
-             active={}, idle={}",
-            active.slot_score,
-            idle.slot_score
-        );
-
-        // idle-env has no activations → 0 envs strictly below → rank 0/2 = 0.0
-        assert!(
-            idle.slot_score.abs() < 1e-10,
-            "idle-env with no activations must have slot_score 0.0, got {}",
-            idle.slot_score
-        );
-
-        // active-env: activation_percentile=0.5, switch_percentile=0.0 (no switch history)
-        // slot_score = 0.2×0.5 + 0.8×0.0 = 0.1
-        assert!(
-            (active.slot_score - 0.1).abs() < 1e-10,
-            "active-env must have slot_score 0.1 (0.2×0.5 + 0.8×0.0), got {}",
-            active.slot_score
-        );
-
-        drop(temp_dir); // keep TempDir alive until end
-    }
-
     #[rstest]
     fn test_activate_calls_adapter_with_correct_name(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
@@ -330,7 +251,7 @@ mod tests {
     ) {
         let (_temp_dir, mut ctx, _, _) = context_object;
 
-        // No cookbooks, no existing environment — activate should still succeed
+        // No cookbooks, no existing environment - activate should still succeed
         // (the adapter part works, cooking just warns on stderr)
         let result = activate(
             &mut ctx,
@@ -346,6 +267,10 @@ mod tests {
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut ctx, _, notifications) = context_object;
+
+        // The env already exists so cook is a no-op; only the adapter failure
+        // should generate an error notification.
+        ctx.create_mock_environment("my-project");
 
         use crate::commands::adapter::EnwiroAdapterNone;
         ctx.adapter = Box::new(EnwiroAdapterNone {});
@@ -364,12 +289,9 @@ mod tests {
         assert!(logs[0].starts_with("ERROR:"));
     }
 
-    /// An adapter whose `activate()` returns a multi-level anyhow error chain so that
-    /// the leaf detail (`"leaf i3 IPC error: broken pipe"`) is distinct from the
-    /// outer wrapper (`"Could not switch to workspace"`).
-    ///
-    /// Used by `test_adapter_error_notification_includes_leaf_detail` to prove that the
-    /// notification at line 49 of activate.rs must use `{:#}`, not `{}`.
+    /// An adapter whose `activate()` returns a multi-level anyhow error chain so the
+    /// leaf detail (`"leaf i3 IPC error: broken pipe"`) is distinct from the outer
+    /// wrapper. Used to verify that error notifications surface the full chain.
     struct ChainedErrorAdapter;
 
     impl crate::commands::adapter::EnwiroAdapterTrait for ChainedErrorAdapter {
@@ -380,26 +302,26 @@ mod tests {
         fn activate(
             &self,
             _name: &str,
-            _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
+            _managed_envs: &[enwiro_sdk::adapter::ManagedEnvInfo],
+            _gear: &std::collections::HashMap<String, enwiro_sdk::gear::Gear>,
         ) -> anyhow::Result<()> {
             let leaf = anyhow::anyhow!("leaf i3 IPC error: broken pipe");
             Err(leaf).map_err(|e| e.context("outer: Could not switch to workspace"))
         }
     }
 
-    /// When `adapter.activate()` fails with a multi-level anyhow error chain, the
-    /// desktop notification **must** include the leaf error detail — not just the
-    /// outermost wrapper message.
-    ///
-    /// Currently `activate.rs` line 49 formats the error with `{}`, which shows only
-    /// the outermost context layer.  The fix is to use `{:#}`, which renders the full
-    /// chain.  This test fails under the current `{}` formatting because the leaf
-    /// `"leaf i3 IPC error: broken pipe"` does not appear in the notification.
+    /// On adapter failure, the user-facing notification must include the leaf
+    /// error from a multi-level anyhow chain - not just the outermost wrapper.
+    /// Pins the `{:#}` formatting at the `notify_error` site.
     #[rstest]
     fn test_adapter_error_notification_includes_leaf_detail(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut ctx, _, notifications) = context_object;
+
+        // The env already exists so cook is a no-op; only the adapter failure
+        // should generate an error notification.
+        ctx.create_mock_environment("my-project");
 
         ctx.adapter = Box::new(ChainedErrorAdapter);
 
@@ -425,8 +347,7 @@ mod tests {
         assert!(
             msg.contains("leaf i3 IPC error: broken pipe"),
             "notification must include the leaf error detail from the full error chain, \
-             but got: {msg:?}\n\
-             Hint: use `{{:#}}` instead of `{{}}` when formatting the adapter error in activate.rs line 49"
+             but got: {msg:?}"
         );
     }
 
@@ -452,13 +373,9 @@ mod tests {
         assert!(logs[0].contains("unknown"));
     }
 
-    /// A cookbook whose `cook()` returns a multi-level anyhow error chain so that
-    /// the leaf detail (`"leaf git2 error: reference is locked"`) is distinct from the
-    /// outer wrapper (`"Could not create worktree"`).
-    ///
-    /// This struct is used by `test_cook_error_notification_includes_leaf_detail` to
-    /// prove that the notification message must include the full chain — i.e. the format
-    /// specifier must be `{:#}`, not `{}`.
+    /// A cookbook whose `cook()` returns a multi-level anyhow error chain so the
+    /// leaf detail (`"leaf git2 error: reference is locked"`) is distinct from the
+    /// outer wrapper. Used to verify that error notifications surface the full chain.
     struct ChainedErrorCookbook {
         cookbook_name: String,
         recipe_name: String,
@@ -479,14 +396,9 @@ mod tests {
         }
     }
 
-    /// When `cookbook.cook()` fails with a multi-level anyhow error chain, the
-    /// desktop notification **must** include the leaf error detail — not just the
-    /// outermost wrapper message.
-    ///
-    /// Currently `activate.rs` formats the error with `{}`, which shows only the
-    /// outermost context layer.  The fix is to use `{:#}`, which renders the full
-    /// chain.  This test fails under the current `{}` formatting because the leaf
-    /// `"leaf git2 error: reference is locked"` does not appear in the notification.
+    /// On cooking failure, the user-facing notification must include the leaf
+    /// error from a multi-level anyhow chain - not just the outermost wrapper.
+    /// Pins the `{:#}` formatting at the cooking-error notification site.
     #[rstest]
     fn test_cook_error_notification_includes_leaf_detail(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
@@ -520,8 +432,7 @@ mod tests {
         assert!(
             msg.contains("leaf git2 error: reference is locked"),
             "notification must include the leaf error detail from the full error chain, \
-             but got: {msg:?}\n\
-             Hint: use `{{:#}}` instead of `{{}}` when formatting the error in activate.rs"
+             but got: {msg:?}"
         );
     }
 

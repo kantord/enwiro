@@ -1,0 +1,20 @@
+[package]
+name = "enwiro-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "Shared SDK for enwiro plugin authors: logging, gear schema, plugin protocol types"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+home.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+rstest = "0.26.0"
+tempfile = "3.25.0"

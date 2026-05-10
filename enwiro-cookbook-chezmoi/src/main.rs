@@ -49,7 +49,7 @@ fn cook(args: CookArgs) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-cookbook-chezmoi.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-cookbook-chezmoi.log");
 
     let args = EnwiroCookbookChezmoi::parse();
 

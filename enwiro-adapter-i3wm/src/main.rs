@@ -16,11 +16,7 @@ fn disc(slot: i32) -> f64 {
     1.0_f64 / (slot as f64 + 1.0).log2()
 }
 
-#[derive(serde::Deserialize, Debug, Clone)]
-struct ManagedEnvInfo {
-    name: String,
-    slot_score: f64,
-}
+use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo};
 
 #[derive(clap::Args)]
 pub struct ListenArgs {
@@ -54,14 +50,181 @@ fn build_rename_workspace_command(old_name: &str, new_name: &str) -> String {
     format!(r#"rename workspace "{}" to "{}""#, esc_old, esc_new)
 }
 
-/// Read managed env list from stdin. Returns empty vec on any parse failure.
-fn read_managed_envs() -> Vec<ManagedEnvInfo> {
+/// Read the activate stdin payload from core. Returns a default
+/// (empty managed_envs, null gear) on any parse failure so the adapter
+/// can still complete the workspace switch.
+fn read_activate_payload() -> ActivatePayload {
     use std::io::Read;
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
-        return vec![];
+        return ActivatePayload::default();
     }
     serde_json::from_str(&buf).unwrap_or_default()
+}
+
+/// Default open command used to spawn one window per gear web URL.
+/// `chromium --app=<url>` opens a chromeless window so each URL reads
+/// visually as a standalone app, and creates a fresh window per
+/// invocation (no window-reuse problem on subsequent activations).
+fn default_web_open_command() -> Vec<String> {
+    vec!["chromium".to_string(), "--app={url}".to_string()]
+}
+
+/// Schema for the i3 adapter's confy TOML. Every field is optional so missing
+/// or partially-populated configs fall through to defaults rather than
+/// failing to parse.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct AdapterConfig {
+    web_open_command: Option<Vec<String>>,
+}
+
+/// Load `web_open_command` from the i3 adapter's confy TOML at `config_path`,
+/// falling back to the default when the file is missing, malformed, or has
+/// no `web_open_command` field.
+fn load_web_open_command(config_path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| toml::from_str::<AdapterConfig>(&s).ok())
+        .and_then(|c| c.web_open_command)
+        .unwrap_or_else(default_web_open_command)
+}
+
+/// Resolve the adapter's confy config path the same way `confy::load` would,
+/// so users can drop a file at the documented location
+/// (`~/.config/enwiro/adapter-i3wm.toml` on Linux). Returns `None` if confy
+/// can't determine a config dir - caller falls back to defaults.
+fn adapter_config_path() -> Option<std::path::PathBuf> {
+    confy::get_configuration_file_path("enwiro", "adapter-i3wm").ok()
+}
+
+/// Walk a merged gear JSON object and collect every `gear.<name>.web.<entry>.url`.
+fn collect_web_urls(gear: &serde_json::Value) -> Vec<String> {
+    let Some(obj) = gear.as_object() else {
+        return Vec::new();
+    };
+    let mut urls = Vec::new();
+    for gear_value in obj.values() {
+        let Some(web) = gear_value.get("web").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for entry in web.values() {
+            if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
+                urls.push(url.to_string());
+            }
+        }
+    }
+    urls
+}
+
+/// POSIX-shell-quote a single argument: leave it bare if every character is in
+/// a conservative safe set, otherwise wrap in single quotes (escaping any
+/// internal `'`). i3 invokes `exec`'s payload via `sh -c`, so every component
+/// of the constructed command line must be quoted before joining.
+fn shell_quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | '=' | ':' | '@' | ',' | '+' | '%')
+        });
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// Resolve the absolute path of the `enw` binary. Looks for a sibling of the
+/// running adapter binary (the install layout that `cargo install` and
+/// `just install-dev` both produce). Falls back to the bare name `enw` when
+/// the current-exe lookup fails - only useful if i3's `PATH` happens to
+/// include the install dir.
+///
+/// Required because `i3-msg exec` runs the payload via i3's own session
+/// `PATH`, which on a typical setup does not include `~/.cargo/bin`. With a
+/// bare `enw`, `sh -c "enw …"` fails with exit 127, and i3's IPC has already
+/// returned success by then - the failure is silent.
+fn resolve_enw_binary() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("enw")))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "enw".to_string())
+}
+
+/// Builds the per-URL `i3-msg exec` payload for a single activation, given
+/// the activation-level constants (binary, env name, configured open
+/// command). One instance is constructed per `open_gear_urls` call and then
+/// queried per URL.
+///
+/// Wraps the user's `web_open_command` inside
+/// `<absolute-enw> wrap <command> <env> -- <args>` so the spawned process
+/// inherits `cwd` / `ENWIRO_ENV` from `enw wrap`, while `i3-msg exec`
+/// supplies daemonization and graphical-session env normalization. The
+/// absolute `enw` path is required - see [`resolve_enw_binary`].
+struct WrapPayloadBuilder<'a> {
+    enw_binary: String,
+    env_name: &'a str,
+    command_template: &'a [String],
+}
+
+impl<'a> WrapPayloadBuilder<'a> {
+    fn new(env_name: &'a str, command_template: &'a [String]) -> Self {
+        Self {
+            enw_binary: resolve_enw_binary(),
+            env_name,
+            command_template,
+        }
+    }
+
+    /// Construct the full `"exec <enw> wrap <command> <env> -- <args>"`
+    /// string for one URL, with `{url}` substituted into every argv element
+    /// and shell-unsafe components quoted. Returns `None` only if
+    /// `command_template` is empty (no binary to wrap) - callers should
+    /// have guarded already.
+    fn payload_for(&self, url: &str) -> Option<String> {
+        let (command_name, child_args) = self.command_template.split_first()?;
+        let mut parts: Vec<String> = vec![
+            self.enw_binary.clone(),
+            "wrap".into(),
+            command_name.replace("{url}", url),
+            self.env_name.to_string(),
+            "--".into(),
+        ];
+        parts.extend(child_args.iter().map(|a| a.replace("{url}", url)));
+        let inner = parts
+            .iter()
+            .map(|p| shell_quote(p))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(format!("exec {inner}"))
+    }
+}
+
+/// Spawn the configured open command for every URL collected from gear, via
+/// `i3-msg exec -- <enw> wrap <command> <env> -- <args>`. Best-effort:
+/// failures are logged and do not interrupt activation.
+fn open_gear_urls(gear: &serde_json::Value, command_template: &[String], env_name: &str) {
+    let urls = collect_web_urls(gear);
+    if urls.is_empty() {
+        return;
+    }
+    if command_template.is_empty() {
+        tracing::warn!(skipped = urls.len(), "web_open_command is empty");
+        return;
+    }
+    let builder = WrapPayloadBuilder::new(env_name, command_template);
+    for url in urls {
+        let Some(payload) = builder.payload_for(&url) else {
+            continue;
+        };
+        match std::process::Command::new("i3-msg").arg(&payload).spawn() {
+            Ok(_) => tracing::info!(payload = %payload, "Spawned open command via i3-msg exec"),
+            Err(e) => {
+                tracing::warn!(error = %e, payload = %payload, "Failed to invoke i3-msg exec");
+            }
+        }
+    }
 }
 
 /// Parse newline-delimited JSON from `enwiro list-all --json`.
@@ -168,7 +331,7 @@ struct WorkspaceSlot {
 ///
 /// **Compaction** (slot_i ≤ max_shortcut_slot is empty, env at slot_j, j > i):
 ///   NetBenefit = score_j × (disc(slot_i) − disc(slot_j))
-///   No STABILITY_THRESHOLD — filling an empty slot has no thrashing risk, so the
+///   No STABILITY_THRESHOLD - filling an empty slot has no thrashing risk, so the
 ///   move fires whenever score_j > 0 and disc(slot_i) > disc(slot_j) (i.e. NB > 0).
 ///
 /// Boost the effective slot score of a newly-activated env that landed outside
@@ -212,11 +375,11 @@ fn find_best_move(
     max_shortcut_slot: i32,
     stability_threshold: f64,
 ) -> Vec<(String, String)> {
-    // All physically occupied slots (managed + unmanaged) — used to detect truly empty slots.
+    // All physically occupied slots (managed + unmanaged) - used to detect truly empty slots.
     let all_occupied: std::collections::HashSet<i32> =
         workspaces.iter().map(|ws| ws.slot).collect();
 
-    // Only managed workspaces — used for score-swap candidates and move generation.
+    // Only managed workspaces - used for score-swap candidates and move generation.
     let managed_occupied: std::collections::HashMap<i32, (&str, f64)> = workspaces
         .iter()
         .filter(|ws| ws.managed)
@@ -355,7 +518,7 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-adapter-i3wm.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-adapter-i3wm.log");
 
     let args = EnwiroAdapterI3WmCLI::parse();
 
@@ -373,7 +536,8 @@ async fn main() -> anyhow::Result<()> {
             print!("{}", environment_name);
         }
         EnwiroAdapterI3WmCLI::Activate(args) => {
-            let managed_envs = read_managed_envs();
+            let payload = read_activate_payload();
+            let managed_envs = payload.managed_envs;
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
             tracing::debug!(count = workspaces.len(), name = %args.name, "Activating environment");
@@ -463,6 +627,14 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(workspace = %workspace_name, num = target_num, "Focusing final workspace slot");
                 run_i3_command(&mut i3, build_workspace_command(&workspace_name)).await?;
             }
+
+            // After the workspace is focused, open any web URLs declared in
+            // the env's gear so they land in this workspace. Failures are
+            // logged inside; activation never fails on auto-open issues.
+            let web_open_command = adapter_config_path()
+                .map(|p| load_web_open_command(&p))
+                .unwrap_or_else(default_web_open_command);
+            open_gear_urls(&payload.gear, &web_open_command, &args.name);
         }
         EnwiroAdapterI3WmCLI::Listen(listen_args) => {
             let debounce = std::time::Duration::from_secs(listen_args.debounce_secs);
@@ -519,6 +691,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use i3ipc_types::reply::Rect;
+    use rstest::rstest;
 
     fn make_workspace(id: usize, num: i32, name: &str) -> Workspace {
         Workspace {
@@ -552,14 +725,14 @@ mod tests {
 
     #[test]
     fn test_extract_name_containing_workspace_number() {
-        // Workspace "1: project1" — the name contains "1" as a substring
+        // Workspace "1: project1" - the name contains "1" as a substring
         let ws = make_workspace(123, 1, "1: project1");
         assert_eq!(extract_environment_name(&ws), "project1");
     }
 
     #[test]
     fn test_extract_name_containing_workspace_number_in_middle() {
-        // Workspace "3: a3b" — the name contains "3" as a substring
+        // Workspace "3: a3b" - the name contains "3" as a substring
         let ws = make_workspace(456, 3, "3: a3b");
         assert_eq!(extract_environment_name(&ws), "a3b");
     }
@@ -581,7 +754,7 @@ mod tests {
     }
 
     /// Confirm that a JSON payload using the old `"frecency"` key is NOT silently
-    /// accepted under the new field name — this guards against accidentally keeping
+    /// accepted under the new field name - this guards against accidentally keeping
     /// a serde rename alias.
     #[test]
     fn test_i3wm_does_not_accept_frecency_key() {
@@ -718,7 +891,7 @@ mod tests {
         );
     }
 
-    /// Test 5: The output does NOT end with a trailing newline — the caller
+    /// Test 5: The output does NOT end with a trailing newline - the caller
     /// adds one via `println!`.
     #[test]
     fn test_format_workspace_switch_event_no_trailing_newline() {
@@ -755,7 +928,7 @@ mod tests {
     //   - If `now - last < debounce` → skip (too soon).
     //   - If `now - last >= debounce` → rebalance (window has expired, boundary inclusive).
 
-    /// SR-1: No prior rebalance has run — `last` is `None`.
+    /// SR-1: No prior rebalance has run - `last` is `None`.
     ///
     /// Expected: `should_rebalance(None, any_debounce, now)` returns `true`.
     #[test]
@@ -792,7 +965,7 @@ mod tests {
         );
     }
 
-    /// SR-3: A prior rebalance ran recently — elapsed < debounce → skip.
+    /// SR-3: A prior rebalance ran recently - elapsed < debounce → skip.
     ///
     /// Setup: `last` = 100 seconds ago, `debounce` = 300 s.
     /// elapsed (100 s) < debounce (300 s) → must skip.
@@ -814,7 +987,7 @@ mod tests {
         );
     }
 
-    /// SR-4: Boundary — elapsed equals the debounce exactly.
+    /// SR-4: Boundary - elapsed equals the debounce exactly.
     ///
     /// Setup: `last` = exactly 300 seconds ago, `debounce` = 300 s.
     /// elapsed (300 s) == debounce (300 s) → boundary is inclusive, should rebalance.
@@ -832,7 +1005,273 @@ mod tests {
         assert!(
             should_rebalance(Some(last), debounce, now),
             "should_rebalance must return true when elapsed ({elapsed_since_last:?}) \
-             equals debounce exactly ({debounce:?}) — the boundary is inclusive"
+             equals debounce exactly ({debounce:?}) - the boundary is inclusive"
+        );
+    }
+
+    /// The activate stdin payload from core has shape
+    /// `{version, managed_envs: [...], gear: {...}}`. The adapter must
+    /// deserialize this into `ActivatePayload` and pull `managed_envs` out
+    /// for use by the rest of the activate flow.
+    #[test]
+    fn test_activate_payload_deserializes_versioned_envelope() {
+        let json = r#"{
+            "version": 1,
+            "managed_envs": [{"name": "foo", "slot_score": 0.5}],
+            "gear": {
+                "pr": {
+                    "description": "PR #1",
+                    "web": {
+                        "page": {
+                            "description": "Open the PR",
+                            "url": "https://example.com/pr/1"
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let parsed: ActivatePayload =
+            serde_json::from_str(json).expect("must deserialize new payload shape");
+
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.managed_envs.len(), 1);
+        assert_eq!(parsed.managed_envs[0].name, "foo");
+        assert!(
+            parsed.gear.is_object(),
+            "gear field must be retained as a JSON object for cycle 7 to consume"
+        );
+        assert_eq!(
+            parsed.gear["pr"]["web"]["page"]["url"],
+            "https://example.com/pr/1"
+        );
+    }
+
+    /// If stdin is empty or malformed (e.g. an old core that sent a bare
+    /// array), parsing must yield default values rather than panic - the
+    /// adapter should still complete the workspace switch.
+    #[test]
+    fn test_activate_payload_default_on_invalid_input() {
+        let parsed: ActivatePayload = serde_json::from_str("[]").unwrap_or_default();
+        assert_eq!(parsed.version, 0);
+        assert!(parsed.managed_envs.is_empty());
+        assert!(parsed.gear.is_null());
+    }
+
+    /// `collect_web_urls` walks `gear.<name>.web.<entry>.url` for every
+    /// gear in the merged map and returns each URL.
+    #[test]
+    fn test_collect_web_urls_gathers_every_url() {
+        let gear = serde_json::json!({
+            "pr": {
+                "description": "PR #1",
+                "web": {
+                    "page": {"description": "Open PR", "url": "https://example.com/pr/1"}
+                }
+            },
+            "issue": {
+                "description": "Issue #2",
+                "web": {
+                    "page": {"description": "Open issue", "url": "https://example.com/issues/2"}
+                }
+            }
+        });
+
+        let mut urls = collect_web_urls(&gear);
+        urls.sort();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/issues/2".to_string(),
+                "https://example.com/pr/1".to_string(),
+            ]
+        );
+    }
+
+    /// Missing or null gear must yield an empty URL list, not a panic.
+    #[test]
+    fn test_collect_web_urls_handles_null_and_missing_gracefully() {
+        assert!(collect_web_urls(&serde_json::Value::Null).is_empty());
+        assert!(collect_web_urls(&serde_json::json!({})).is_empty());
+        assert!(collect_web_urls(&serde_json::json!({"pr": {"description": "no web"}})).is_empty());
+    }
+
+    /// The default open command must use chromium app-mode so each URL
+    /// opens in a fresh chromeless window placed in the current i3 workspace.
+    #[test]
+    fn test_default_web_open_command_is_chromium_app_mode() {
+        let cmd = default_web_open_command();
+        assert_eq!(cmd[0], "chromium");
+        assert!(
+            cmd.iter().any(|arg| arg.contains("--app={url}")),
+            "default must use chromium --app=<url> for chromeless new windows; got {cmd:?}"
+        );
+    }
+
+    /// `shell_quote` cases:
+    /// - alphanumeric / common-punctuation args stay bare so readable command
+    ///   lines stay readable;
+    /// - whitespace and shell metacharacters force single-quote wrapping so
+    ///   `sh -c` can't reinterpret them;
+    /// - internal single quotes are escaped via the POSIX `'\''` idiom
+    ///   (close-quote, escaped quote, reopen-quote).
+    #[rstest]
+    #[case::bare_alphanumeric("chromium", "chromium")]
+    #[case::bare_url("--app=https://example.com/path", "--app=https://example.com/path")]
+    #[case::wraps_space("hello world", "'hello world'")]
+    #[case::wraps_dollar("$HOME", "'$HOME'")]
+    #[case::wraps_brace("{url}", "'{url}'")]
+    #[case::escapes_single_quote("it's", r"'it'\''s'")]
+    fn test_shell_quote_cases(#[case] input: &str, #[case] expected: &str) {
+        assert_eq!(shell_quote(input), expected);
+    }
+
+    /// `resolve_enw_binary` must produce an absolute path so the spawned
+    /// `sh -c` invocation does not depend on i3's PATH. Sibling-of-current-exe
+    /// is the install layout used by both `cargo install` and `just install-dev`.
+    #[test]
+    fn test_resolve_enw_binary_returns_absolute_sibling_path() {
+        let resolved = resolve_enw_binary();
+        let path = std::path::Path::new(&resolved);
+        assert!(
+            path.is_absolute(),
+            "resolved enw path must be absolute (i3's PATH may not contain the install dir); got {resolved}"
+        );
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("enw"),
+            "resolved binary name must be `enw`; got {resolved}"
+        );
+    }
+
+    /// `WrapPayloadBuilder::payload_for` produces the full `exec <enw> wrap
+    /// <command> <env> -- <substituted-args>` shape that `enw wrap`'s clap
+    /// parser expects, with `{url}` substituted into every argv element and
+    /// shell-unsafe characters quoted.
+    #[test]
+    fn test_payload_for_substitutes_url_and_quotes_args() {
+        let template = vec!["chromium".to_string(), "--app={url}".to_string()];
+        let builder = WrapPayloadBuilder {
+            enw_binary: "enw".to_string(),
+            env_name: "my-env",
+            command_template: &template,
+        };
+        let payload = builder
+            .payload_for("https://example.com/x")
+            .expect("payload_for must yield Some for non-empty template");
+        assert_eq!(
+            payload,
+            "exec enw wrap chromium my-env -- --app=https://example.com/x"
+        );
+    }
+
+    /// Env names with shell metacharacters are quoted so `sh -c` can't
+    /// reinterpret them. Same property exercised more pointedly than via
+    /// `shell_quote` alone, since this checks the integration where it
+    /// actually matters.
+    #[test]
+    fn test_payload_for_quotes_env_name_with_spaces() {
+        let template = vec!["chromium".to_string(), "--app={url}".to_string()];
+        let builder = WrapPayloadBuilder {
+            enw_binary: "enw".to_string(),
+            env_name: "my env",
+            command_template: &template,
+        };
+        let payload = builder.payload_for("https://example.com").unwrap();
+        assert!(
+            payload.contains("'my env'"),
+            "payload must single-quote env names containing spaces; got: {payload}"
+        );
+    }
+
+    /// An empty command template yields `None`. Caller is responsible for
+    /// guarding upfront; this is the defensive return that keeps a misuse
+    /// from producing a malformed `enw wrap` invocation.
+    #[test]
+    fn test_payload_for_returns_none_for_empty_template() {
+        let template: Vec<String> = vec![];
+        let builder = WrapPayloadBuilder {
+            enw_binary: "enw".to_string(),
+            env_name: "env",
+            command_template: &template,
+        };
+        assert!(builder.payload_for("https://example.com").is_none());
+    }
+
+    /// Regression: `payload_for` must hand `i3-msg` an absolute `enw`
+    /// path, not a bare name. See [`resolve_enw_binary`] for the why.
+    /// Asserts the property (absolute path, pointing at `enw`), not the
+    /// exact payload string - quoting/format tweaks shouldn't break it.
+    #[test]
+    fn test_payload_for_uses_absolute_enw_path() {
+        let template = vec!["chromium".to_string(), "--app={url}".to_string()];
+        let builder = WrapPayloadBuilder::new("my-env", &template);
+        let payload = builder.payload_for("https://example.com/x").unwrap();
+
+        // Must be an i3 exec command starting with an absolute path. Bare names
+        // (the bug this test guards against) would not start with `/`.
+        let after_exec = payload
+            .strip_prefix("exec ")
+            .unwrap_or_else(|| panic!("payload must begin with 'exec '; got {payload}"));
+        let first_token = after_exec.split_whitespace().next().unwrap_or("");
+        let first_path = std::path::Path::new(first_token);
+        assert!(
+            first_path.is_absolute(),
+            "first token after `exec` must be an absolute path - i3 spawns via its own \
+             session PATH which typically does not include the install dir, so a bare \
+             name like `enw` fails silently. Got first token: {first_token}; full payload: {payload}"
+        );
+        assert_eq!(
+            first_path.file_name().and_then(|n| n.to_str()),
+            Some("enw"),
+            "first token must point at the `enw` binary; got {first_token}"
+        );
+    }
+
+    /// `load_web_open_command` must read `web_open_command` from the adapter's
+    /// confy TOML and return it instead of the default when the field is set.
+    #[test]
+    fn test_load_web_open_command_uses_user_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_path = dir.path().join("adapter-i3wm.toml");
+        std::fs::write(
+            &toml_path,
+            r#"web_open_command = ["firefox", "--new-window", "{url}"]
+"#,
+        )
+        .expect("write toml");
+
+        let cmd = load_web_open_command(&toml_path);
+        assert_eq!(
+            cmd,
+            vec![
+                "firefox".to_string(),
+                "--new-window".to_string(),
+                "{url}".to_string(),
+            ],
+            "user-configured web_open_command must override the default"
+        );
+    }
+
+    /// `load_web_open_command` falls back to the default whenever the user
+    /// config can't supply a value:
+    /// - missing file (dominant production case - most users don't write one);
+    /// - malformed TOML (must not crash activation);
+    /// - valid TOML without the field (users may configure other fields).
+    #[rstest]
+    #[case::file_missing(None)]
+    #[case::malformed_toml(Some("this is = not [valid toml"))]
+    #[case::field_absent(Some("# unrelated comment\n"))]
+    fn test_load_web_open_command_falls_back_to_default(#[case] file_contents: Option<&str>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_path = dir.path().join("adapter-i3wm.toml");
+        if let Some(contents) = file_contents {
+            std::fs::write(&toml_path, contents).expect("write toml");
+        }
+        assert_eq!(
+            load_web_open_command(&toml_path),
+            default_web_open_command()
         );
     }
 
@@ -974,7 +1413,7 @@ mod tests {
         );
     }
 
-    /// Mixed input: recipe, env-without-scores, valid env, malformed — only the
+    /// Mixed input: recipe, env-without-scores, valid env, malformed - only the
     /// valid env survives.
     #[test]
     fn test_parse_managed_envs_mixed_input_only_valid_env_survives() {
@@ -1016,7 +1455,7 @@ mod tests {
     //
     //   Compaction (slot_i ≤ max_shortcut_slot is empty, env at slot_j, j > i):
     //     NB = score_j × (disc(slot_i) − disc(slot_j))
-    //     (no STABILITY_THRESHOLD — filling an empty slot has no thrashing risk;
+    //     (no STABILITY_THRESHOLD - filling an empty slot has no thrashing risk;
     //      fires whenever score_j > 0 and NB > 0)
     //
     // Returns empty vec when no NB > 0.
@@ -1032,7 +1471,7 @@ mod tests {
         }
     }
 
-    /// FBM-1: Empty input — no workspaces at all → empty vec.
+    /// FBM-1: Empty input - no workspaces at all → empty vec.
     #[test]
     fn test_find_best_move_empty_input_returns_empty() {
         let result = find_best_move(&[], 9, STABILITY_THRESHOLD);
@@ -1043,7 +1482,7 @@ mod tests {
         );
     }
 
-    /// FBM-2: Score-zero env — no move fires.
+    /// FBM-2: Score-zero env - no move fires.
     ///
     /// A single workspace with score 0.0 has no profitable compaction
     /// (NB = 0 × disc_diff = 0, which does not beat `best_nb` initialised to 0.0)
@@ -1070,7 +1509,7 @@ mod tests {
     ///    disc(1) = 1.0, disc(5) = 1/log2(6) ≈ 0.387
     ///    NB ≈ 0.8 × 0.613 − 0.05 ≈ 0.440 > 0  ✓
     ///
-    /// Expected: two rename pairs — low-score-env from slot 1 → slot 5 first,
+    /// Expected: two rename pairs - low-score-env from slot 1 → slot 5 first,
     /// then high-score-env from slot 5 → slot 1.
     #[test]
     fn test_find_best_move_score_swap_between_two_occupied_slots() {
@@ -1158,7 +1597,7 @@ mod tests {
         );
     }
 
-    /// FBM-5: Compaction — empty slot ≤ max_shortcut_slot, env at slot > max_shortcut_slot.
+    /// FBM-5: Compaction - empty slot ≤ max_shortcut_slot, env at slot > max_shortcut_slot.
     ///
     /// slot 11: my-env, score = 0.9
     /// Slots 1–9: all empty (no WorkspaceSlots for those slots).
@@ -1250,14 +1689,14 @@ mod tests {
         );
     }
 
-    /// FBM-9: Multiple candidates — picks the highest NetBenefit.
+    /// FBM-9: Multiple candidates - picks the highest NetBenefit.
     ///
     /// Candidates:
-    ///   A — compaction: env at slot 7, score = 0.8, empty slot 1.
+    ///   A - compaction: env at slot 7, score = 0.8, empty slot 1.
     ///       NB_A = 0.8 × (disc(1) − disc(7)) − 0.05
     ///            = 0.8 × (1.0 − 0.356) − 0.05 ≈ 0.8 × 0.644 − 0.05 ≈ 0.465
     ///
-    ///   B — score-swap: slot 2: low-score-env (0.1) ↔ slot 3: mid-score-env (0.5).
+    ///   B - score-swap: slot 2: low-score-env (0.1) ↔ slot 3: mid-score-env (0.5).
     ///       NB_B = (0.5 − 0.1) × (disc(2) − disc(3)) − 0.05
     ///            = 0.4 × (0.631 − 0.5) − 0.05 ≈ 0.4 × 0.131 − 0.05 ≈ 0.002 > 0
     ///
@@ -1370,7 +1809,7 @@ mod tests {
         );
     }
 
-    /// FBM-11: Internal shortcut gap — compaction fills a gap inside the shortcut range,
+    /// FBM-11: Internal shortcut gap - compaction fills a gap inside the shortcut range,
     /// not just before the minimum occupied shortcut slot.
     ///
     /// The original "within-shortcut" branch only targeted slots BEFORE the minimum
@@ -1382,20 +1821,20 @@ mod tests {
     ///   slot 2: env-b, score = 0.9
     ///   slot 3: env-c, score = 0.9
     ///   slot 7: env-d, score = 0.9
-    ///   (slot 5 is empty — internal gap)
+    ///   (slot 5 is empty - internal gap)
     ///
     /// NB for env-d (slot 7) → slot 5 (empty):
     ///   NB = 0.9 × (disc(5) - disc(7)) - 0.05
     ///      disc(5) = 1/log2(6) ≈ 0.387
     ///      disc(7) = 1/log2(8) ≈ 0.333
-    ///      NB ≈ 0.9 × 0.054 - 0.05 ≈ -0.001 — likely below threshold
+    ///      NB ≈ 0.9 × 0.054 - 0.05 ≈ -0.001 - likely below threshold
     ///
     /// Use slot 4 (empty) instead, and env at slot 8:
     ///   slot 1: env-a, score = 0.9
     ///   slot 2: env-b, score = 0.9
     ///   slot 3: env-c, score = 0.9
     ///   slot 8: env-d, score = 0.9
-    ///   (slot 4 is empty — internal gap between 3 and 8)
+    ///   (slot 4 is empty - internal gap between 3 and 8)
     ///
     /// NB for env-d (slot 8) → slot 4 (empty):
     ///   NB = 0.9 × (disc(4) - disc(8)) - 0.05
@@ -1494,7 +1933,7 @@ mod tests {
         );
     }
 
-    /// FBM-12: Score-swap pair ordering — the lower-slot env moves OUT first.
+    /// FBM-12: Score-swap pair ordering - the lower-slot env moves OUT first.
     ///
     /// i3 identifies workspaces by name, so both cannot share a name even momentarily.
     /// The correct order is:
@@ -1552,7 +1991,7 @@ mod tests {
     //
     // These tests require `WorkspaceSlot` to have a `managed: bool` field.
     // The `ws!` macro and helpers below will fail to COMPILE until that field
-    // is added — the compile error IS the expected "red" state for a data model
+    // is added - the compile error IS the expected "red" state for a data model
     // change under TDD.
 
     /// Build a `Vec<WorkspaceSlot>` using a compact fixture syntax.
@@ -1685,7 +2124,7 @@ mod tests {
         }
     }
 
-    /// T1 — Unmanaged slot blocks compaction (THIS IS THE BUG TEST).
+    /// T1 - Unmanaged slot blocks compaction (THIS IS THE BUG TEST).
     ///
     /// Real-session fixture:
     ///   slot 1: unmanaged  (bare "1" workspace, not managed by enwiro)
@@ -1733,7 +2172,7 @@ mod tests {
         }
     }
 
-    /// T2 — Compaction into a truly empty slot fires correctly (ws! macro smoke test).
+    /// T2 - Compaction into a truly empty slot fires correctly (ws! macro smoke test).
     ///
     /// All slots 1–3 are genuinely absent from the slice (no WorkspaceSlot at all),
     /// so they are empty. The algorithm must compact the lowest-numbered env that
@@ -1772,14 +2211,14 @@ mod tests {
         );
     }
 
-    /// T3 — All-managed base fixture converges to a fixed point.
+    /// T3 - All-managed base fixture converges to a fixed point.
     ///
-    /// Same score distribution as T1 but WITHOUT the unmanaged slot — all entries
+    /// Same score distribution as T1 but WITHOUT the unmanaged slot - all entries
     /// are managed. Starting layout has a gap (slot 7 empty) and apple buried at slot 4.
     ///
     /// The algorithm guarantees:
     ///   1. A true fixed point is reached.
-    ///   2. apple (0.94, highest score, starts at slot 4) compacts to slot 1 — the
+    ///   2. apple (0.94, highest score, starts at slot 4) compacts to slot 1 - the
     ///      NB for that move (≈ 0.535) is far above STABILITY_THRESHOLD, so it always fires.
     ///   3. All 6 envs compact into contiguous slots 1–6 (slot 7 gap gets filled).
     ///
@@ -1833,7 +2272,7 @@ mod tests {
         );
     }
 
-    /// T5 — Activate: new env placed at free_num must reach a shortcut slot via
+    /// T5 - Activate: new env placed at free_num must reach a shortcut slot via
     /// convergence with no stability threshold.
     ///
     /// Two bugs compound when a new env lands at free_num > max_shortcut_slot:
@@ -1845,18 +2284,18 @@ mod tests {
     ///   Bug B (threshold): `STABILITY_THRESHOLD` makes score-swaps from slot > 9 into
     ///   slot ≤ 9 impossible when the slots are close together in disc space.
     ///
-    /// Fix: Activate must call `find_best_move(..., 0.0)` (no threshold — explicit user
+    /// Fix: Activate must call `find_best_move(..., 0.0)` (no threshold - explicit user
     /// intent, no thrash risk) and loop to convergence.
     ///
     /// Concrete scenario (all slots 1–9 occupied):
-    ///   slot 9: chezmoi @ 0.95 — high score, badly placed (drives a big first-round swap)
-    ///   slot 1: apple   @ 0.10 — low score  → chezmoi↔apple NB ≈ 0.544 (wins round 1)
-    ///   slot 10: kiwi   @ 0.80 — new env    → kiwi↔enwiro  NB ≈ 0.068 (wins round 2)
+    ///   slot 9: chezmoi @ 0.95 - high score, badly placed (drives a big first-round swap)
+    ///   slot 1: apple   @ 0.10 - low score  → chezmoi↔apple NB ≈ 0.544 (wins round 1)
+    ///   slot 10: kiwi   @ 0.80 - new env    → kiwi↔enwiro  NB ≈ 0.068 (wins round 2)
     ///
     /// After full convergence with threshold=0.0, kiwi reaches slot ≤ 9. ✓
     ///
     /// NOTE: Calls `find_best_move` with a third `stability_threshold: f64` argument
-    /// that does not exist yet — will fail to COMPILE until the parameter is added.
+    /// that does not exist yet - will fail to COMPILE until the parameter is added.
     #[test]
     fn test_new_env_gets_shortcut_slot_after_activate() {
         // All shortcut slots 1–9 occupied. "kiwi" is the new env placed at free_num = 10.
@@ -1902,7 +2341,7 @@ mod tests {
         );
     }
 
-    /// T6 — Cross-boundary swap (slot > max_shortcut_slot → slot ≤ max_shortcut_slot)
+    /// T6 - Cross-boundary swap (slot > max_shortcut_slot → slot ≤ max_shortcut_slot)
     /// fires with `stability_threshold=0.0` but is blocked by `STABILITY_THRESHOLD`.
     ///
     /// Models the real production scenario (observed in logs 2026-04-16):
@@ -1914,7 +2353,7 @@ mod tests {
     ///   - but with threshold=0.0: NB = 0.129×0.078 = 0.010 > 0 → swap fires ✓
     ///
     /// NOTE: Calls `find_best_move` with a third `stability_threshold: f64` argument
-    /// that does not exist yet — will fail to COMPILE until the parameter is added.
+    /// that does not exist yet - will fail to COMPILE until the parameter is added.
     #[test]
     fn test_cross_boundary_swap_fires_without_stability_threshold() {
         let slots = ws![
@@ -1963,7 +2402,7 @@ mod tests {
         );
     }
 
-    /// T7 — Score-zero new env is boosted into the shortcut zone.
+    /// T7 - Score-zero new env is boosted into the shortcut zone.
     ///
     /// A brand-new env (score 0.0) lands at free_num = 10 while all nine shortcut
     /// slots are occupied by managed envs. Without a score boost, `find_best_move`
@@ -2011,7 +2450,7 @@ mod tests {
         );
     }
 
-    /// T8 — Score boost causes exactly one swap: the worst shortcut env is displaced,
+    /// T8 - Score boost causes exactly one swap: the worst shortcut env is displaced,
     /// all others stay put (shortcut stability).
     ///
     /// Same fixture as T7. After boost + convergence:
@@ -2072,7 +2511,7 @@ mod tests {
         }
     }
 
-    /// T9 — When all shortcut slots are unmanaged, boost is skipped and the new
+    /// T9 - When all shortcut slots are unmanaged, boost is skipped and the new
     /// env stays at its free slot.
     ///
     /// `boost_incoming_score` finds no managed env in slots 1–9, so
@@ -2107,7 +2546,7 @@ mod tests {
         );
     }
 
-    /// T4 — No-op when already at a fixed point (all envs in score-descending slot order,
+    /// T4 - No-op when already at a fixed point (all envs in score-descending slot order,
     /// no gaps between them).
     ///
     ///   slot 1: "apple"   @ 0.94
@@ -2131,7 +2570,7 @@ mod tests {
 
         // Verify numerically that NB < 0 for any swap of adjacent envs.
         // Swapping apple (slot 1, 0.94) ↔ banana (slot 2, 0.71) would put
-        // lower-score banana at slot 1 and higher-score apple at slot 2 — never chosen.
+        // lower-score banana at slot 1 and higher-score apple at slot 2 - never chosen.
         // The algorithm only swaps when score_hi > score_lo AND env at lower slot is
         // lower-scored, which cannot happen in a perfectly sorted layout.
         //

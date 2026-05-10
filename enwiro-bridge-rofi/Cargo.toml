@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
-enwiro-logging.workspace = true
+enwiro-sdk.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing.workspace = true

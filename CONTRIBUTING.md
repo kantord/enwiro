@@ -7,7 +7,7 @@
 
 ## Understanding the Plugin Architecture
 
-Enwiro uses a plugin system where all crates except `enwiro` (core) and `enwiro-logging` (shared library) are **standalone binaries** discovered at runtime by naming convention (`enwiro-cookbook-*`, `enwiro-adapter-*`, `enwiro-bridge-*`).
+Enwiro uses a plugin system where all crates except `enwiro` (core) and `enwiro-sdk` (shared library — schema types, logging, plugin protocol helpers) are **standalone binaries** discovered at runtime by naming convention (`enwiro-cookbook-*`, `enwiro-adapter-*`, `enwiro-bridge-*`).
 
 Plugins communicate via subprocess — the core calls the plugin binary and reads stdout. This means that to manually test changes end-to-end, the modified binary must be installed in your `$PATH` (typically `~/.cargo/bin/`).
 

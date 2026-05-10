@@ -225,7 +225,7 @@ mod tests {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-bridge-rofi.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-bridge-rofi.log");
 
     let rofi_retv = env::var("ROFI_RETV").unwrap_or_else(|_| "0".to_string());
     let args: Vec<String> = env::args().collect();

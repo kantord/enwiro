@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -44,6 +45,7 @@ pub struct GithubItem {
 enum EnwiroCookbookGithub {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
+    Gear(GearArgs),
     Metadata,
 }
 
@@ -52,6 +54,11 @@ pub struct ListRecipesArgs {}
 
 #[derive(clap::Args)]
 pub struct CookArgs {
+    recipe_name: String,
+}
+
+#[derive(clap::Args)]
+pub struct GearArgs {
     recipe_name: String,
 }
 
@@ -454,7 +461,7 @@ fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
         return Ok(name.strip_prefix("origin/").unwrap_or(name).to_string());
     }
 
-    // origin/HEAD not set — try common default branch names
+    // origin/HEAD not set - try common default branch names
     tracing::warn!("origin/HEAD is not set, probing for default branch");
     for candidate in ["main", "master"] {
         if repo
@@ -599,6 +606,83 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Per-kind constants for the gear emitter. `worktree_subdir` doubles as
+/// the gear name in the emitted schema (e.g. `pr` worktrees → `"pr"` gear,
+/// `issue` worktrees → `"issue"` gear). `url_subdir` is the GitHub URL
+/// path segment (`pull` vs `issues`).
+struct GearKind {
+    worktree_subdir: &'static str,
+    description_prefix: &'static str,
+    page_description: &'static str,
+    url_subdir: &'static str,
+}
+
+const PR_KIND: GearKind = GearKind {
+    worktree_subdir: "pr",
+    description_prefix: "Pull request",
+    page_description: "Open the PR page",
+    url_subdir: "pull",
+};
+
+const ISSUE_KIND: GearKind = GearKind {
+    worktree_subdir: "issue",
+    description_prefix: "Issue",
+    page_description: "Open the issue page",
+    url_subdir: "issues",
+};
+
+fn build_gear_file_for_kind(
+    kind: &GearKind,
+    repo: &str,
+    number: u64,
+) -> enwiro_sdk::gear::GearFileData {
+    use enwiro_sdk::gear::{Gear, GearFileData, SCHEMA_VERSION, WebEntry};
+    use std::collections::HashMap;
+
+    let page = WebEntry {
+        description: kind.page_description.to_string(),
+        url: format!("https://github.com/{repo}/{}/{number}", kind.url_subdir),
+    };
+    let gear_entry = Gear {
+        description: format!("{} #{number} on {repo}", kind.description_prefix),
+        web: HashMap::from([("page".to_string(), page)]),
+    };
+    GearFileData {
+        version: SCHEMA_VERSION,
+        gear: HashMap::from([(kind.worktree_subdir.to_string(), gear_entry)]),
+    }
+}
+
+fn gear_with_writer<W: Write>(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+    number: u64,
+    writer: &mut W,
+) -> anyhow::Result<()> {
+    for kind in [&PR_KIND, &ISSUE_KIND] {
+        let path = worktree_path(config, repo_config, repo_str, kind.worktree_subdir, number)?;
+        if path.exists() {
+            let file = build_gear_file_for_kind(kind, &repo_config.repo, number);
+            serde_json::to_writer(writer, &file)?;
+            return Ok(());
+        }
+    }
+    anyhow::bail!("No worktree found for {}#{}", repo_str, number)
+}
+
+fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
+    let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
+    let repo_config = resolve_repo_config(repo_str)?;
+    gear_with_writer(
+        config,
+        &repo_config,
+        repo_str,
+        number,
+        &mut std::io::stdout(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_build_search_query_issue_omits_date_filter() {
-        // Assigned issues should never be silently excluded by a date filter —
+        // Assigned issues should never be silently excluded by a date filter -
         // old issues that are still assigned should always appear.
         let repos = vec!["kantord/enwiro".to_string()];
         let query = build_search_query(&repos, "is:issue is:open assignee:@me");
@@ -1268,10 +1352,102 @@ mod tests {
             "Expected Err for a real gh failure, but got Ok"
         );
     }
+
+    mod gear_subcommand {
+        use super::*;
+
+        /// Set up a `(config, repo_config, tmp)` triple for gear tests. The
+        /// returned tempdir keeps `config.worktree_dir` and the local repo
+        /// path alive for the test's lifetime.
+        fn setup_gear_test() -> (ConfigurationValues, RepoConfig, tempfile::TempDir) {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let local_path = tmp.path().join("enwiro");
+            std::fs::create_dir(&local_path).unwrap();
+            let repo_config = RepoConfig {
+                repo: "kantord/enwiro".to_string(),
+                local_path,
+            };
+            let config = ConfigurationValues {
+                worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+            };
+            (config, repo_config, tmp)
+        }
+
+        /// Run `gear_with_writer` with a worktree of `kind` (`"pr"` or
+        /// `"issue"`) pre-created, and assert the emitted JSON matches
+        /// `expected`. Captures the full happy-path shape so callers stay
+        /// declarative.
+        fn assert_gear_emits(kind: &str, number: u64, expected: serde_json::Value) {
+            let (config, repo_config, _tmp) = setup_gear_test();
+            let path = worktree_path(&config, &repo_config, "enwiro", kind, number).unwrap();
+            std::fs::create_dir_all(&path).unwrap();
+
+            let mut output = Vec::new();
+            gear_with_writer(&config, &repo_config, "enwiro", number, &mut output).unwrap();
+
+            let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(json, expected);
+        }
+
+        #[test]
+        fn outputs_pull_request_url_when_pr_worktree_exists() {
+            assert_gear_emits(
+                "pr",
+                42,
+                serde_json::json!({
+                    "version": 1,
+                    "gear": {
+                        "pr": {
+                            "description": "Pull request #42 on kantord/enwiro",
+                            "web": {
+                                "page": {
+                                    "description": "Open the PR page",
+                                    "url": "https://github.com/kantord/enwiro/pull/42"
+                                }
+                            }
+                        }
+                    }
+                }),
+            );
+        }
+
+        #[test]
+        fn outputs_issue_url_when_issue_worktree_exists() {
+            assert_gear_emits(
+                "issue",
+                309,
+                serde_json::json!({
+                    "version": 1,
+                    "gear": {
+                        "issue": {
+                            "description": "Issue #309 on kantord/enwiro",
+                            "web": {
+                                "page": {
+                                    "description": "Open the issue page",
+                                    "url": "https://github.com/kantord/enwiro/issues/309"
+                                }
+                            }
+                        }
+                    }
+                }),
+            );
+        }
+
+        #[test]
+        fn errors_when_no_worktree_exists() {
+            let (config, repo_config, _tmp) = setup_gear_test();
+            let mut output = Vec::new();
+            let result = gear_with_writer(&config, &repo_config, "enwiro", 42, &mut output);
+            assert!(
+                result.is_err(),
+                "Expected error when no worktree exists, but got Ok"
+            );
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-cookbook-github.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-cookbook-github.log");
 
     let args = EnwiroCookbookGithub::parse();
     let config: ConfigurationValues =
@@ -1284,6 +1460,9 @@ fn main() -> anyhow::Result<()> {
         }
         EnwiroCookbookGithub::Cook(args) => {
             cook(&config, args)?;
+        }
+        EnwiroCookbookGithub::Gear(args) => {
+            gear(&config, args)?;
         }
         EnwiroCookbookGithub::Metadata => {
             println!(r#"{{"defaultPriority":30}}"#);

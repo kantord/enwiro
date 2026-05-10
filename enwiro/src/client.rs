@@ -72,6 +72,14 @@ pub trait CookbookTrait {
     fn priority(&self) -> u32 {
         DEFAULT_PRIORITY
     }
+    /// Return optional gear configuration JSON for the given recipe.
+    /// If `Some(json)` is returned after cooking, it is written to
+    /// `<env>/gear.d/cookbook-<name>.json` (one file per cookbook),
+    /// where the env-side reader (`enwiro_sdk::gear::LoadedGear`)
+    /// merges every cookbook's contribution into one keyed map.
+    fn gear(&self, _recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
 }
 
 /// Sort cookbooks by priority (lower first), then alphabetically by name.
@@ -180,6 +188,37 @@ impl CookbookTrait for CookbookClient {
     fn priority(&self) -> u32 {
         self.metadata.default_priority.unwrap_or(DEFAULT_PRIORITY)
     }
+
+    /// Invoke the cookbook binary's optional `gear <recipe>` subcommand and
+    /// parse its stdout as JSON. Returns `Ok(None)` if the subcommand fails
+    /// for any reason (old cookbook that doesn't implement `gear`, exec
+    /// error, malformed JSON) so a missing or broken `gear` never blocks
+    /// cooking. Best-effort by design.
+    fn gear(&self, recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let output = match Command::new(&self.plugin.executable)
+            .arg("gear")
+            .arg(recipe)
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear exec failed");
+                return Ok(None);
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::debug!(cookbook = %self.plugin.name, recipe = %recipe, %stderr, "Cookbook gear subcommand returned non-zero");
+            return Ok(None);
+        }
+        match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            Ok(json) => Ok(Some(json)),
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear stdout was not valid JSON");
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -246,5 +285,67 @@ mod tests {
         let client =
             CookbookClient::with_metadata(mock_plugin("my-cookbook"), CookbookMetadata::default());
         assert_eq!(client.name(), "my-cookbook");
+    }
+
+    /// Build a CookbookClient backed by a temp-dir shell script that responds
+    /// to subcommands by echoing fixture text. The caller supplies the script
+    /// body; tempdir is returned so it stays alive for the lifetime of the test.
+    fn cookbook_client_from_script(script_body: &str) -> (tempfile::TempDir, CookbookClient) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-cookbook");
+        std::fs::write(&script, script_body).expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        let plugin = Plugin {
+            name: "fake".to_string(),
+            kind: PluginKind::Cookbook,
+            executable: script.to_string_lossy().into_owned(),
+        };
+        let client = CookbookClient::with_metadata(plugin, CookbookMetadata::default());
+        (dir, client)
+    }
+
+    /// `CookbookClient::gear` runs the binary's `gear <recipe>` subcommand
+    /// and parses stdout as JSON. Without this override, the trait default
+    /// returns `Ok(None)` and silently drops every cookbook's gear.
+    #[test]
+    fn test_gear_invokes_cookbook_subcommand_and_parses_stdout() {
+        let (_dir, client) = cookbook_client_from_script(
+            r#"#!/bin/sh
+case "$1" in
+    gear) echo '{"version":1,"gear":{"x":{"description":"y","web":{"p":{"description":"z","url":"https://example.com"}}}}}' ;;
+    *) echo "unexpected subcommand: $1" >&2; exit 1 ;;
+esac
+"#,
+        );
+        let value = client
+            .gear("some-recipe")
+            .expect("gear() should succeed when cookbook returns valid JSON")
+            .expect("gear() must return Some(json) when cookbook emits a payload");
+        assert_eq!(value["version"], 1);
+        assert_eq!(
+            value["gear"]["x"]["web"]["p"]["url"], "https://example.com",
+            "the cookbook's stdout must reach the caller verbatim - got {value}"
+        );
+    }
+
+    /// A cookbook that doesn't implement the `gear` subcommand must yield
+    /// `Ok(None)` (best-effort, no error), so old cookbooks keep working.
+    #[test]
+    fn test_gear_returns_none_when_subcommand_fails() {
+        let (_dir, client) = cookbook_client_from_script(
+            r#"#!/bin/sh
+echo "unsupported subcommand: $1" >&2
+exit 1
+"#,
+        );
+        let result = client
+            .gear("some-recipe")
+            .expect("gear() must not return Err for an unsupported subcommand");
+        assert!(
+            result.is_none(),
+            "old cookbooks (no gear subcommand) must surface as Ok(None); got {result:?}"
+        );
     }
 }

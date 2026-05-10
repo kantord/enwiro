@@ -71,17 +71,18 @@ impl<W: Write> CommandContext<W> {
                         &cached_cookbook,
                         cached_description.as_deref(),
                     );
+                    self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
                     return Ok(env);
                 }
                 tracing::warn!(name = %name, cookbook = %cached_cookbook, "Cache references cookbook not found in plugins");
             }
             Some(None) => {
-                // Cache is fresh but recipe not in it — fall through to slow path
+                // Cache is fresh but recipe not in it - fall through to slow path
                 // in case the cache is slightly stale (up to CACHE_MAX_AGE)
                 tracing::debug!(name = %name, "Recipe not found in cache, falling back to slow path");
             }
             None => {
-                // No cache available — fall through to slow path
+                // No cache available - fall through to slow path
             }
         }
 
@@ -96,6 +97,7 @@ impl<W: Write> CommandContext<W> {
                 let env = self.create_environment_symlink(name, &env_path)?;
                 let flat_name = name.replace('/', "-");
                 self.save_cook_metadata(&flat_name, cookbook.name(), recipe.description.as_deref());
+                self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
                 return Ok(env);
             }
         }
@@ -106,9 +108,9 @@ impl<W: Write> CommandContext<W> {
 
     /// Look up a recipe in the daemon cache.
     /// Returns:
-    /// - `Some(Some((cookbook, description)))` — cache is fresh and recipe was found
-    /// - `Some(None)` — cache is fresh but recipe is NOT in it
-    /// - `None` — no cache available (missing, stale, or error)
+    /// - `Some(Some((cookbook, description)))` - cache is fresh and recipe was found
+    /// - `Some(None)` - cache is fresh but recipe is NOT in it
+    /// - `None` - no cache available (missing, stale, or error)
     fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<Option<(String, Option<String>)>> {
         let runtime_dir = match &self.cache_dir {
             Some(dir) => dir.clone(),
@@ -131,6 +133,30 @@ impl<W: Write> CommandContext<W> {
     fn save_cook_metadata(&self, env_name: &str, cookbook: &str, description: Option<&str>) {
         let env_dir = Path::new(&self.config.workspaces_directory).join(env_name);
         crate::usage_stats::record_cook_metadata_per_env(&env_dir, cookbook, description);
+    }
+
+    fn write_gear_if_present(&self, cookbook: &dyn CookbookTrait, recipe: &str, flat_name: &str) {
+        match cookbook.gear(recipe) {
+            Ok(Some(json)) => {
+                let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
+                let gear_path = enwiro_sdk::gear::gear_dir(&env_dir)
+                    .join(enwiro_sdk::gear::gear_filename(cookbook.name()));
+                match serde_json::to_vec(&json) {
+                    Ok(bytes) => {
+                        if let Err(e) = crate::usage_stats::atomic_write(&gear_path, &bytes) {
+                            tracing::debug!(error = %e, "Failed to write gear file, continuing");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Failed to serialise gear JSON, continuing");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "Cookbook gear() returned error, continuing");
+            }
+        }
     }
 
     fn create_environment_symlink(
@@ -597,5 +623,66 @@ mod tests {
 
         let logs = notifications.borrow();
         assert_eq!(logs.len(), 0);
+    }
+
+    #[rstest]
+    fn test_cook_environment_writes_gear_file_to_cookbook_named_path(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        let gear_data = serde_json::json!({"tool": "nvim", "lsp": "rust-analyzer"});
+        context_object.cookbooks = vec![Box::new(
+            FakeCookbook::new(
+                "git",
+                vec!["my-project"],
+                vec![("my-project", cooked_dir.to_str().unwrap())],
+            )
+            .with_gear(gear_data.clone()),
+        )];
+
+        context_object.cook_environment("my-project").unwrap();
+
+        let gear_path = temp_dir
+            .path()
+            .join("my-project")
+            .join("gear.d")
+            .join("cookbook-git.json");
+        assert!(
+            gear_path.exists(),
+            "gear file should exist at gear.d/cookbook-<name>.json, expected {}",
+            gear_path.display()
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&gear_path).unwrap()).unwrap();
+        assert_eq!(written, gear_data);
+    }
+
+    #[rstest]
+    fn test_cook_environment_does_not_create_gear_dir_when_cookbook_returns_none(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        // FakeCookbook with no gear (default behaviour)
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project", cooked_dir.to_str().unwrap())],
+        ))];
+
+        context_object.cook_environment("my-project").unwrap();
+
+        let gear_dir = temp_dir.path().join("my-project").join("gear.d");
+        assert!(
+            !gear_dir.exists(),
+            "gear.d/ should NOT exist when cookbook returns no gear"
+        );
     }
 }
