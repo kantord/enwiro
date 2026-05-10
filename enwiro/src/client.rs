@@ -73,8 +73,10 @@ pub trait CookbookTrait {
         DEFAULT_PRIORITY
     }
     /// Return optional gear configuration JSON for the given recipe.
-    /// If `Some(json)` is returned after cooking, it will be written to
-    /// `gear.json` inside the environment directory.
+    /// If `Some(json)` is returned after cooking, it is written to
+    /// `<env>/gear.d/cookbook-<name>.json` (one file per cookbook),
+    /// where the env-side reader (`enwiro_sdk::gear::LoadedGear`)
+    /// merges every cookbook's contribution into one keyed map.
     fn gear(&self, _recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
         Ok(None)
     }
@@ -304,12 +306,9 @@ mod tests {
         (dir, client)
     }
 
-    /// **Regression test for the missing CookbookClient::gear override.**
-    /// External cookbook plugins expose an optional `gear <recipe>` subcommand
-    /// that emits a JSON payload (the cookbook's `gear.d/cookbook-<name>.json`
-    /// contribution). The client must invoke it and parse stdout — the
-    /// trait-default `Ok(None)` dropped the payload silently, leaving cooked
-    /// envs without a `gear.d/` directory even when the cookbook supported it.
+    /// `CookbookClient::gear` runs the binary's `gear <recipe>` subcommand
+    /// and parses stdout as JSON. Without this override, the trait default
+    /// returns `Ok(None)` and silently drops every cookbook's gear.
     #[test]
     fn test_gear_invokes_cookbook_subcommand_and_parses_stdout() {
         let (_dir, client) = cookbook_client_from_script(
@@ -327,7 +326,7 @@ esac
         assert_eq!(value["version"], 1);
         assert_eq!(
             value["gear"]["x"]["web"]["p"]["url"], "https://example.com",
-            "the cookbook's stdout must reach the caller verbatim — got {value}"
+            "the cookbook's stdout must reach the caller verbatim - got {value}"
         );
     }
 

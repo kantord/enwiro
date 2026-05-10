@@ -4,25 +4,8 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::plugin::{PluginKind, get_plugins};
+use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo};
 use enwiro_sdk::gear::Gear;
-
-/// Wire format version for the activate stdin payload. Bump when the payload
-/// shape changes in a backward-incompatible way; adapters can match on this
-/// to support multiple core versions.
-pub const ACTIVATE_PAYLOAD_VERSION: u32 = 1;
-
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct ManagedEnvInfo {
-    pub name: String,
-    pub slot_score: f64,
-}
-
-#[derive(serde::Serialize)]
-struct ActivatePayload<'a> {
-    version: u32,
-    managed_envs: &'a [ManagedEnvInfo],
-    gear: &'a HashMap<String, Gear>,
-}
 
 pub trait EnwiroAdapterTrait {
     fn get_active_environment_name(&self) -> anyhow::Result<String>;
@@ -62,11 +45,7 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
         gear: &HashMap<String, Gear>,
     ) -> anyhow::Result<()> {
         tracing::debug!(name = %name, "Activating workspace via adapter");
-        let payload = ActivatePayload {
-            version: ACTIVATE_PAYLOAD_VERSION,
-            managed_envs,
-            gear,
-        };
+        let payload = ActivatePayload::from_owned(managed_envs.to_vec(), gear);
         let stdin_json =
             serde_json::to_string(&payload).context("Could not serialize activate payload")?;
 
@@ -132,6 +111,7 @@ impl EnwiroAdapterTrait for EnwiroAdapterNone {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use enwiro_sdk::adapter::ACTIVATE_PAYLOAD_VERSION;
 
     /// The activate stdin payload must be a structured object containing
     /// `version`, `managed_envs`, and `gear` fields. Adapters depend on this
@@ -150,11 +130,7 @@ mod tests {
                 web: HashMap::new(),
             },
         );
-        let payload = ActivatePayload {
-            version: ACTIVATE_PAYLOAD_VERSION,
-            managed_envs: &envs,
-            gear: &gear,
-        };
+        let payload = ActivatePayload::from_owned(envs, &gear);
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
 

@@ -77,12 +77,12 @@ impl<W: Write> CommandContext<W> {
                 tracing::warn!(name = %name, cookbook = %cached_cookbook, "Cache references cookbook not found in plugins");
             }
             Some(None) => {
-                // Cache is fresh but recipe not in it — fall through to slow path
+                // Cache is fresh but recipe not in it - fall through to slow path
                 // in case the cache is slightly stale (up to CACHE_MAX_AGE)
                 tracing::debug!(name = %name, "Recipe not found in cache, falling back to slow path");
             }
             None => {
-                // No cache available — fall through to slow path
+                // No cache available - fall through to slow path
             }
         }
 
@@ -108,9 +108,9 @@ impl<W: Write> CommandContext<W> {
 
     /// Look up a recipe in the daemon cache.
     /// Returns:
-    /// - `Some(Some((cookbook, description)))` — cache is fresh and recipe was found
-    /// - `Some(None)` — cache is fresh but recipe is NOT in it
-    /// - `None` — no cache available (missing, stale, or error)
+    /// - `Some(Some((cookbook, description)))` - cache is fresh and recipe was found
+    /// - `Some(None)` - cache is fresh but recipe is NOT in it
+    /// - `None` - no cache available (missing, stale, or error)
     fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<Option<(String, Option<String>)>> {
         let runtime_dir = match &self.cache_dir {
             Some(dir) => dir.clone(),

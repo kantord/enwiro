@@ -4,6 +4,7 @@
 //! plugins both depend on: logging setup, the `gear` schema and on-disk
 //! conventions, and any future plugin-protocol types.
 
+pub mod adapter;
 pub mod gear;
 pub mod logging;
 

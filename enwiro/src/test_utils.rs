@@ -58,7 +58,7 @@ pub mod test_utilities {
         fn activate(
             &self,
             name: &str,
-            _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
+            _managed_envs: &[enwiro_sdk::adapter::ManagedEnvInfo],
             _gear: &std::collections::HashMap<String, enwiro_sdk::gear::Gear>,
         ) -> anyhow::Result<()> {
             self.activated.borrow_mut().push(name.to_string());

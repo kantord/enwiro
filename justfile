@@ -16,7 +16,7 @@ install-dev:
     fi
     installed=$(cargo install --list | grep -E '^enwiro' | awk '{print $1}')
     for crate in $installed; do
-        [ "$crate" = "enwiro-logging" ] && continue
+        [ "$crate" = "enwiro-sdk" ] && continue
         # The `enwiro` crate produces a binary named `enw`; all other crates
         # produce a binary matching their crate name.
         if [ "$crate" = "enwiro" ]; then
@@ -47,7 +47,7 @@ install-release:
     set -euo pipefail
     installed=$(cargo install --list | grep -E '^enwiro' | awk '{print $1}')
     for crate in $installed; do
-        [ "$crate" = "enwiro-logging" ] && continue
+        [ "$crate" = "enwiro-sdk" ] && continue
         echo "Installing $crate from crates.io..."
         cargo install "$crate" --force
     done

@@ -461,7 +461,7 @@ fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
         return Ok(name.strip_prefix("origin/").unwrap_or(name).to_string());
     }
 
-    // origin/HEAD not set — try common default branch names
+    // origin/HEAD not set - try common default branch names
     tracing::warn!("origin/HEAD is not set, probing for default branch");
     for candidate in ["main", "master"] {
         if repo
@@ -606,6 +606,83 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Per-kind constants for the gear emitter. `worktree_subdir` doubles as
+/// the gear name in the emitted schema (e.g. `pr` worktrees → `"pr"` gear,
+/// `issue` worktrees → `"issue"` gear). `url_subdir` is the GitHub URL
+/// path segment (`pull` vs `issues`).
+struct GearKind {
+    worktree_subdir: &'static str,
+    description_prefix: &'static str,
+    page_description: &'static str,
+    url_subdir: &'static str,
+}
+
+const PR_KIND: GearKind = GearKind {
+    worktree_subdir: "pr",
+    description_prefix: "Pull request",
+    page_description: "Open the PR page",
+    url_subdir: "pull",
+};
+
+const ISSUE_KIND: GearKind = GearKind {
+    worktree_subdir: "issue",
+    description_prefix: "Issue",
+    page_description: "Open the issue page",
+    url_subdir: "issues",
+};
+
+fn build_gear_file_for_kind(
+    kind: &GearKind,
+    repo: &str,
+    number: u64,
+) -> enwiro_sdk::gear::GearFileData {
+    use enwiro_sdk::gear::{Gear, GearFileData, SCHEMA_VERSION, WebEntry};
+    use std::collections::HashMap;
+
+    let page = WebEntry {
+        description: kind.page_description.to_string(),
+        url: format!("https://github.com/{repo}/{}/{number}", kind.url_subdir),
+    };
+    let gear_entry = Gear {
+        description: format!("{} #{number} on {repo}", kind.description_prefix),
+        web: HashMap::from([("page".to_string(), page)]),
+    };
+    GearFileData {
+        version: SCHEMA_VERSION,
+        gear: HashMap::from([(kind.worktree_subdir.to_string(), gear_entry)]),
+    }
+}
+
+fn gear_with_writer<W: Write>(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+    number: u64,
+    writer: &mut W,
+) -> anyhow::Result<()> {
+    for kind in [&PR_KIND, &ISSUE_KIND] {
+        let path = worktree_path(config, repo_config, repo_str, kind.worktree_subdir, number)?;
+        if path.exists() {
+            let file = build_gear_file_for_kind(kind, &repo_config.repo, number);
+            serde_json::to_writer(writer, &file)?;
+            return Ok(());
+        }
+    }
+    anyhow::bail!("No worktree found for {}#{}", repo_str, number)
+}
+
+fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
+    let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
+    let repo_config = resolve_repo_config(repo_str)?;
+    gear_with_writer(
+        config,
+        &repo_config,
+        repo_str,
+        number,
+        &mut std::io::stdout(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_build_search_query_issue_omits_date_filter() {
-        // Assigned issues should never be silently excluded by a date filter —
+        // Assigned issues should never be silently excluded by a date filter -
         // old issues that are still assigned should always appear.
         let repos = vec!["kantord/enwiro".to_string()];
         let query = build_search_query(&repos, "is:issue is:open assignee:@me");
@@ -1312,8 +1389,6 @@ mod tests {
             assert_eq!(json, expected);
         }
 
-        /// When a PR worktree exists, emit a v1 GearFile with a `pr` gear
-        /// pointing at the GitHub PR URL.
         #[test]
         fn outputs_pull_request_url_when_pr_worktree_exists() {
             assert_gear_emits(
@@ -1336,8 +1411,6 @@ mod tests {
             );
         }
 
-        /// When an issue worktree exists, emit a v1 GearFile with an `issue`
-        /// gear pointing at the GitHub issue URL.
         #[test]
         fn outputs_issue_url_when_issue_worktree_exists() {
             assert_gear_emits(
@@ -1360,8 +1433,6 @@ mod tests {
             );
         }
 
-        /// When neither a PR nor an issue worktree exists, `gear` must error
-        /// (the recipe has not been cooked yet).
         #[test]
         fn errors_when_no_worktree_exists() {
             let (config, repo_config, _tmp) = setup_gear_test();
@@ -1373,83 +1444,6 @@ mod tests {
             );
         }
     }
-}
-
-/// Per-kind constants for the gear emitter. `worktree_subdir` doubles as
-/// the gear name in the emitted schema (e.g. `pr` worktrees → `"pr"` gear,
-/// `issue` worktrees → `"issue"` gear). `url_subdir` is the GitHub URL
-/// path segment (`pull` vs `issues`).
-struct GearKind {
-    worktree_subdir: &'static str,
-    description_prefix: &'static str,
-    page_description: &'static str,
-    url_subdir: &'static str,
-}
-
-const PR_KIND: GearKind = GearKind {
-    worktree_subdir: "pr",
-    description_prefix: "Pull request",
-    page_description: "Open the PR page",
-    url_subdir: "pull",
-};
-
-const ISSUE_KIND: GearKind = GearKind {
-    worktree_subdir: "issue",
-    description_prefix: "Issue",
-    page_description: "Open the issue page",
-    url_subdir: "issues",
-};
-
-fn build_gear_file_for_kind(
-    kind: &GearKind,
-    repo: &str,
-    number: u64,
-) -> enwiro_sdk::gear::GearFileData {
-    use enwiro_sdk::gear::{Gear, GearFileData, SCHEMA_VERSION, WebEntry};
-    use std::collections::HashMap;
-
-    let page = WebEntry {
-        description: kind.page_description.to_string(),
-        url: format!("https://github.com/{repo}/{}/{number}", kind.url_subdir),
-    };
-    let gear_entry = Gear {
-        description: format!("{} #{number} on {repo}", kind.description_prefix),
-        web: HashMap::from([("page".to_string(), page)]),
-    };
-    GearFileData {
-        version: SCHEMA_VERSION,
-        gear: HashMap::from([(kind.worktree_subdir.to_string(), gear_entry)]),
-    }
-}
-
-fn gear_with_writer<W: Write>(
-    config: &ConfigurationValues,
-    repo_config: &RepoConfig,
-    repo_str: &str,
-    number: u64,
-    writer: &mut W,
-) -> anyhow::Result<()> {
-    for kind in [&PR_KIND, &ISSUE_KIND] {
-        let path = worktree_path(config, repo_config, repo_str, kind.worktree_subdir, number)?;
-        if path.exists() {
-            let file = build_gear_file_for_kind(kind, &repo_config.repo, number);
-            serde_json::to_writer(writer, &file)?;
-            return Ok(());
-        }
-    }
-    anyhow::bail!("No worktree found for {}#{}", repo_str, number)
-}
-
-fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
-    let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
-    let repo_config = resolve_repo_config(repo_str)?;
-    gear_with_writer(
-        config,
-        &repo_config,
-        repo_str,
-        number,
-        &mut std::io::stdout(),
-    )
 }
 
 fn main() -> anyhow::Result<()> {

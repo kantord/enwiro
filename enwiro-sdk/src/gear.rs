@@ -2,6 +2,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Wire version of the gear schema. Bumped when [`GearFileData`] /
 /// [`Gear`] / [`WebEntry`] change shape. Cookbook authors should set
@@ -43,7 +44,7 @@ fn deserialize_supported_version<'de, D: serde::Deserializer<'de>>(de: D) -> Res
 /// Wire format: the JSON contents of one `gear.d/cookbook-X.json` file.
 /// Cookbooks construct this and serialize it to stdout; readers
 /// deserialize it via serde. Does not carry runtime metadata like the
-/// file path — see `GearFile` for the on-disk-loaded wrapper.
+/// file path - see `GearFile` for the on-disk-loaded wrapper.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GearFileData {
@@ -119,7 +120,7 @@ impl LoadedGear {
     /// gear maps into one.
     ///
     /// Returns an empty `LoadedGear` if `gear.d/` does not exist. Files
-    /// that fail to read or parse are reported to stderr and skipped —
+    /// that fail to read or parse are logged at `WARN` and skipped -
     /// one bad file does not prevent the rest from loading. A gear name
     /// appearing in two files is a hard error.
     pub fn from_env_dir(env_dir: &Path) -> anyhow::Result<Self> {
@@ -151,7 +152,7 @@ impl LoadedGear {
             let file = match GearFile::from_path(&path) {
                 Ok(f) => f,
                 Err(err) => {
-                    eprintln!("warning: {err:#}");
+                    warn!(error = %format!("{err:#}"), "Skipping gear file");
                     continue;
                 }
             };
