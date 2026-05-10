@@ -516,6 +516,99 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
     .to_string()
 }
 
+/// First GUI activation for an env: create the i3 workspace, rebalance the
+/// slot layout, and fire the env's gear (web URLs today; GUI apps to come).
+/// Gear fires only on this path; re-activations of an existing env hit the
+/// switch-back branch in the activate handler and intentionally do not
+/// re-fire (would yank focus on single-instance native apps and multiply
+/// chromium app-mode windows).
+async fn activate_new_workspace(
+    i3: &mut I3,
+    workspaces: &[Workspace],
+    payload: &ActivatePayload,
+    env_name: &str,
+) -> anyhow::Result<()> {
+    // Find the lowest unused workspace number
+    let used_numbers: std::collections::HashSet<i32> = workspaces.iter().map(|ws| ws.num).collect();
+    let mut free_num = 1;
+    while used_numbers.contains(&free_num) {
+        free_num += 1;
+    }
+
+    // Build the slot list: existing managed workspaces + the incoming env at free_num.
+    let incoming_score = payload
+        .managed_envs
+        .iter()
+        .find(|e| e.name == env_name)
+        .map(|e| e.slot_score)
+        .unwrap_or(0.0);
+    let mut slots = build_workspace_slots(workspaces, &payload.managed_envs);
+    slots.push(WorkspaceSlot {
+        slot: free_num,
+        name: env_name.to_string(),
+        score: incoming_score,
+        managed: true,
+    });
+
+    // If the new env lands outside the shortcut zone with a low score,
+    // boost its effective score so it can always displace the worst
+    // managed shortcut env. This represents the "just activated" recency
+    // signal that hasn't been written to disk yet.
+    boost_incoming_score(&mut slots, env_name, 9);
+
+    // Create the workspace at free_num first so it exists in i3
+    // before any rename commands reference it.
+    let initial_workspace_name = format!("{}: {}", free_num, env_name);
+    tracing::info!(workspace = %initial_workspace_name, "Creating workspace at free slot");
+    run_i3_command(i3, build_workspace_command(&initial_workspace_name)).await?;
+
+    // Run find_best_move to convergence with no stability threshold
+    // (explicit user activation = no thrash risk, loop until stable).
+    let mut all_rename_cmds: Vec<(String, String)> = vec![];
+    loop {
+        let moves = find_best_move(&slots, 9, 0.0);
+        if moves.is_empty() {
+            break;
+        }
+        for (old_name, new_name) in &moves {
+            let new_slot: i32 = new_name
+                .split_once(": ")
+                .and_then(|(s, _)| s.parse().ok())
+                .unwrap_or(0);
+            if let Some(ws) = slots
+                .iter_mut()
+                .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
+            {
+                ws.slot = new_slot;
+            }
+        }
+        all_rename_cmds.extend(moves);
+    }
+
+    // Determine the final slot for the incoming env from the converged slot state.
+    let target_num = slots
+        .iter()
+        .find(|ws| ws.name == env_name)
+        .map(|ws| ws.slot)
+        .unwrap_or(free_num);
+
+    for (old_name, new_name) in all_rename_cmds {
+        tracing::info!(from = %old_name, to = %new_name, "Renaming workspace");
+        run_i3_command(i3, build_rename_workspace_command(&old_name, &new_name)).await?;
+    }
+
+    let workspace_name = format!("{}: {}", target_num, env_name);
+    tracing::info!(workspace = %workspace_name, num = target_num, "Focusing final workspace slot");
+    run_i3_command(i3, build_workspace_command(&workspace_name)).await?;
+
+    let web_open_command = adapter_config_path()
+        .map(|p| load_web_open_command(&p))
+        .unwrap_or_else(default_web_open_command);
+    open_gear_urls(&payload.gear, &web_open_command, env_name);
+
+    Ok(())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-adapter-i3wm.log");
@@ -537,104 +630,23 @@ async fn main() -> anyhow::Result<()> {
         }
         EnwiroAdapterI3WmCLI::Activate(args) => {
             let payload = read_activate_payload();
-            let managed_envs = payload.managed_envs;
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
             tracing::debug!(count = workspaces.len(), name = %args.name, "Activating environment");
 
-            // Check if a workspace with this environment name already exists
             if let Some(existing) = workspaces
                 .iter()
                 .find(|ws| extract_environment_name(ws) == args.name)
             {
+                // Switching back: gear was fired during the original
+                // first-creation activation and must not re-fire here (would
+                // yank focus on single-instance native apps and multiply
+                // chromium app-mode windows).
                 tracing::info!(workspace = %existing.name, "Found existing workspace");
                 run_i3_command(&mut i3, build_workspace_command(&existing.name)).await?;
             } else {
-                // Find the lowest unused workspace number
-                let used_numbers: std::collections::HashSet<i32> =
-                    workspaces.iter().map(|ws| ws.num).collect();
-                let mut free_num = 1;
-                while used_numbers.contains(&free_num) {
-                    free_num += 1;
-                }
-
-                // Build the slot list: existing managed workspaces + the incoming env at free_num.
-                let incoming_score = managed_envs
-                    .iter()
-                    .find(|e| e.name == args.name)
-                    .map(|e| e.slot_score)
-                    .unwrap_or(0.0);
-                let mut slots = build_workspace_slots(&workspaces, &managed_envs);
-                slots.push(WorkspaceSlot {
-                    slot: free_num,
-                    name: args.name.clone(),
-                    score: incoming_score,
-                    managed: true,
-                });
-
-                // If the new env lands outside the shortcut zone with a low score,
-                // boost its effective score so it can always displace the worst
-                // managed shortcut env. This represents the "just activated" recency
-                // signal that hasn't been written to disk yet.
-                boost_incoming_score(&mut slots, &args.name, 9);
-
-                // Create the workspace at free_num first so it exists in i3
-                // before any rename commands reference it.
-                let initial_workspace_name = format!("{}: {}", free_num, args.name);
-                tracing::info!(workspace = %initial_workspace_name, "Creating workspace at free slot");
-                run_i3_command(&mut i3, build_workspace_command(&initial_workspace_name)).await?;
-
-                // Run find_best_move to convergence with no stability threshold
-                // (explicit user activation = no thrash risk, loop until stable).
-                let mut all_rename_cmds: Vec<(String, String)> = vec![];
-                loop {
-                    let moves = find_best_move(&slots, 9, 0.0);
-                    if moves.is_empty() {
-                        break;
-                    }
-                    for (old_name, new_name) in &moves {
-                        let new_slot: i32 = new_name
-                            .split_once(": ")
-                            .and_then(|(s, _)| s.parse().ok())
-                            .unwrap_or(0);
-                        if let Some(ws) = slots
-                            .iter_mut()
-                            .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
-                        {
-                            ws.slot = new_slot;
-                        }
-                    }
-                    all_rename_cmds.extend(moves);
-                }
-
-                // Determine the final slot for the incoming env from the converged slot state.
-                let target_num = slots
-                    .iter()
-                    .find(|ws| ws.name == args.name)
-                    .map(|ws| ws.slot)
-                    .unwrap_or(free_num);
-
-                for (old_name, new_name) in all_rename_cmds {
-                    tracing::info!(from = %old_name, to = %new_name, "Renaming workspace");
-                    run_i3_command(
-                        &mut i3,
-                        build_rename_workspace_command(&old_name, &new_name),
-                    )
-                    .await?;
-                }
-
-                let workspace_name = format!("{}: {}", target_num, args.name);
-                tracing::info!(workspace = %workspace_name, num = target_num, "Focusing final workspace slot");
-                run_i3_command(&mut i3, build_workspace_command(&workspace_name)).await?;
+                activate_new_workspace(&mut i3, &workspaces, &payload, &args.name).await?;
             }
-
-            // After the workspace is focused, open any web URLs declared in
-            // the env's gear so they land in this workspace. Failures are
-            // logged inside; activation never fails on auto-open issues.
-            let web_open_command = adapter_config_path()
-                .map(|p| load_web_open_command(&p))
-                .unwrap_or_else(default_web_open_command);
-            open_gear_urls(&payload.gear, &web_open_command, &args.name);
         }
         EnwiroAdapterI3WmCLI::Listen(listen_args) => {
             let debounce = std::time::Duration::from_secs(listen_args.debounce_secs);
