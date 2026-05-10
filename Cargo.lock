@@ -628,6 +628,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "enwiro-cookbook-obsidian"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "enwiro-sdk",
+ "home",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "enwiro-sdk"
 version = "0.1.0"
 dependencies = [
