@@ -116,6 +116,7 @@ List of currently available cookbooks:
 - `enwiro-cookbook-chezmoi`: Use your chezmoi source directory as an environment
 - `enwiro-cookbook-git`: Generate environments using Git repositories
 - `enwiro-cookbook-github`: Discover repositories from GitHub using the GraphQL API
+- `enwiro-cookbook-obsidian`: Discover Obsidian vaults and auto-open Obsidian/Zotero on activation
 
 ### Bridge
 
