@@ -1404,8 +1404,8 @@ fn build_gear_file_for_kind(
     kind: &GearKind,
     repo: &str,
     number: u64,
-) -> enwiro_sdk::gear::GearFile {
-    use enwiro_sdk::gear::{Gear, GearFile, SCHEMA_VERSION, WebEntry};
+) -> enwiro_sdk::gear::GearFileData {
+    use enwiro_sdk::gear::{Gear, GearFileData, SCHEMA_VERSION, WebEntry};
     use std::collections::HashMap;
 
     let page = WebEntry {
@@ -1416,7 +1416,7 @@ fn build_gear_file_for_kind(
         description: format!("{} #{number} on {repo}", kind.description_prefix),
         web: HashMap::from([("page".to_string(), page)]),
     };
-    GearFile {
+    GearFileData {
         version: SCHEMA_VERSION,
         gear: HashMap::from([(kind.worktree_subdir.to_string(), gear_entry)]),
     }

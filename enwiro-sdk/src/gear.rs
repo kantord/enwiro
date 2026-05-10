@@ -3,15 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Wire version of the gear schema. Bumped when `GearFile` / `Gear` /
-/// `WebEntry` change shape. Cookbook authors should set
-/// `GearFile { version: SCHEMA_VERSION, ... }` to ride future upgrades
-/// rather than hardcoding a literal.
+/// Wire version of the gear schema. Bumped when [`GearFileData`] /
+/// [`Gear`] / [`WebEntry`] change shape. Cookbook authors should set
+/// `GearFileData { version: SCHEMA_VERSION, ... }` to ride future
+/// upgrades rather than hardcoding a literal.
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Subdirectory inside an env where gear files live. Each cookbook drops
 /// its contribution as a single file under this directory; the reader
-/// merges them gear-atomically (see `read_gear_dir`).
+/// merges them gear-atomically (see [`LoadedGear::from_env_dir`]).
 pub const GEAR_DIR_NAME: &str = "gear.d";
 
 /// Resolve the gear drop-in directory for an env.
@@ -25,11 +25,66 @@ pub fn gear_filename(cookbook_name: &str) -> String {
     format!("cookbook-{cookbook_name}.json")
 }
 
+/// Validate the wire-format `version` field at deserialize time. A schema
+/// version this build does not understand fails parsing immediately with
+/// a clear message, instead of producing misleading "missing field X"
+/// errors when v2-shaped data hits v1's struct shape.
+fn deserialize_supported_version<'de, D: serde::Deserializer<'de>>(de: D) -> Result<u32, D::Error> {
+    let v = u32::deserialize(de)?;
+    if v == SCHEMA_VERSION {
+        Ok(v)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "unsupported gear schema version {v}; this build of enwiro-sdk handles version {SCHEMA_VERSION}"
+        )))
+    }
+}
+
+/// Wire format: the JSON contents of one `gear.d/cookbook-X.json` file.
+/// Cookbooks construct this and serialize it to stdout; readers
+/// deserialize it via serde. Does not carry runtime metadata like the
+/// file path — see `GearFile` for the on-disk-loaded wrapper.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct GearFile {
+pub struct GearFileData {
+    #[serde(deserialize_with = "deserialize_supported_version")]
     pub version: u32,
     pub gear: HashMap<String, Gear>,
+}
+
+/// A gear file as loaded from disk: its path on the filesystem paired
+/// with the parsed contents. The two bundle because the path is needed
+/// for diagnostics (collision error messages, debug logs) and travels
+/// naturally with the data once we've read it.
+pub struct GearFile {
+    pub path: PathBuf,
+    pub data: GearFileData,
+}
+
+impl GearFile {
+    /// Read and parse a single gear file from disk. The path is preserved
+    /// alongside the parsed data so callers can produce useful diagnostics
+    /// (e.g. collision errors that name both source files).
+    pub fn from_path(path: &Path) -> anyhow::Result<Self> {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("Could not read {}", path.display()))?;
+        let data: GearFileData = serde_json::from_str(&contents)
+            .with_context(|| format!("Could not parse {}", path.display()))?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            data,
+        })
+    }
+
+    /// Short label suitable for error messages and logs: the filename
+    /// component, falling back to the full display path when the filename
+    /// is missing or non-UTF-8.
+    pub fn label(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -47,76 +102,102 @@ pub struct WebEntry {
     pub url: String,
 }
 
-/// Read every `*.json` file in `<env_dir>/gear.d/` in lexicographic order,
-/// deserialize each into a `GearFile`, and merge their `gear` maps into one.
+/// All gear collected for an env, merged across every `gear.d/*.json`
+/// file. The merge is gear-atomic: a gear name appearing in two files
+/// is a hard error naming both source files.
 ///
-/// Returns an empty map if `gear.d/` does not exist. Files that fail to parse
-/// are logged to stderr and skipped — one bad file does not prevent the rest
-/// from loading. A gear name appearing in two files is a hard error.
-pub fn read_gear_dir(env_dir: &Path) -> anyhow::Result<HashMap<String, Gear>> {
-    let dir = gear_dir(env_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
-        Err(err) => {
-            return Err(err)
-                .with_context(|| format!("Could not read gear directory {}", dir.display()));
-        }
-    };
+/// Constructed via [`LoadedGear::from_env_dir`]. Cookbooks emit
+/// [`GearFileData`] (the wire-format type); the loader pairs each parsed
+/// file with its path via [`GearFile`] and produces a `LoadedGear`.
+pub struct LoadedGear {
+    gear: HashMap<String, Gear>,
+}
 
-    let mut paths: Vec<_> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    paths.sort();
-
-    let mut merged: HashMap<String, Gear> = HashMap::new();
-    let mut sources: HashMap<String, String> = HashMap::new();
-
-    for path in paths {
-        let file_label = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-
-        let contents = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
+impl LoadedGear {
+    /// Read every `*.json` file in `<env_dir>/gear.d/` in lexicographic
+    /// order, parse each via [`GearFile::from_path`], and merge their
+    /// gear maps into one.
+    ///
+    /// Returns an empty `LoadedGear` if `gear.d/` does not exist. Files
+    /// that fail to read or parse are reported to stderr and skipped —
+    /// one bad file does not prevent the rest from loading. A gear name
+    /// appearing in two files is a hard error.
+    pub fn from_env_dir(env_dir: &Path) -> anyhow::Result<Self> {
+        let dir = gear_dir(env_dir);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    gear: HashMap::new(),
+                });
+            }
             Err(err) => {
-                eprintln!("warning: could not read {}: {}", path.display(), err);
-                continue;
+                return Err(err)
+                    .with_context(|| format!("Could not read gear directory {}", dir.display()));
             }
         };
 
-        let parsed: GearFile = match serde_json::from_str(&contents) {
-            Ok(g) => g,
-            Err(err) => {
-                eprintln!("warning: could not parse {}: {}", path.display(), err);
-                continue;
-            }
-        };
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        paths.sort();
 
-        for (name, gear) in parsed.gear {
-            if let Some(other) = sources.get(&name) {
-                bail!(
-                    "Gear name '{}' is defined in both {} and {}",
-                    name,
-                    other,
-                    file_label
-                );
+        let mut merged: HashMap<String, Gear> = HashMap::new();
+        let mut sources: HashMap<String, String> = HashMap::new();
+
+        for path in paths {
+            let file = match GearFile::from_path(&path) {
+                Ok(f) => f,
+                Err(err) => {
+                    eprintln!("warning: {err:#}");
+                    continue;
+                }
+            };
+            let label = file.label();
+            for (name, gear) in file.data.gear {
+                if let Some(prior) = sources.get(&name) {
+                    bail!(
+                        "Gear name '{}' is defined in both {} and {}",
+                        name,
+                        prior,
+                        label
+                    );
+                }
+                sources.insert(name.clone(), label.clone());
+                merged.insert(name, gear);
             }
-            sources.insert(name.clone(), file_label.clone());
-            merged.insert(name, gear);
         }
+
+        Ok(Self { gear: merged })
     }
 
-    Ok(merged)
+    /// Consume the `LoadedGear` and yield the merged map. Callers that
+    /// just need the inner `HashMap` (e.g. the activate path passing
+    /// gear to the adapter) use this; future callers that want richer
+    /// access (`get`, iteration) can use the methods below.
+    pub fn into_map(self) -> HashMap<String, Gear> {
+        self.gear
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Gear> {
+        self.gear.get(name)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Gear)> {
+        self.gear.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.gear.is_empty()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     mod schema {
-        use super::super::{Gear, GearFile, WebEntry};
+        use super::super::{Gear, GearFileData, WebEntry};
         use rstest::rstest;
 
         /// Sample valid JSON document conforming to the gear schema.
@@ -139,7 +220,7 @@ mod tests {
 
         #[test]
         fn deserializes_valid_full_schema_into_gear_file() {
-            let parsed: GearFile = serde_json::from_str(valid_full_schema_json())
+            let parsed: GearFileData = serde_json::from_str(valid_full_schema_json())
                 .expect("valid schema must deserialize successfully");
 
             assert_eq!(parsed.version, 1, "version field must round-trip as 1");
@@ -190,8 +271,9 @@ mod tests {
                 "web": { "page": { "description": "Open the page",
                     "url": "https://example.com", "rogue": "value" } } } } }"#
         )]
+        #[case::unsupported_schema_version(r#"{ "version": 999, "gear": {} }"#)]
         fn rejects_invalid_schema(#[case] json: &str) {
-            let result: Result<GearFile, _> = serde_json::from_str(json);
+            let result: Result<GearFileData, _> = serde_json::from_str(json);
             assert!(result.is_err(), "expected rejection, got: {result:?}");
         }
 
@@ -206,7 +288,7 @@ mod tests {
                 }
             }"#;
 
-            let parsed: GearFile = serde_json::from_str(json)
+            let parsed: GearFileData = serde_json::from_str(json)
                 .expect("missing `web` should default to empty map, not error");
             let cli_only = parsed
                 .gear
@@ -220,8 +302,8 @@ mod tests {
         }
     }
 
-    mod read_gear_dir {
-        use super::super::{SCHEMA_VERSION, gear_dir, read_gear_dir};
+    mod loaded_gear {
+        use super::super::{LoadedGear, SCHEMA_VERSION, gear_dir};
         use std::fs;
 
         fn write_gear_file(env_dir: &std::path::Path, file_name: &str, gears_json: &str) {
@@ -250,7 +332,9 @@ mod tests {
         #[test]
         fn returns_empty_when_directory_missing() {
             let tmp = tempfile::tempdir().unwrap();
-            let result = read_gear_dir(tmp.path()).unwrap();
+            let result = LoadedGear::from_env_dir(tmp.path())
+                .map(LoadedGear::into_map)
+                .unwrap();
             assert!(result.is_empty(), "missing gear.d/ must yield empty map");
         }
 
@@ -263,7 +347,9 @@ mod tests {
                 &one_gear_json("pr", "PR #1"),
             );
 
-            let result = read_gear_dir(tmp.path()).unwrap();
+            let result = LoadedGear::from_env_dir(tmp.path())
+                .map(LoadedGear::into_map)
+                .unwrap();
 
             assert_eq!(result.len(), 1);
             assert_eq!(result["pr"].description, "PR #1");
@@ -280,7 +366,9 @@ mod tests {
             );
             write_gear_file(tmp.path(), "user.json", &one_gear_json("notes", "Notes"));
 
-            let result = read_gear_dir(tmp.path()).unwrap();
+            let result = LoadedGear::from_env_dir(tmp.path())
+                .map(LoadedGear::into_map)
+                .unwrap();
 
             assert_eq!(result.len(), 2);
             assert!(result.contains_key("pr"));
@@ -301,7 +389,9 @@ mod tests {
                 &one_gear_json("pr", "from z"),
             );
 
-            let err = read_gear_dir(tmp.path()).expect_err("collision must be an error");
+            let err = LoadedGear::from_env_dir(tmp.path())
+                .map(LoadedGear::into_map)
+                .expect_err("collision must be an error");
             let msg = format!("{err:#}");
 
             assert!(
@@ -330,7 +420,9 @@ mod tests {
                 &one_gear_json("pr", "PR"),
             );
 
-            let result = read_gear_dir(tmp.path()).unwrap();
+            let result = LoadedGear::from_env_dir(tmp.path())
+                .map(LoadedGear::into_map)
+                .unwrap();
 
             assert_eq!(result.len(), 1, "one good file must still be loaded");
             assert!(result.contains_key("pr"));
@@ -348,7 +440,9 @@ mod tests {
                 &one_gear_json("pr", "PR"),
             );
 
-            let result = read_gear_dir(tmp.path()).unwrap();
+            let result = LoadedGear::from_env_dir(tmp.path())
+                .map(LoadedGear::into_map)
+                .unwrap();
 
             assert_eq!(result.len(), 1);
         }

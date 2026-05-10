@@ -60,8 +60,8 @@ pub fn activate<W: Write>(
     // but any other failure (malformed file with a hard error, gear-name
     // collision across files, I/O error) deserves a user-visible notification
     // so it doesn't get masked by a silent default.
-    let gear = match enwiro_sdk::gear::read_gear_dir(&env_dir) {
-        Ok(g) => g,
+    let gear = match enwiro_sdk::gear::LoadedGear::from_env_dir(&env_dir) {
+        Ok(g) => g.into_map(),
         Err(e) => {
             context
                 .notifier
