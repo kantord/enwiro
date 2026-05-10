@@ -138,10 +138,9 @@ impl<W: Write> CommandContext<W> {
     fn write_gear_if_present(&self, cookbook: &dyn CookbookTrait, recipe: &str, flat_name: &str) {
         match cookbook.gear(recipe) {
             Ok(Some(json)) => {
-                let gear_path = Path::new(&self.config.workspaces_directory)
-                    .join(flat_name)
-                    .join("gear.d")
-                    .join(format!("cookbook-{}.json", cookbook.name()));
+                let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
+                let gear_path = enwiro_sdk::gear::gear_dir(&env_dir)
+                    .join(enwiro_sdk::gear::gear_filename(cookbook.name()));
                 match serde_json::to_vec(&json) {
                     Ok(bytes) => {
                         if let Err(e) = crate::usage_stats::atomic_write(&gear_path, &bytes) {

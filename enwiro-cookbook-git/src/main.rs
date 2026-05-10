@@ -1194,7 +1194,7 @@ mod tests {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-cookbook-git.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-cookbook-git.log");
 
     let args = EnwiroCookbookGit::parse();
     let config: ConfigurationValues =

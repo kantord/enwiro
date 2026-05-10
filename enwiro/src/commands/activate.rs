@@ -56,7 +56,7 @@ pub fn activate<W: Write>(
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
-    let gear = crate::gear::read_gear_dir(&env_dir).unwrap_or_default();
+    let gear = enwiro_sdk::gear::read_gear_dir(&env_dir).unwrap_or_default();
     if let Err(e) = context.adapter.activate(&args.name, &managed_envs, &gear) {
         context
             .notifier
@@ -97,7 +97,7 @@ mod tests {
             &self,
             _name: &str,
             managed_envs: &[ManagedEnvInfo],
-            _gear: &std::collections::HashMap<String, crate::gear::Gear>,
+            _gear: &std::collections::HashMap<String, enwiro_sdk::gear::Gear>,
         ) -> anyhow::Result<()> {
             *self.captured.borrow_mut() = managed_envs.to_vec();
             Ok(())
@@ -393,7 +393,7 @@ mod tests {
             &self,
             _name: &str,
             _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
-            _gear: &std::collections::HashMap<String, crate::gear::Gear>,
+            _gear: &std::collections::HashMap<String, enwiro_sdk::gear::Gear>,
         ) -> anyhow::Result<()> {
             let leaf = anyhow::anyhow!("leaf i3 IPC error: broken pipe");
             Err(leaf).map_err(|e| e.context("outer: Could not switch to workspace"))

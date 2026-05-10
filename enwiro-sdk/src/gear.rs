@@ -1,7 +1,29 @@
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Wire version of the gear schema. Bumped when `GearFile` / `Gear` /
+/// `WebEntry` change shape. Cookbook authors should set
+/// `GearFile { version: SCHEMA_VERSION, ... }` to ride future upgrades
+/// rather than hardcoding a literal.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Subdirectory inside an env where gear files live. Each cookbook drops
+/// its contribution as a single file under this directory; the reader
+/// merges them gear-atomically (see `read_gear_dir`).
+pub const GEAR_DIR_NAME: &str = "gear.d";
+
+/// Resolve the gear drop-in directory for an env.
+pub fn gear_dir(env_dir: &Path) -> PathBuf {
+    env_dir.join(GEAR_DIR_NAME)
+}
+
+/// Filename a given cookbook should write into `gear.d/`. Stable so the
+/// reader and writer agree on per-cookbook ownership of the file.
+pub fn gear_filename(cookbook_name: &str) -> String {
+    format!("cookbook-{cookbook_name}.json")
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -32,7 +54,7 @@ pub struct WebEntry {
 /// are logged to stderr and skipped — one bad file does not prevent the rest
 /// from loading. A gear name appearing in two files is a hard error.
 pub fn read_gear_dir(env_dir: &Path) -> anyhow::Result<HashMap<String, Gear>> {
-    let dir = env_dir.join("gear.d");
+    let dir = gear_dir(env_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
@@ -93,7 +115,7 @@ pub fn read_gear_dir(env_dir: &Path) -> anyhow::Result<HashMap<String, Gear>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gear, GearFile, WebEntry, read_gear_dir};
+    use super::{Gear, GearFile, SCHEMA_VERSION, WebEntry, gear_dir, read_gear_dir};
     use std::fs;
 
     /// Sample valid JSON document conforming to the gear schema.
@@ -320,9 +342,9 @@ mod tests {
     }
 
     fn write_gear_file(env_dir: &std::path::Path, file_name: &str, gears_json: &str) {
-        let dir = env_dir.join("gear.d");
+        let dir = gear_dir(env_dir);
         fs::create_dir_all(&dir).unwrap();
-        let body = format!(r#"{{"version": 1, "gear": {gears_json}}}"#);
+        let body = format!(r#"{{"version": {SCHEMA_VERSION}, "gear": {gears_json}}}"#);
         fs::write(dir.join(file_name), body).unwrap();
     }
 
@@ -416,7 +438,7 @@ mod tests {
     #[test]
     fn read_gear_dir_skips_malformed_files_and_loads_the_rest() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("gear.d");
+        let dir = gear_dir(tmp.path());
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("broken.json"), "{not valid json").unwrap();
         write_gear_file(
@@ -434,7 +456,7 @@ mod tests {
     #[test]
     fn read_gear_dir_ignores_non_json_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("gear.d");
+        let dir = gear_dir(tmp.path());
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("README.md"), "this is not gear").unwrap();
         write_gear_file(

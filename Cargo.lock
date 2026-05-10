@@ -520,7 +520,7 @@ dependencies = [
  "clap",
  "confy",
  "dirs",
- "enwiro-logging",
+ "enwiro-sdk",
  "filetime",
  "home",
  "libc",
@@ -543,7 +543,7 @@ dependencies = [
  "anyhow",
  "clap",
  "confy",
- "enwiro-logging",
+ "enwiro-sdk",
  "i3ipc-types",
  "serde",
  "serde_json",
@@ -561,7 +561,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
- "enwiro-logging",
+ "enwiro-sdk",
  "tracing",
 ]
 
@@ -570,7 +570,7 @@ name = "enwiro-bridge-rofi"
 version = "0.1.8"
 dependencies = [
  "anyhow",
- "enwiro-logging",
+ "enwiro-sdk",
  "serde",
  "serde_json",
  "tempfile",
@@ -583,7 +583,7 @@ version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
- "enwiro-logging",
+ "enwiro-sdk",
  "tracing",
 ]
 
@@ -595,7 +595,7 @@ dependencies = [
  "clap",
  "confy",
  "dirs",
- "enwiro-logging",
+ "enwiro-sdk",
  "git2",
  "glob",
  "serde",
@@ -615,7 +615,7 @@ dependencies = [
  "clap",
  "confy",
  "dirs",
- "enwiro-logging",
+ "enwiro-sdk",
  "git2",
  "glob",
  "serde",
@@ -627,10 +627,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "enwiro-logging"
+name = "enwiro-sdk"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "home",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tracing-appender",
  "tracing-subscriber",
 ]

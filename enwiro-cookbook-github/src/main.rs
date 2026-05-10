@@ -1278,36 +1278,6 @@ mod tests {
 
     // --- gear subcommand tests ---
 
-    /// `build_github_url` must produce the correct pull-request URL when given
-    /// a PR kind.
-    #[test]
-    fn test_build_github_url_for_pr() {
-        let repo_config = RepoConfig {
-            repo: "kantord/enwiro".to_string(),
-            local_path: PathBuf::from("/tmp/fake"),
-        };
-        let url = build_github_url(
-            &repo_config,
-            &GithubItemKind::PullRequest {
-                head_ref_name: "fix-thing".to_string(),
-            },
-            42,
-        );
-        assert_eq!(url, "https://github.com/kantord/enwiro/pull/42");
-    }
-
-    /// `build_github_url` must produce the correct issue URL when given an
-    /// Issue kind.
-    #[test]
-    fn test_build_github_url_for_issue() {
-        let repo_config = RepoConfig {
-            repo: "kantord/enwiro".to_string(),
-            local_path: PathBuf::from("/tmp/fake"),
-        };
-        let url = build_github_url(&repo_config, &GithubItemKind::Issue, 309);
-        assert_eq!(url, "https://github.com/kantord/enwiro/issues/309");
-    }
-
     /// When a PR worktree directory exists (path contains "pr" prefix), `gear`
     /// must emit a v1 GearFile with the `pr` gear and a single `web.page`
     /// entry pointing at the GitHub PR URL.
@@ -1425,14 +1395,50 @@ mod tests {
     }
 }
 
-fn build_github_url(repo_config: &RepoConfig, kind: &GithubItemKind, number: u64) -> String {
-    match kind {
-        GithubItemKind::PullRequest { .. } => {
-            format!("https://github.com/{}/pull/{}", repo_config.repo, number)
-        }
-        GithubItemKind::Issue => {
-            format!("https://github.com/{}/issues/{}", repo_config.repo, number)
-        }
+/// Per-kind constants for the gear emitter. `worktree_subdir` doubles as
+/// the gear name in the emitted schema (e.g. `pr` worktrees → `"pr"` gear,
+/// `issue` worktrees → `"issue"` gear). `url_subdir` is the GitHub URL
+/// path segment (`pull` vs `issues`).
+struct GearKind {
+    worktree_subdir: &'static str,
+    description_prefix: &'static str,
+    page_description: &'static str,
+    url_subdir: &'static str,
+}
+
+const PR_KIND: GearKind = GearKind {
+    worktree_subdir: "pr",
+    description_prefix: "Pull request",
+    page_description: "Open the PR page",
+    url_subdir: "pull",
+};
+
+const ISSUE_KIND: GearKind = GearKind {
+    worktree_subdir: "issue",
+    description_prefix: "Issue",
+    page_description: "Open the issue page",
+    url_subdir: "issues",
+};
+
+fn build_gear_file_for_kind(
+    kind: &GearKind,
+    repo: &str,
+    number: u64,
+) -> enwiro_sdk::gear::GearFile {
+    use enwiro_sdk::gear::{Gear, GearFile, SCHEMA_VERSION, WebEntry};
+    use std::collections::HashMap;
+
+    let page = WebEntry {
+        description: kind.page_description.to_string(),
+        url: format!("https://github.com/{repo}/{}/{number}", kind.url_subdir),
+    };
+    let gear_entry = Gear {
+        description: format!("{} #{number} on {repo}", kind.description_prefix),
+        web: HashMap::from([("page".to_string(), page)]),
+    };
+    GearFile {
+        version: SCHEMA_VERSION,
+        gear: HashMap::from([(kind.worktree_subdir.to_string(), gear_entry)]),
     }
 }
 
@@ -1443,54 +1449,14 @@ fn gear_with_writer<W: Write>(
     number: u64,
     writer: &mut W,
 ) -> anyhow::Result<()> {
-    let pr_path = worktree_path(config, repo_config, repo_str, "pr", number)?;
-    if pr_path.exists() {
-        let url = build_github_url(
-            repo_config,
-            &GithubItemKind::PullRequest {
-                head_ref_name: String::new(),
-            },
-            number,
-        );
-        let json = serde_json::json!({
-            "version": 1,
-            "gear": {
-                "pr": {
-                    "description": format!("Pull request #{} on {}", number, repo_config.repo),
-                    "web": {
-                        "page": {
-                            "description": "Open the PR page",
-                            "url": url,
-                        }
-                    }
-                }
-            }
-        });
-        writer.write_all(serde_json::to_string(&json)?.as_bytes())?;
-        return Ok(());
+    for kind in [&PR_KIND, &ISSUE_KIND] {
+        let path = worktree_path(config, repo_config, repo_str, kind.worktree_subdir, number)?;
+        if path.exists() {
+            let file = build_gear_file_for_kind(kind, &repo_config.repo, number);
+            serde_json::to_writer(writer, &file)?;
+            return Ok(());
+        }
     }
-
-    let issue_path = worktree_path(config, repo_config, repo_str, "issue", number)?;
-    if issue_path.exists() {
-        let url = build_github_url(repo_config, &GithubItemKind::Issue, number);
-        let json = serde_json::json!({
-            "version": 1,
-            "gear": {
-                "issue": {
-                    "description": format!("Issue #{} on {}", number, repo_config.repo),
-                    "web": {
-                        "page": {
-                            "description": "Open the issue page",
-                            "url": url,
-                        }
-                    }
-                }
-            }
-        });
-        writer.write_all(serde_json::to_string(&json)?.as_bytes())?;
-        return Ok(());
-    }
-
     anyhow::bail!("No worktree found for {}#{}", repo_str, number)
 }
 
@@ -1507,7 +1473,7 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-cookbook-github.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-cookbook-github.log");
 
     let args = EnwiroCookbookGithub::parse();
     let config: ConfigurationValues =

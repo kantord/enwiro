@@ -559,7 +559,7 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let _guard = enwiro_logging::init_logging("enwiro-adapter-i3wm.log");
+    let _guard = enwiro_sdk::init_logging("enwiro-adapter-i3wm.log");
 
     let args = EnwiroAdapterI3WmCLI::parse();
 

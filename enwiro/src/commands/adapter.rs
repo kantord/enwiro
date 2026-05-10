@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::gear::Gear;
 use crate::plugin::{PluginKind, get_plugins};
+use enwiro_sdk::gear::Gear;
 
 /// Wire format version for the activate stdin payload. Bump when the payload
 /// shape changes in a backward-incompatible way; adapters can match on this
