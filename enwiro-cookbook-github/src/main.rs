@@ -1276,122 +1276,102 @@ mod tests {
         );
     }
 
-    // --- gear subcommand tests ---
+    mod gear_subcommand {
+        use super::*;
 
-    /// When a PR worktree directory exists (path contains "pr" prefix), `gear`
-    /// must emit a v1 GearFile with the `pr` gear and a single `web.page`
-    /// entry pointing at the GitHub PR URL.
-    #[test]
-    fn test_gear_outputs_pull_request_url_when_pr_worktree_exists() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let local_path = tmp.path().join("enwiro");
-        std::fs::create_dir(&local_path).unwrap();
+        /// Set up a `(config, repo_config, tmp)` triple for gear tests. The
+        /// returned tempdir keeps `config.worktree_dir` and the local repo
+        /// path alive for the test's lifetime.
+        fn setup_gear_test() -> (ConfigurationValues, RepoConfig, tempfile::TempDir) {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let local_path = tmp.path().join("enwiro");
+            std::fs::create_dir(&local_path).unwrap();
+            let repo_config = RepoConfig {
+                repo: "kantord/enwiro".to_string(),
+                local_path,
+            };
+            let config = ConfigurationValues {
+                worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+            };
+            (config, repo_config, tmp)
+        }
 
-        let repo_config = RepoConfig {
-            repo: "kantord/enwiro".to_string(),
-            local_path: local_path.clone(),
-        };
+        /// Run `gear_with_writer` with a worktree of `kind` (`"pr"` or
+        /// `"issue"`) pre-created, and assert the emitted JSON matches
+        /// `expected`. Captures the full happy-path shape so callers stay
+        /// declarative.
+        fn assert_gear_emits(kind: &str, number: u64, expected: serde_json::Value) {
+            let (config, repo_config, _tmp) = setup_gear_test();
+            let path = worktree_path(&config, &repo_config, "enwiro", kind, number).unwrap();
+            std::fs::create_dir_all(&path).unwrap();
 
-        let config = ConfigurationValues {
-            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
-        };
+            let mut output = Vec::new();
+            gear_with_writer(&config, &repo_config, "enwiro", number, &mut output).unwrap();
 
-        // Create the PR worktree directory so the existence check passes
-        let pr_path = worktree_path(&config, &repo_config, "enwiro", "pr", 42).unwrap();
-        std::fs::create_dir_all(&pr_path).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(json, expected);
+        }
 
-        let mut output = Vec::new();
-        gear_with_writer(&config, &repo_config, "enwiro", 42, &mut output).unwrap();
-
-        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "version": 1,
-                "gear": {
-                    "pr": {
-                        "description": "Pull request #42 on kantord/enwiro",
-                        "web": {
-                            "page": {
-                                "description": "Open the PR page",
-                                "url": "https://github.com/kantord/enwiro/pull/42"
+        /// When a PR worktree exists, emit a v1 GearFile with a `pr` gear
+        /// pointing at the GitHub PR URL.
+        #[test]
+        fn outputs_pull_request_url_when_pr_worktree_exists() {
+            assert_gear_emits(
+                "pr",
+                42,
+                serde_json::json!({
+                    "version": 1,
+                    "gear": {
+                        "pr": {
+                            "description": "Pull request #42 on kantord/enwiro",
+                            "web": {
+                                "page": {
+                                    "description": "Open the PR page",
+                                    "url": "https://github.com/kantord/enwiro/pull/42"
+                                }
                             }
                         }
                     }
-                }
-            })
-        );
-    }
+                }),
+            );
+        }
 
-    /// When an issue worktree directory exists (path contains "issue" prefix),
-    /// `gear` must emit a v1 GearFile with the `issue` gear and a single
-    /// `web.page` entry pointing at the GitHub issue URL.
-    #[test]
-    fn test_gear_outputs_issue_url_when_issue_worktree_exists() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let local_path = tmp.path().join("enwiro");
-        std::fs::create_dir(&local_path).unwrap();
-
-        let repo_config = RepoConfig {
-            repo: "kantord/enwiro".to_string(),
-            local_path: local_path.clone(),
-        };
-
-        let config = ConfigurationValues {
-            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
-        };
-
-        // Create the issue worktree directory so the existence check passes
-        let issue_path = worktree_path(&config, &repo_config, "enwiro", "issue", 309).unwrap();
-        std::fs::create_dir_all(&issue_path).unwrap();
-
-        let mut output = Vec::new();
-        gear_with_writer(&config, &repo_config, "enwiro", 309, &mut output).unwrap();
-
-        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "version": 1,
-                "gear": {
-                    "issue": {
-                        "description": "Issue #309 on kantord/enwiro",
-                        "web": {
-                            "page": {
-                                "description": "Open the issue page",
-                                "url": "https://github.com/kantord/enwiro/issues/309"
+        /// When an issue worktree exists, emit a v1 GearFile with an `issue`
+        /// gear pointing at the GitHub issue URL.
+        #[test]
+        fn outputs_issue_url_when_issue_worktree_exists() {
+            assert_gear_emits(
+                "issue",
+                309,
+                serde_json::json!({
+                    "version": 1,
+                    "gear": {
+                        "issue": {
+                            "description": "Issue #309 on kantord/enwiro",
+                            "web": {
+                                "page": {
+                                    "description": "Open the issue page",
+                                    "url": "https://github.com/kantord/enwiro/issues/309"
+                                }
                             }
                         }
                     }
-                }
-            })
-        );
-    }
+                }),
+            );
+        }
 
-    /// When neither a PR nor an issue worktree exists, `gear` must return an
-    /// error (the recipe has not been cooked yet).
-    #[test]
-    fn test_gear_errors_when_no_worktree_exists() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let local_path = tmp.path().join("enwiro");
-        std::fs::create_dir(&local_path).unwrap();
-
-        let repo_config = RepoConfig {
-            repo: "kantord/enwiro".to_string(),
-            local_path: local_path.clone(),
-        };
-
-        let config = ConfigurationValues {
-            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
-        };
-
-        // No worktree directories created
-        let mut output = Vec::new();
-        let result = gear_with_writer(&config, &repo_config, "enwiro", 42, &mut output);
-        assert!(
-            result.is_err(),
-            "Expected error when no worktree exists, but got Ok"
-        );
+        /// When neither a PR nor an issue worktree exists, `gear` must error
+        /// (the recipe has not been cooked yet).
+        #[test]
+        fn errors_when_no_worktree_exists() {
+            let (config, repo_config, _tmp) = setup_gear_test();
+            let mut output = Vec::new();
+            let result = gear_with_writer(&config, &repo_config, "enwiro", 42, &mut output);
+            assert!(
+                result.is_err(),
+                "Expected error when no worktree exists, but got Ok"
+            );
+        }
     }
 }
 
