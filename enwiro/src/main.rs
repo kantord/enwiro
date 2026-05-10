@@ -4,6 +4,7 @@ mod config;
 mod context;
 mod daemon;
 mod environments;
+mod gear;
 mod notifier;
 mod plugin;
 mod test_utils;
@@ -12,7 +13,6 @@ mod usage_stats;
 use anyhow::Context;
 use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
-use commands::gear::{GearArgs, gear};
 use commands::list_all::{ListAllArgs, list_all};
 use commands::list_environments::{ListEnvironmentsArgs, list_environments};
 use commands::show_path::{ShowPathArgs, show_path};
@@ -26,7 +26,6 @@ use std::path::Path;
 #[derive(Parser)]
 enum EnwiroCli {
     Activate(ActivateArgs),
-    Gear(GearArgs),
     ListEnvironments(ListEnvironmentsArgs),
     ListAll(ListAllArgs),
     ShowPath(ShowPathArgs),
@@ -65,7 +64,6 @@ fn main() -> anyhow::Result<()> {
 
     let result = match args {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
-        EnwiroCli::Gear(args) => gear(&mut context_object, args),
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
         EnwiroCli::ListAll(args) => list_all(&mut context_object, args.json),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),

@@ -43,14 +43,11 @@ pub fn activate<W: Write>(
     args: ActivateArgs,
 ) -> anyhow::Result<()> {
     let managed_envs = build_managed_envs(context);
-    if let Err(e) = context.adapter.activate(&args.name, &managed_envs) {
-        context
-            .notifier
-            .notify_error(&format!("Failed to activate workspace: {:#}", e));
-        return Err(e).context("Could not activate workspace");
-    }
+    let flat_name = args.name.replace('/', "-");
+    let env_dir = Path::new(&context.config.workspaces_directory).join(&flat_name);
 
-    // Ensure the environment exists on disk (cook from recipe if needed)
+    // Cook before adapter.activate so any gear written during cook is available
+    // when the adapter switches workspace and (optionally) acts on it.
     if let Err(e) = context.get_or_cook_environment(&Some(args.name.clone())) {
         context.notifier.notify_error(&format!(
             "Could not set up environment '{}': {:#}",
@@ -59,8 +56,14 @@ pub fn activate<W: Write>(
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
-    let flat_name = args.name.replace('/', "-");
-    let env_dir = Path::new(&context.config.workspaces_directory).join(&flat_name);
+    let gear = crate::gear::read_gear_dir(&env_dir).unwrap_or_default();
+    if let Err(e) = context.adapter.activate(&args.name, &managed_envs, &gear) {
+        context
+            .notifier
+            .notify_error(&format!("Failed to activate workspace: {:#}", e));
+        return Err(e).context("Could not activate workspace");
+    }
+
     if env_dir.is_dir() && !env_dir.is_symlink() {
         crate::usage_stats::record_activation_per_env(&env_dir);
     } else {
@@ -90,7 +93,12 @@ mod tests {
             Ok("some-env".to_string())
         }
 
-        fn activate(&self, _name: &str, managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()> {
+        fn activate(
+            &self,
+            _name: &str,
+            managed_envs: &[ManagedEnvInfo],
+            _gear: &std::collections::HashMap<String, crate::gear::Gear>,
+        ) -> anyhow::Result<()> {
             *self.captured.borrow_mut() = managed_envs.to_vec();
             Ok(())
         }
@@ -347,6 +355,10 @@ mod tests {
     ) {
         let (_temp_dir, mut ctx, _, notifications) = context_object;
 
+        // The env already exists so cook is a no-op; only the adapter failure
+        // should generate an error notification.
+        ctx.create_mock_environment("my-project");
+
         use crate::commands::adapter::EnwiroAdapterNone;
         ctx.adapter = Box::new(EnwiroAdapterNone {});
 
@@ -381,6 +393,7 @@ mod tests {
             &self,
             _name: &str,
             _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
+            _gear: &std::collections::HashMap<String, crate::gear::Gear>,
         ) -> anyhow::Result<()> {
             let leaf = anyhow::anyhow!("leaf i3 IPC error: broken pipe");
             Err(leaf).map_err(|e| e.context("outer: Could not switch to workspace"))
@@ -400,6 +413,10 @@ mod tests {
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut ctx, _, notifications) = context_object;
+
+        // The env already exists so cook is a no-op; only the adapter failure
+        // should generate an error notification.
+        ctx.create_mock_environment("my-project");
 
         ctx.adapter = Box::new(ChainedErrorAdapter);
 

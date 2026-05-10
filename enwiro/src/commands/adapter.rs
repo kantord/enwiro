@@ -1,8 +1,15 @@
 use anyhow::{Context, bail};
+use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use crate::gear::Gear;
 use crate::plugin::{PluginKind, get_plugins};
+
+/// Wire format version for the activate stdin payload. Bump when the payload
+/// shape changes in a backward-incompatible way; adapters can match on this
+/// to support multiple core versions.
+pub const ACTIVATE_PAYLOAD_VERSION: u32 = 1;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct ManagedEnvInfo {
@@ -10,9 +17,21 @@ pub struct ManagedEnvInfo {
     pub slot_score: f64,
 }
 
+#[derive(serde::Serialize)]
+struct ActivatePayload<'a> {
+    version: u32,
+    managed_envs: &'a [ManagedEnvInfo],
+    gear: &'a HashMap<String, Gear>,
+}
+
 pub trait EnwiroAdapterTrait {
     fn get_active_environment_name(&self) -> anyhow::Result<String>;
-    fn activate(&self, name: &str, managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()>;
+    fn activate(
+        &self,
+        name: &str,
+        managed_envs: &[ManagedEnvInfo],
+        gear: &HashMap<String, Gear>,
+    ) -> anyhow::Result<()>;
 }
 
 pub struct EnwiroAdapterExternal {
@@ -36,10 +55,20 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
         }
     }
 
-    fn activate(&self, name: &str, managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()> {
+    fn activate(
+        &self,
+        name: &str,
+        managed_envs: &[ManagedEnvInfo],
+        gear: &HashMap<String, Gear>,
+    ) -> anyhow::Result<()> {
         tracing::debug!(name = %name, "Activating workspace via adapter");
+        let payload = ActivatePayload {
+            version: ACTIVATE_PAYLOAD_VERSION,
+            managed_envs,
+            gear,
+        };
         let stdin_json =
-            serde_json::to_string(managed_envs).context("Could not serialize managed envs")?;
+            serde_json::to_string(&payload).context("Could not serialize activate payload")?;
 
         let mut child = Command::new(&self.adapter_command)
             .arg("activate")
@@ -90,7 +119,12 @@ impl EnwiroAdapterTrait for EnwiroAdapterNone {
         bail!("Could not determine active environment because no adapter is configured.")
     }
 
-    fn activate(&self, _name: &str, _managed_envs: &[ManagedEnvInfo]) -> anyhow::Result<()> {
+    fn activate(
+        &self,
+        _name: &str,
+        _managed_envs: &[ManagedEnvInfo],
+        _gear: &HashMap<String, Gear>,
+    ) -> anyhow::Result<()> {
         bail!("Could not activate workspace because no adapter is configured.")
     }
 }
@@ -98,6 +132,47 @@ impl EnwiroAdapterTrait for EnwiroAdapterNone {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The activate stdin payload must be a structured object containing
+    /// `version`, `managed_envs`, and `gear` fields. Adapters depend on this
+    /// shape; if it changes the version field must be bumped to signal it.
+    #[test]
+    fn test_activate_payload_serialization_shape() {
+        let envs = vec![ManagedEnvInfo {
+            name: "foo".into(),
+            slot_score: 0.5,
+        }];
+        let mut gear: HashMap<String, Gear> = HashMap::new();
+        gear.insert(
+            "pr".into(),
+            Gear {
+                description: "PR #1".into(),
+                web: HashMap::new(),
+            },
+        );
+        let payload = ActivatePayload {
+            version: ACTIVATE_PAYLOAD_VERSION,
+            managed_envs: &envs,
+            gear: &gear,
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
+
+        assert_eq!(json["version"], 1, "payload must include version: 1");
+        assert!(
+            json["managed_envs"].is_array(),
+            "payload must include managed_envs as an array"
+        );
+        assert_eq!(json["managed_envs"][0]["name"], "foo");
+        assert!(
+            json["gear"].is_object(),
+            "payload must include gear as an object"
+        );
+        assert!(
+            json["gear"]["pr"].is_object(),
+            "gear must contain 'pr' entry"
+        );
+    }
 
     /// `ManagedEnvInfo` must expose a `slot_score` field (not `frecency`),
     /// and that field must serialize to JSON under the key `"slot_score"`.

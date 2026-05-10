@@ -22,6 +22,24 @@ struct ManagedEnvInfo {
     slot_score: f64,
 }
 
+/// Parsed activate stdin payload. Mirrors the shape produced by `enw` core
+/// (see `enwiro/src/commands/adapter.rs::ActivatePayload`).
+///
+/// `gear` is kept as an opaque `serde_json::Value` rather than typed —
+/// in v1 the i3 adapter just walks `gear.<name>.web.<entry>.url` for the
+/// auto-open behavior; richer typing is unnecessary.
+#[derive(serde::Deserialize, Debug, Default, Clone)]
+struct ActivatePayload {
+    #[serde(default)]
+    #[allow(dead_code)] // reserved for future protocol-version branching
+    version: u32,
+    #[serde(default)]
+    managed_envs: Vec<ManagedEnvInfo>,
+    #[serde(default)]
+    #[allow(dead_code)] // consumed by cycle 7 (web auto-open)
+    gear: serde_json::Value,
+}
+
 #[derive(clap::Args)]
 pub struct ListenArgs {
     #[arg(long, default_value_t = 300)]
@@ -54,14 +72,148 @@ fn build_rename_workspace_command(old_name: &str, new_name: &str) -> String {
     format!(r#"rename workspace "{}" to "{}""#, esc_old, esc_new)
 }
 
-/// Read managed env list from stdin. Returns empty vec on any parse failure.
-fn read_managed_envs() -> Vec<ManagedEnvInfo> {
+/// Read the activate stdin payload from core. Returns a default
+/// (empty managed_envs, null gear) on any parse failure so the adapter
+/// can still complete the workspace switch.
+fn read_activate_payload() -> ActivatePayload {
     use std::io::Read;
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
-        return vec![];
+        return ActivatePayload::default();
     }
     serde_json::from_str(&buf).unwrap_or_default()
+}
+
+/// Default open command used to spawn one window per gear web URL.
+/// `chromium --app=<url>` opens a chromeless window so each URL reads
+/// visually as a standalone app, and creates a fresh window per
+/// invocation (no window-reuse problem on subsequent activations).
+const DEFAULT_WEB_OPEN_COMMAND: &[&str] = &["chromium", "--app={url}"];
+
+fn default_web_open_command() -> Vec<String> {
+    DEFAULT_WEB_OPEN_COMMAND
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Schema for the i3 adapter's confy TOML. Every field is optional so missing
+/// or partially-populated configs fall through to defaults rather than
+/// failing to parse.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct AdapterConfig {
+    web_open_command: Option<Vec<String>>,
+}
+
+/// Load `web_open_command` from the i3 adapter's confy TOML at `config_path`,
+/// falling back to the default when the file is missing, malformed, or has
+/// no `web_open_command` field.
+fn load_web_open_command(config_path: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| toml::from_str::<AdapterConfig>(&s).ok())
+        .and_then(|c| c.web_open_command)
+        .unwrap_or_else(default_web_open_command)
+}
+
+/// Resolve the adapter's confy config path the same way `confy::load` would,
+/// so users can drop a file at the documented location
+/// (`~/.config/enwiro/adapter-i3wm.toml` on Linux). Returns `None` if confy
+/// can't determine a config dir — caller falls back to defaults.
+fn adapter_config_path() -> Option<std::path::PathBuf> {
+    confy::get_configuration_file_path("enwiro", "adapter-i3wm").ok()
+}
+
+/// Walk a merged gear JSON object and collect every `gear.<name>.web.<entry>.url`.
+fn collect_web_urls(gear: &serde_json::Value) -> Vec<String> {
+    let Some(obj) = gear.as_object() else {
+        return Vec::new();
+    };
+    let mut urls = Vec::new();
+    for gear_value in obj.values() {
+        let Some(web) = gear_value.get("web").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for entry in web.values() {
+            if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
+                urls.push(url.to_string());
+            }
+        }
+    }
+    urls
+}
+
+/// Substitute `{url}` in each element of the command template, yielding
+/// the final argv to pass to `Command::new`.
+fn substitute_url(command_template: &[String], url: &str) -> Vec<String> {
+    command_template
+        .iter()
+        .map(|arg| arg.replace("{url}", url))
+        .collect()
+}
+
+/// POSIX-shell-quote a single argument: leave it bare if every character is in
+/// a conservative safe set, otherwise wrap in single quotes (escaping any
+/// internal `'`). i3 invokes `exec`'s payload via `sh -c`, so every component
+/// of the constructed command line must be quoted before joining.
+fn shell_quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | '=' | ':' | '@' | ',' | '+' | '%')
+        });
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
+/// Build the shell command string passed to `i3-msg exec`. Wraps the user's
+/// `web_open_command` (already URL-substituted) inside `enw wrap <env> --` so
+/// the spawned process inherits cwd/`ENWIRO_ENV` from `enw wrap` while i3
+/// supplies daemonization and graphical-session env normalization.
+fn build_wrap_invocation(env_name: &str, web_command: &[String]) -> Option<String> {
+    let (command_name, child_args) = web_command.split_first()?;
+    let mut parts: Vec<String> = vec![
+        "enw".into(),
+        "wrap".into(),
+        command_name.clone(),
+        env_name.to_string(),
+        "--".into(),
+    ];
+    parts.extend_from_slice(child_args);
+    Some(
+        parts
+            .iter()
+            .map(|p| shell_quote(p))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Spawn the configured open command for every URL collected from gear, via
+/// `i3-msg exec -- enw wrap <env> -- <command>`. Failures are logged and do
+/// not interrupt the activation flow.
+fn open_gear_urls(gear: &serde_json::Value, command_template: &[String], env_name: &str) {
+    for url in collect_web_urls(gear) {
+        let argv = substitute_url(command_template, &url);
+        let Some(wrap_cmd) = build_wrap_invocation(env_name, &argv) else {
+            tracing::warn!("web_open_command is empty, skipping");
+            continue;
+        };
+        let i3_payload = format!("exec {}", wrap_cmd);
+        match std::process::Command::new("i3-msg")
+            .arg(&i3_payload)
+            .spawn()
+        {
+            Ok(_) => tracing::info!(url = %url, "Spawned open command via i3-msg exec"),
+            Err(e) => {
+                tracing::warn!(error = %e, url = %url, payload = %i3_payload, "Failed to invoke i3-msg exec");
+            }
+        }
+    }
 }
 
 /// Parse newline-delimited JSON from `enwiro list-all --json`.
@@ -373,7 +525,8 @@ async fn main() -> anyhow::Result<()> {
             print!("{}", environment_name);
         }
         EnwiroAdapterI3WmCLI::Activate(args) => {
-            let managed_envs = read_managed_envs();
+            let payload = read_activate_payload();
+            let managed_envs = payload.managed_envs;
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
             tracing::debug!(count = workspaces.len(), name = %args.name, "Activating environment");
@@ -463,6 +616,14 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(workspace = %workspace_name, num = target_num, "Focusing final workspace slot");
                 run_i3_command(&mut i3, build_workspace_command(&workspace_name)).await?;
             }
+
+            // After the workspace is focused, open any web URLs declared in
+            // the env's gear so they land in this workspace. Failures are
+            // logged inside; activation never fails on auto-open issues.
+            let web_open_command = adapter_config_path()
+                .map(|p| load_web_open_command(&p))
+                .unwrap_or_else(default_web_open_command);
+            open_gear_urls(&payload.gear, &web_open_command, &args.name);
         }
         EnwiroAdapterI3WmCLI::Listen(listen_args) => {
             let debounce = std::time::Duration::from_secs(listen_args.debounce_secs);
@@ -833,6 +994,249 @@ mod tests {
             should_rebalance(Some(last), debounce, now),
             "should_rebalance must return true when elapsed ({elapsed_since_last:?}) \
              equals debounce exactly ({debounce:?}) — the boundary is inclusive"
+        );
+    }
+
+    /// The activate stdin payload from core has shape
+    /// `{version, managed_envs: [...], gear: {...}}`. The adapter must
+    /// deserialize this into `ActivatePayload` and pull `managed_envs` out
+    /// for use by the rest of the activate flow.
+    #[test]
+    fn test_activate_payload_deserializes_versioned_envelope() {
+        let json = r#"{
+            "version": 1,
+            "managed_envs": [{"name": "foo", "slot_score": 0.5}],
+            "gear": {
+                "pr": {
+                    "description": "PR #1",
+                    "web": {
+                        "page": {
+                            "description": "Open the PR",
+                            "url": "https://example.com/pr/1"
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let parsed: ActivatePayload =
+            serde_json::from_str(json).expect("must deserialize new payload shape");
+
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.managed_envs.len(), 1);
+        assert_eq!(parsed.managed_envs[0].name, "foo");
+        assert!(
+            parsed.gear.is_object(),
+            "gear field must be retained as a JSON object for cycle 7 to consume"
+        );
+        assert_eq!(
+            parsed.gear["pr"]["web"]["page"]["url"],
+            "https://example.com/pr/1"
+        );
+    }
+
+    /// If stdin is empty or malformed (e.g. an old core that sent a bare
+    /// array), parsing must yield default values rather than panic — the
+    /// adapter should still complete the workspace switch.
+    #[test]
+    fn test_activate_payload_default_on_invalid_input() {
+        let parsed: ActivatePayload = serde_json::from_str("[]").unwrap_or_default();
+        assert_eq!(parsed.version, 0);
+        assert!(parsed.managed_envs.is_empty());
+        assert!(parsed.gear.is_null());
+    }
+
+    /// `collect_web_urls` walks `gear.<name>.web.<entry>.url` for every
+    /// gear in the merged map and returns each URL.
+    #[test]
+    fn test_collect_web_urls_gathers_every_url() {
+        let gear = serde_json::json!({
+            "pr": {
+                "description": "PR #1",
+                "web": {
+                    "page": {"description": "Open PR", "url": "https://example.com/pr/1"}
+                }
+            },
+            "issue": {
+                "description": "Issue #2",
+                "web": {
+                    "page": {"description": "Open issue", "url": "https://example.com/issues/2"}
+                }
+            }
+        });
+
+        let mut urls = collect_web_urls(&gear);
+        urls.sort();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/issues/2".to_string(),
+                "https://example.com/pr/1".to_string(),
+            ]
+        );
+    }
+
+    /// Missing or null gear must yield an empty URL list, not a panic.
+    #[test]
+    fn test_collect_web_urls_handles_null_and_missing_gracefully() {
+        assert!(collect_web_urls(&serde_json::Value::Null).is_empty());
+        assert!(collect_web_urls(&serde_json::json!({})).is_empty());
+        assert!(collect_web_urls(&serde_json::json!({"pr": {"description": "no web"}})).is_empty());
+    }
+
+    /// `substitute_url` replaces every occurrence of `{url}` in each argv
+    /// element. Other characters are left intact so command flags survive.
+    #[test]
+    fn test_substitute_url_replaces_placeholder_in_each_arg() {
+        let template = vec!["chromium".to_string(), "--app={url}".to_string()];
+        let out = substitute_url(&template, "https://example.com/x");
+        assert_eq!(
+            out,
+            vec![
+                "chromium".to_string(),
+                "--app=https://example.com/x".to_string(),
+            ]
+        );
+    }
+
+    /// The default open command must use chromium app-mode so each URL
+    /// opens in a fresh chromeless window placed in the current i3 workspace.
+    #[test]
+    fn test_default_web_open_command_is_chromium_app_mode() {
+        let cmd = default_web_open_command();
+        assert_eq!(cmd[0], "chromium");
+        assert!(
+            cmd.iter().any(|arg| arg.contains("--app={url}")),
+            "default must use chromium --app=<url> for chromeless new windows; got {cmd:?}"
+        );
+    }
+
+    /// `shell_quote` leaves alphanumeric / common-punctuation args bare so
+    /// readable command lines stay readable. URL-style args qualify.
+    #[test]
+    fn test_shell_quote_leaves_safe_args_bare() {
+        assert_eq!(shell_quote("chromium"), "chromium");
+        assert_eq!(
+            shell_quote("--app=https://example.com/path"),
+            "--app=https://example.com/path"
+        );
+    }
+
+    /// `shell_quote` wraps args containing whitespace or shell metacharacters
+    /// in single quotes so `sh -c` can't reinterpret them.
+    #[test]
+    fn test_shell_quote_wraps_unsafe_args() {
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("$HOME"), "'$HOME'");
+        assert_eq!(shell_quote("{url}"), "'{url}'");
+    }
+
+    /// Single quotes inside an arg are escaped via the POSIX `'\''`
+    /// idiom — close-quote, escaped quote, reopen-quote.
+    #[test]
+    fn test_shell_quote_escapes_internal_single_quote() {
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// `build_wrap_invocation` produces the exact `enw wrap <command> <env>
+    /// -- <args>` shape that `enw wrap`'s clap parser expects, with the
+    /// command's first element becoming `command_name` and the rest passed
+    /// through as `child_args`.
+    #[test]
+    fn test_build_wrap_invocation_basic_shape() {
+        let out = build_wrap_invocation(
+            "my-env",
+            &[
+                "chromium".to_string(),
+                "--app=https://example.com".to_string(),
+            ],
+        );
+        assert_eq!(
+            out.as_deref(),
+            Some("enw wrap chromium my-env -- --app=https://example.com")
+        );
+    }
+
+    /// Args with shell metacharacters (e.g. spaces in a custom open command)
+    /// are quoted so they reach the spawned process intact.
+    #[test]
+    fn test_build_wrap_invocation_quotes_unsafe_args() {
+        let out = build_wrap_invocation(
+            "my env",
+            &["chromium".to_string(), "--app=hello world".to_string()],
+        );
+        assert_eq!(
+            out.as_deref(),
+            Some("enw wrap chromium 'my env' -- '--app=hello world'")
+        );
+    }
+
+    /// An empty command template yields `None` — caller skips with a warn
+    /// rather than producing a malformed `enw wrap` invocation.
+    #[test]
+    fn test_build_wrap_invocation_returns_none_for_empty_template() {
+        assert!(build_wrap_invocation("env", &[]).is_none());
+    }
+
+    /// `load_web_open_command` must read `web_open_command` from the adapter's
+    /// confy TOML and return it instead of the default when the field is set.
+    #[test]
+    fn test_load_web_open_command_uses_user_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_path = dir.path().join("adapter-i3wm.toml");
+        std::fs::write(
+            &toml_path,
+            r#"web_open_command = ["firefox", "--new-window", "{url}"]
+"#,
+        )
+        .expect("write toml");
+
+        let cmd = load_web_open_command(&toml_path);
+        assert_eq!(
+            cmd,
+            vec![
+                "firefox".to_string(),
+                "--new-window".to_string(),
+                "{url}".to_string(),
+            ],
+            "user-configured web_open_command must override the default"
+        );
+    }
+
+    /// A missing config file is the dominant production case (most users
+    /// won't write one). Must yield the default rather than panicking.
+    #[test]
+    fn test_load_web_open_command_returns_default_when_file_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.toml");
+        assert_eq!(load_web_open_command(&missing), default_web_open_command());
+    }
+
+    /// A malformed TOML file must not crash activation — fall through to the
+    /// default and let activation continue.
+    #[test]
+    fn test_load_web_open_command_returns_default_on_malformed_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_path = dir.path().join("adapter-i3wm.toml");
+        std::fs::write(&toml_path, "this is = not [valid toml").expect("write toml");
+        assert_eq!(
+            load_web_open_command(&toml_path),
+            default_web_open_command()
+        );
+    }
+
+    /// A valid TOML with no `web_open_command` field returns the default,
+    /// so users can configure other future adapter fields without losing
+    /// the chromium app-mode default for URL opens.
+    #[test]
+    fn test_load_web_open_command_returns_default_when_field_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toml_path = dir.path().join("adapter-i3wm.toml");
+        std::fs::write(&toml_path, "# unrelated comment\n").expect("write toml");
+        assert_eq!(
+            load_web_open_command(&toml_path),
+            default_web_open_command()
         );
     }
 

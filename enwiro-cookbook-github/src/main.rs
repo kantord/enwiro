@@ -1309,8 +1309,8 @@ mod tests {
     }
 
     /// When a PR worktree directory exists (path contains "pr" prefix), `gear`
-    /// must output a JSON object `{"pull-request": {"open": "<pr_url>"}}` to
-    /// stdout and return Ok.
+    /// must emit a v1 GearFile with the `pr` gear and a single `web.page`
+    /// entry pointing at the GitHub PR URL.
     #[test]
     fn test_gear_outputs_pull_request_url_when_pr_worktree_exists() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1337,14 +1337,25 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "pull-request": { "open": "https://github.com/kantord/enwiro/pull/42" }
+                "version": 1,
+                "gear": {
+                    "pr": {
+                        "description": "Pull request #42 on kantord/enwiro",
+                        "web": {
+                            "page": {
+                                "description": "Open the PR page",
+                                "url": "https://github.com/kantord/enwiro/pull/42"
+                            }
+                        }
+                    }
+                }
             })
         );
     }
 
     /// When an issue worktree directory exists (path contains "issue" prefix),
-    /// `gear` must output `{"issue": {"open": "<issue_url>"}}` to stdout and
-    /// return Ok.
+    /// `gear` must emit a v1 GearFile with the `issue` gear and a single
+    /// `web.page` entry pointing at the GitHub issue URL.
     #[test]
     fn test_gear_outputs_issue_url_when_issue_worktree_exists() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1371,7 +1382,18 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "issue": { "open": "https://github.com/kantord/enwiro/issues/309" }
+                "version": 1,
+                "gear": {
+                    "issue": {
+                        "description": "Issue #309 on kantord/enwiro",
+                        "web": {
+                            "page": {
+                                "description": "Open the issue page",
+                                "url": "https://github.com/kantord/enwiro/issues/309"
+                            }
+                        }
+                    }
+                }
             })
         );
     }
@@ -1430,7 +1452,20 @@ fn gear_with_writer<W: Write>(
             },
             number,
         );
-        let json = serde_json::json!({ "pull-request": { "open": url } });
+        let json = serde_json::json!({
+            "version": 1,
+            "gear": {
+                "pr": {
+                    "description": format!("Pull request #{} on {}", number, repo_config.repo),
+                    "web": {
+                        "page": {
+                            "description": "Open the PR page",
+                            "url": url,
+                        }
+                    }
+                }
+            }
+        });
         writer.write_all(serde_json::to_string(&json)?.as_bytes())?;
         return Ok(());
     }
@@ -1438,7 +1473,20 @@ fn gear_with_writer<W: Write>(
     let issue_path = worktree_path(config, repo_config, repo_str, "issue", number)?;
     if issue_path.exists() {
         let url = build_github_url(repo_config, &GithubItemKind::Issue, number);
-        let json = serde_json::json!({ "issue": { "open": url } });
+        let json = serde_json::json!({
+            "version": 1,
+            "gear": {
+                "issue": {
+                    "description": format!("Issue #{} on {}", number, repo_config.repo),
+                    "web": {
+                        "page": {
+                            "description": "Open the issue page",
+                            "url": url,
+                        }
+                    }
+                }
+            }
+        });
         writer.write_all(serde_json::to_string(&json)?.as_bytes())?;
         return Ok(());
     }

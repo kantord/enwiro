@@ -59,6 +59,7 @@ pub mod test_utilities {
             &self,
             name: &str,
             _managed_envs: &[crate::commands::adapter::ManagedEnvInfo],
+            _gear: &std::collections::HashMap<String, crate::gear::Gear>,
         ) -> anyhow::Result<()> {
             self.activated.borrow_mut().push(name.to_string());
             Ok(())

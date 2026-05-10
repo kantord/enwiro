@@ -542,13 +542,16 @@ version = "0.1.11"
 dependencies = [
  "anyhow",
  "clap",
+ "confy",
  "enwiro-logging",
  "i3ipc-types",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-i3ipc",
  "tokio-stream",
+ "toml",
  "tracing",
 ]
 

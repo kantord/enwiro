@@ -140,11 +140,12 @@ impl<W: Write> CommandContext<W> {
             Ok(Some(json)) => {
                 let gear_path = Path::new(&self.config.workspaces_directory)
                     .join(flat_name)
-                    .join("gear.json");
+                    .join("gear.d")
+                    .join(format!("cookbook-{}.json", cookbook.name()));
                 match serde_json::to_vec(&json) {
                     Ok(bytes) => {
                         if let Err(e) = crate::usage_stats::atomic_write(&gear_path, &bytes) {
-                            tracing::debug!(error = %e, "Failed to write gear.json, continuing");
+                            tracing::debug!(error = %e, "Failed to write gear file, continuing");
                         }
                     }
                     Err(e) => {
@@ -626,7 +627,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_cook_environment_writes_gear_json_when_cookbook_returns_gear(
+    fn test_cook_environment_writes_gear_file_to_cookbook_named_path(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -646,10 +647,15 @@ mod tests {
 
         context_object.cook_environment("my-project").unwrap();
 
-        let gear_path = temp_dir.path().join("my-project").join("gear.json");
+        let gear_path = temp_dir
+            .path()
+            .join("my-project")
+            .join("gear.d")
+            .join("cookbook-git.json");
         assert!(
             gear_path.exists(),
-            "gear.json should exist in the environment directory"
+            "gear file should exist at gear.d/cookbook-<name>.json, expected {}",
+            gear_path.display()
         );
         let written: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&gear_path).unwrap()).unwrap();
@@ -657,7 +663,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_cook_environment_does_not_write_gear_json_when_cookbook_returns_none(
+    fn test_cook_environment_does_not_create_gear_dir_when_cookbook_returns_none(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -674,10 +680,10 @@ mod tests {
 
         context_object.cook_environment("my-project").unwrap();
 
-        let gear_path = temp_dir.path().join("my-project").join("gear.json");
+        let gear_dir = temp_dir.path().join("my-project").join("gear.d");
         assert!(
-            !gear_path.exists(),
-            "gear.json should NOT exist when cookbook returns no gear"
+            !gear_dir.exists(),
+            "gear.d/ should NOT exist when cookbook returns no gear"
         );
     }
 }

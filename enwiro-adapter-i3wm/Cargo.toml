@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
+confy = "2.0.0"
 enwiro-logging.workspace = true
 i3ipc-types = "0.16.0"
 serde = { version = "1", features = ["derive"] }
@@ -18,4 +19,8 @@ serde_json = "1"
 tokio = "1.37.0"
 tokio-i3ipc = "0.16.0"
 tokio-stream = "0.1"
+toml = "0.9"
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.25.0"
