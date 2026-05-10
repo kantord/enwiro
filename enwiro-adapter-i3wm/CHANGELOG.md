@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.11...enwiro-adapter-i3wm-v0.1.12) - 2026-05-10
+
+### Added
+
+- allow recipe gear to run linux gui apps ([#344](https://github.com/kantord/enwiro/pull/344))
+- add basic gear feature (web only) ([#311](https://github.com/kantord/enwiro/pull/311))
+
+### Other
+
+- *(adapter-i3wm)* fire gear only on first GUI activation per env ([#343](https://github.com/kantord/enwiro/pull/343))
+
 ## [0.1.11](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.10...enwiro-adapter-i3wm-v0.1.11) - 2026-05-09
 
 ### Added

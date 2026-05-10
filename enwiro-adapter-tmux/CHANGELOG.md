@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.1...enwiro-adapter-tmux-v0.1.2) - 2026-05-10
+
+### Added
+
+- add basic gear feature (web only) ([#311](https://github.com/kantord/enwiro/pull/311))
+
 ## [0.1.1](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.0...enwiro-adapter-tmux-v0.1.1) - 2026-05-09
 
 ### Added
