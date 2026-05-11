@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
+use enwiro_sdk::{CookbookMetadata, Recipe};
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -376,11 +377,9 @@ fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
     tracing::debug!(count = repos.len(), "Listing recipes");
 
     for (key, sort_order) in build_sorted_recipes(&repos) {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({"name": key, "sort_order": sort_order}))
-                .unwrap()
-        );
+        let mut recipe = Recipe::new(key);
+        recipe.sort_order = sort_order;
+        println!("{}", recipe.to_jsonl());
     }
     Ok(())
 }
@@ -1209,7 +1208,13 @@ fn main() -> anyhow::Result<()> {
             cook(&config, args)?;
         }
         EnwiroCookbookGit::Metadata => {
-            println!(r#"{{"defaultPriority":10}}"#);
+            println!(
+                "{}",
+                CookbookMetadata {
+                    default_priority: Some(10)
+                }
+                .to_json()
+            );
         }
     };
 

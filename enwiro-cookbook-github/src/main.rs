@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::Context;
 use clap::Parser;
+use enwiro_sdk::{CookbookMetadata, Recipe};
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -356,13 +357,12 @@ fn list_recipes() -> anyhow::Result<()> {
             GithubItemKind::PullRequest { .. } => "[PR]",
             GithubItemKind::Issue => "[issue]",
         };
-        let sort_order = compute_sort_order(index, total);
-        let recipe = serde_json::json!({
-            "name": format!("{}#{}", item.repo, item.number),
-            "description": format!("{} {}", prefix, safe_title),
-            "sort_order": sort_order,
-        });
-        println!("{}", serde_json::to_string(&recipe).unwrap());
+        let mut recipe = Recipe::with_description(
+            format!("{}#{}", item.repo, item.number),
+            format!("{} {}", prefix, safe_title),
+        );
+        recipe.sort_order = compute_sort_order(index, total);
+        println!("{}", recipe.to_jsonl());
     }
     Ok(())
 }
@@ -1466,7 +1466,13 @@ fn main() -> anyhow::Result<()> {
             gear(&config, args)?;
         }
         EnwiroCookbookGithub::Metadata => {
-            println!(r#"{{"defaultPriority":30}}"#);
+            println!(
+                "{}",
+                CookbookMetadata {
+                    default_priority: Some(30)
+                }
+                .to_json()
+            );
         }
     };
 
