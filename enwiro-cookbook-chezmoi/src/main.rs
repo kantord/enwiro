@@ -2,6 +2,8 @@ use std::process::Command;
 
 use anyhow::{Context, bail};
 use clap::Parser;
+use enwiro_sdk::{CookbookMetadata, Recipe};
+
 const RECIPE_NAME: &str = "chezmoi";
 
 #[derive(Parser)]
@@ -20,7 +22,7 @@ pub struct CookArgs {
 }
 
 fn list_recipes() {
-    println!(r#"{{"name":"{}","sort_order":0}}"#, RECIPE_NAME);
+    println!("{}", Recipe::new(RECIPE_NAME).to_jsonl());
 }
 
 fn cook(args: CookArgs) -> anyhow::Result<()> {
@@ -61,7 +63,13 @@ fn main() -> anyhow::Result<()> {
             cook(args)?;
         }
         EnwiroCookbookChezmoi::Metadata => {
-            println!(r#"{{"defaultPriority":20}}"#);
+            println!(
+                "{}",
+                CookbookMetadata {
+                    default_priority: Some(20)
+                }
+                .to_json()
+            );
         }
     };
 

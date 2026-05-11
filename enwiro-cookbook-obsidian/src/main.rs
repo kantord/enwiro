@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use enwiro_sdk::{CookbookMetadata, Recipe};
 use serde::Deserialize;
 
 const RECIPE_PREFIX: &str = "obsidian#";
@@ -19,14 +20,6 @@ struct ObsidianVaultEntry {
 #[derive(Debug, Deserialize)]
 struct ObsidianJson {
     vaults: HashMap<String, ObsidianVaultEntry>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct Recipe {
-    name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    sort_order: u32,
 }
 
 struct VaultRecipe {
@@ -213,10 +206,7 @@ fn read_obsidian_json() -> Result<String> {
 fn cmd_list_recipes() -> Result<()> {
     let json = read_obsidian_json()?;
     for recipe in list_recipes_from_json(&json)? {
-        println!(
-            "{}",
-            serde_json::to_string(&recipe).context("Failed to serialize recipe")?
-        );
+        println!("{}", recipe.to_jsonl());
     }
     Ok(())
 }
@@ -258,7 +248,13 @@ fn main() -> Result<()> {
         EnwiroCookbookObsidian::Cook(a) => cmd_cook(&a.recipe_name)?,
         EnwiroCookbookObsidian::Gear(a) => cmd_gear(&a.recipe_name)?,
         EnwiroCookbookObsidian::Metadata => {
-            println!(r#"{{"defaultPriority":{DEFAULT_PRIORITY}}}"#)
+            println!(
+                "{}",
+                CookbookMetadata {
+                    default_priority: Some(DEFAULT_PRIORITY)
+                }
+                .to_json()
+            );
         }
     }
     Ok(())

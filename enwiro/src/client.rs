@@ -4,26 +4,9 @@ use std::process::Command;
 
 use crate::plugin::Plugin;
 
+pub use enwiro_sdk::{CookbookMetadata, Recipe};
+
 const DEFAULT_PRIORITY: u32 = 50;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CookbookMetadata {
-    pub default_priority: Option<u32>,
-}
-
-pub fn parse_metadata(json: &str) -> anyhow::Result<CookbookMetadata> {
-    serde_json::from_str(json).context("Failed to parse cookbook metadata")
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Recipe {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub sort_order: u32,
-}
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct EnvScores {
@@ -41,25 +24,6 @@ pub struct CachedRecipe {
     pub sort_order: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scores: Option<EnvScores>,
-}
-
-impl Recipe {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: None,
-            sort_order: 0,
-        }
-    }
-
-    #[cfg(test)]
-    pub fn with_description(name: impl Into<String>, description: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            description: Some(description.into()),
-            sort_order: 0,
-        }
-    }
 }
 
 pub trait CookbookTrait {
@@ -118,7 +82,7 @@ impl CookbookClient {
             }
             let stdout = String::from_utf8(output.stdout)
                 .context("Cookbook metadata produced invalid UTF-8")?;
-            parse_metadata(&stdout)
+            CookbookMetadata::from_json(&stdout)
         })();
         match result {
             Ok(meta) => meta,
@@ -225,35 +189,6 @@ impl CookbookTrait for CookbookClient {
 mod tests {
     use super::*;
     use crate::plugin::PluginKind;
-
-    #[test]
-    fn test_parse_metadata_valid_json() {
-        let json = r#"{"defaultPriority": 10}"#;
-        let meta = parse_metadata(json).unwrap();
-        assert_eq!(meta.default_priority, Some(10));
-    }
-
-    #[test]
-    fn test_parse_metadata_empty_object() {
-        let json = r#"{}"#;
-        let meta = parse_metadata(json).unwrap();
-        assert_eq!(meta.default_priority, None);
-    }
-
-    #[test]
-    fn test_parse_metadata_unknown_fields_ignored() {
-        let json = r#"{
-            "defaultPriority": 20,
-            "someFutureField": "hello"
-        }"#;
-        let meta = parse_metadata(json).unwrap();
-        assert_eq!(meta.default_priority, Some(20));
-    }
-
-    #[test]
-    fn test_parse_metadata_invalid_json() {
-        assert!(parse_metadata("not json").is_err());
-    }
 
     fn mock_plugin(name: &str) -> Plugin {
         Plugin {
