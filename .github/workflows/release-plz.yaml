@@ -35,13 +35,24 @@ jobs:
       # Publish crates individually, skipping ones already on crates.io.
       # This works around release-plz's gix slotmap overflow during index
       # polling (GitoxideLabs/gitoxide#1788).
-      # NOTE: This does not publish in dependency order. If workspace crates
-      # start depending on each other, this step needs to be updated to
-      # respect the dependency graph.
+      # Iteration order is a topological sort over intra-workspace deps so a
+      # crate is always published after the workspace crates it depends on.
+      # NOTE: If publish ordering breaks again (e.g. new kinds of workspace
+      # cross-deps, or the tsort pipeline misbehaving), this step is the lever
+      # to update — make sure dependents are still ordered after their deps.
       - name: Publish to crates.io
         run: |
           set -o pipefail
-          for pkg in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | .name'); do
+          order=$(cargo metadata --format-version 1 | jq -r '
+            . as $m
+            | [$m.workspace_members[] | . as $id | $m.packages[] | select(.id == $id) | .name] as $ws
+            | $m.packages[]
+            | select(.name as $n | $ws | index($n))
+            | . as $p
+            | "\($p.name) \($p.name)",
+              (.dependencies[] | select(.name as $d | $ws | index($d)) | "\(.name) \($p.name)")
+          ' | tsort)
+          for pkg in $order; do
             echo "Publishing $pkg..."
             if cargo publish -p "$pkg" 2>&1 | tee /tmp/publish.log; then
               continue
