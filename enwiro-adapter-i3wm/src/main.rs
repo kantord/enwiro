@@ -614,6 +614,35 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
 /// switch-back branch in the activate handler and intentionally do not
 /// re-fire (would yank focus on single-instance native apps and multiply
 /// chromium app-mode windows).
+/// Run `find_best_move` to convergence and return the resulting rename plan.
+///
+/// Mutates `slots` in place so it reflects the converged placement on return.
+/// Uses a stability threshold of 0.0 because explicit user activation has no
+/// thrash risk — loop until stable.
+fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
+    let mut plan: Vec<(String, String)> = vec![];
+    loop {
+        let moves = find_best_move(slots, 9, 0.0);
+        if moves.is_empty() {
+            break;
+        }
+        for (old_name, new_name) in &moves {
+            let new_slot: i32 = new_name
+                .split_once(": ")
+                .and_then(|(s, _)| s.parse().ok())
+                .unwrap_or(0);
+            if let Some(ws) = slots
+                .iter_mut()
+                .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
+            {
+                ws.slot = new_slot;
+            }
+        }
+        plan.extend(moves);
+    }
+    plan
+}
+
 async fn activate_new_workspace(
     i3: &mut I3,
     workspaces: &[Workspace],
@@ -654,28 +683,7 @@ async fn activate_new_workspace(
     tracing::info!(workspace = %initial_workspace_name, "Creating workspace at free slot");
     run_i3_command(i3, build_workspace_command(&initial_workspace_name)).await?;
 
-    // Run find_best_move to convergence with no stability threshold
-    // (explicit user activation = no thrash risk, loop until stable).
-    let mut all_rename_cmds: Vec<(String, String)> = vec![];
-    loop {
-        let moves = find_best_move(&slots, 9, 0.0);
-        if moves.is_empty() {
-            break;
-        }
-        for (old_name, new_name) in &moves {
-            let new_slot: i32 = new_name
-                .split_once(": ")
-                .and_then(|(s, _)| s.parse().ok())
-                .unwrap_or(0);
-            if let Some(ws) = slots
-                .iter_mut()
-                .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
-            {
-                ws.slot = new_slot;
-            }
-        }
-        all_rename_cmds.extend(moves);
-    }
+    let all_rename_cmds = build_rebalance_plan(&mut slots);
 
     // Determine the final slot for the incoming env from the converged slot state.
     let target_num = slots
