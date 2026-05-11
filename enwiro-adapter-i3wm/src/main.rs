@@ -614,6 +614,71 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
 /// switch-back branch in the activate handler and intentionally do not
 /// re-fire (would yank focus on single-instance native apps and multiply
 /// chromium app-mode windows).
+/// Run `find_best_move` to convergence and return an i3-safe sequence of
+/// rename commands that achieves the converged placement.
+///
+/// Mutates `slots` in place so it reflects the converged placement on return.
+/// Uses a stability threshold of 0.0 because explicit user activation has no
+/// thrash risk, so loop until stable.
+///
+/// The raw convergence plan can contain cycles (e.g. a 2-cycle swap), which
+/// would transiently leave two workspaces sharing the same parsed `num` and
+/// trigger i3's "Old workspace not found" failure (issue #346). The returned
+/// plan is therefore expanded into a park-then-place sequence by
+/// `expand_with_parking`.
+fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
+    let mut plan: Vec<(String, String)> = vec![];
+    loop {
+        let moves = find_best_move(slots, 9, 0.0);
+        if moves.is_empty() {
+            break;
+        }
+        for (old_name, new_name) in &moves {
+            let new_slot: i32 = new_name
+                .split_once(": ")
+                .and_then(|(s, _)| s.parse().ok())
+                .unwrap_or(0);
+            if let Some(ws) = slots
+                .iter_mut()
+                .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
+            {
+                ws.slot = new_slot;
+            }
+        }
+        plan.extend(moves);
+    }
+    expand_with_parking(plan)
+}
+
+/// Expand a raw `(from, to)` rename sequence into a park-then-place sequence
+/// so each `from` uniquely addresses its intended workspace at execution time.
+///
+/// Phase 1 (park): every workspace in the plan is renamed to a unique
+/// num-less temporary name. Because parked names carry no `N:` prefix, i3
+/// assigns them no `num`, so no `num` collisions can occur during this phase.
+///
+/// Phase 2 (place): each parked workspace is renamed to its final target.
+/// Because the previous occupant of every target `num` was moved out in
+/// phase 1, no two live workspaces ever share a `num`.
+fn expand_with_parking(raw: Vec<(String, String)>) -> Vec<(String, String)> {
+    if raw.is_empty() {
+        return raw;
+    }
+    let token = std::process::id();
+    let temp_names: Vec<String> = (0..raw.len())
+        .map(|i| format!("__enwiro-rebalance-{token}-{i}__"))
+        .collect();
+    let parks = raw
+        .iter()
+        .enumerate()
+        .map(|(i, (old, _))| (old.clone(), temp_names[i].clone()));
+    let places = raw
+        .iter()
+        .enumerate()
+        .map(|(i, (_, new))| (temp_names[i].clone(), new.clone()));
+    parks.chain(places).collect()
+}
+
 async fn activate_new_workspace(
     i3: &mut I3,
     workspaces: &[Workspace],
@@ -654,28 +719,7 @@ async fn activate_new_workspace(
     tracing::info!(workspace = %initial_workspace_name, "Creating workspace at free slot");
     run_i3_command(i3, build_workspace_command(&initial_workspace_name)).await?;
 
-    // Run find_best_move to convergence with no stability threshold
-    // (explicit user activation = no thrash risk, loop until stable).
-    let mut all_rename_cmds: Vec<(String, String)> = vec![];
-    loop {
-        let moves = find_best_move(&slots, 9, 0.0);
-        if moves.is_empty() {
-            break;
-        }
-        for (old_name, new_name) in &moves {
-            let new_slot: i32 = new_name
-                .split_once(": ")
-                .and_then(|(s, _)| s.parse().ok())
-                .unwrap_or(0);
-            if let Some(ws) = slots
-                .iter_mut()
-                .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
-            {
-                ws.slot = new_slot;
-            }
-        }
-        all_rename_cmds.extend(moves);
-    }
+    let all_rename_cmds = build_rebalance_plan(&mut slots);
 
     // Determine the final slot for the incoming env from the converged slot state.
     let target_num = slots
@@ -2837,5 +2881,64 @@ mod tests {
             "already-at-fixed-point layout must return [], got {:?}",
             moves
         );
+    }
+
+    /// Regression for #346.
+    ///
+    /// i3 lets you address a workspace by full name OR by `num` alone, so
+    /// any moment where two live workspaces share the same `num` makes
+    /// number-based addressing ambiguous and triggers the "Old workspace
+    /// not found" failure observed in the issue. A correct rebalance plan
+    /// must keep `num`s unique at every intermediate state.
+    ///
+    /// Setup forces a 2-cycle (score-swap) by placing the only profitable
+    /// move between two occupied slots: "low" at slot 3 (score 0.1) and
+    /// "high" at slot 11 (score 0.9), with fillers blocking compaction
+    /// into any shortcut slot. The plan must therefore swap them, and
+    /// applied sequentially the first rename leaves both workspaces with
+    /// `num=11`, which this test catches.
+    #[test]
+    fn build_rebalance_plan_keeps_nums_unique_during_swap() {
+        let mut slots: Vec<WorkspaceSlot> =
+            vec![make_slot(3, "low", 0.1), make_slot(11, "high", 0.9)];
+        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
+            slots.push(make_slot(s, &format!("filler-{s}"), 0.9));
+        }
+
+        let plan = build_rebalance_plan(&mut slots);
+        assert!(
+            !plan.is_empty(),
+            "precondition: setup must produce a non-empty plan (a swap)"
+        );
+
+        let parse_num =
+            |name: &str| -> Option<i32> { name.split_once(": ").and_then(|(s, _)| s.parse().ok()) };
+
+        let mut state: std::collections::HashMap<String, Option<i32>> =
+            std::collections::HashMap::new();
+        state.insert("3: low".to_string(), Some(3));
+        state.insert("11: high".to_string(), Some(11));
+        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
+            state.insert(format!("{s}: filler-{s}"), Some(s));
+        }
+
+        for (i, (old_name, new_name)) in plan.iter().enumerate() {
+            assert!(
+                state.contains_key(old_name),
+                "step {i}: rename '{old_name}' -> '{new_name}' references a workspace that no longer exists. State: {state:?}",
+            );
+            state.remove(old_name);
+            state.insert(new_name.clone(), parse_num(new_name));
+
+            let mut nums: Vec<i32> = state.values().filter_map(|n| *n).collect();
+            nums.sort();
+            let before = nums.len();
+            nums.dedup();
+            assert_eq!(
+                nums.len(),
+                before,
+                "step {i}: duplicate num after rename '{old_name}' -> '{new_name}'. State: {state:?}",
+            );
+        }
     }
 }
