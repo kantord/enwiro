@@ -614,11 +614,18 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
 /// switch-back branch in the activate handler and intentionally do not
 /// re-fire (would yank focus on single-instance native apps and multiply
 /// chromium app-mode windows).
-/// Run `find_best_move` to convergence and return the resulting rename plan.
+/// Run `find_best_move` to convergence and return an i3-safe sequence of
+/// rename commands that achieves the converged placement.
 ///
 /// Mutates `slots` in place so it reflects the converged placement on return.
 /// Uses a stability threshold of 0.0 because explicit user activation has no
-/// thrash risk — loop until stable.
+/// thrash risk, so loop until stable.
+///
+/// The raw convergence plan can contain cycles (e.g. a 2-cycle swap), which
+/// would transiently leave two workspaces sharing the same parsed `num` and
+/// trigger i3's "Old workspace not found" failure (issue #346). The returned
+/// plan is therefore expanded into a park-then-place sequence by
+/// `expand_with_parking`.
 fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
     let mut plan: Vec<(String, String)> = vec![];
     loop {
@@ -640,7 +647,36 @@ fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
         }
         plan.extend(moves);
     }
-    plan
+    expand_with_parking(plan)
+}
+
+/// Expand a raw `(from, to)` rename sequence into a park-then-place sequence
+/// so each `from` uniquely addresses its intended workspace at execution time.
+///
+/// Phase 1 (park): every workspace in the plan is renamed to a unique
+/// num-less temporary name. Because parked names carry no `N:` prefix, i3
+/// assigns them no `num`, so no `num` collisions can occur during this phase.
+///
+/// Phase 2 (place): each parked workspace is renamed to its final target.
+/// Because the previous occupant of every target `num` was moved out in
+/// phase 1, no two live workspaces ever share a `num`.
+fn expand_with_parking(raw: Vec<(String, String)>) -> Vec<(String, String)> {
+    if raw.is_empty() {
+        return raw;
+    }
+    let token = std::process::id();
+    let temp_names: Vec<String> = (0..raw.len())
+        .map(|i| format!("__enwiro-rebalance-{token}-{i}__"))
+        .collect();
+    let parks = raw
+        .iter()
+        .enumerate()
+        .map(|(i, (old, _))| (old.clone(), temp_names[i].clone()));
+    let places = raw
+        .iter()
+        .enumerate()
+        .map(|(i, (_, new))| (temp_names[i].clone(), new.clone()));
+    parks.chain(places).collect()
 }
 
 async fn activate_new_workspace(
