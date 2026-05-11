@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.12...enwiro-adapter-i3wm-v0.1.13) - 2026-05-11
+
+### Fixed
+
+- *(adapter-i3wm)* fix swap cycle bug ([#350](https://github.com/kantord/enwiro/pull/350))
+
 ## [0.1.12](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.11...enwiro-adapter-i3wm-v0.1.12) - 2026-05-10
 
 ### Added
