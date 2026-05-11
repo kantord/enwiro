@@ -2846,4 +2846,63 @@ mod tests {
             moves
         );
     }
+
+    /// Regression for #346.
+    ///
+    /// i3 lets you address a workspace by full name OR by `num` alone, so
+    /// any moment where two live workspaces share the same `num` makes
+    /// number-based addressing ambiguous and triggers the "Old workspace
+    /// not found" failure observed in the issue. A correct rebalance plan
+    /// must keep `num`s unique at every intermediate state.
+    ///
+    /// Setup forces a 2-cycle (score-swap) by placing the only profitable
+    /// move between two occupied slots: "low" at slot 3 (score 0.1) and
+    /// "high" at slot 11 (score 0.9), with fillers blocking compaction
+    /// into any shortcut slot. The plan must therefore swap them, and
+    /// applied sequentially the first rename leaves both workspaces with
+    /// `num=11`, which this test catches.
+    #[test]
+    fn build_rebalance_plan_keeps_nums_unique_during_swap() {
+        let mut slots: Vec<WorkspaceSlot> =
+            vec![make_slot(3, "low", 0.1), make_slot(11, "high", 0.9)];
+        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
+            slots.push(make_slot(s, &format!("filler-{s}"), 0.9));
+        }
+
+        let plan = build_rebalance_plan(&mut slots);
+        assert!(
+            !plan.is_empty(),
+            "precondition: setup must produce a non-empty plan (a swap)"
+        );
+
+        let parse_num =
+            |name: &str| -> Option<i32> { name.split_once(": ").and_then(|(s, _)| s.parse().ok()) };
+
+        let mut state: std::collections::HashMap<String, Option<i32>> =
+            std::collections::HashMap::new();
+        state.insert("3: low".to_string(), Some(3));
+        state.insert("11: high".to_string(), Some(11));
+        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
+            state.insert(format!("{s}: filler-{s}"), Some(s));
+        }
+
+        for (i, (old_name, new_name)) in plan.iter().enumerate() {
+            assert!(
+                state.contains_key(old_name),
+                "step {i}: rename '{old_name}' -> '{new_name}' references a workspace that no longer exists. State: {state:?}",
+            );
+            state.remove(old_name);
+            state.insert(new_name.clone(), parse_num(new_name));
+
+            let mut nums: Vec<i32> = state.values().filter_map(|n| *n).collect();
+            nums.sort();
+            let before = nums.len();
+            nums.dedup();
+            assert_eq!(
+                nums.len(),
+                before,
+                "step {i}: duplicate num after rename '{old_name}' -> '{new_name}'. State: {state:?}",
+            );
+        }
+    }
 }
