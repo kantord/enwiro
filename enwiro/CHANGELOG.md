@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.29](https://github.com/kantord/enwiro/compare/enwiro-v0.3.28...enwiro-v0.3.29) - 2026-05-11
+
+### Other
+
+- move shared types to sdk create ([#353](https://github.com/kantord/enwiro/pull/353))
+
 ## [0.3.28](https://github.com/kantord/enwiro/compare/enwiro-v0.3.27...enwiro-v0.3.28) - 2026-05-10
 
 ### Added
