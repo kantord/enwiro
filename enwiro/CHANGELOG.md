@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.30](https://github.com/kantord/enwiro/compare/enwiro-v0.3.29...enwiro-v0.3.30) - 2026-05-12
+
+### Added
+
+- replace slow path with explicit failure when daemon is not running ([#355](https://github.com/kantord/enwiro/pull/355))
+
 ## [0.3.29](https://github.com/kantord/enwiro/compare/enwiro-v0.3.28...enwiro-v0.3.29) - 2026-05-11
 
 ### Other
