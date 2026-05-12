@@ -128,21 +128,29 @@ List of currently available bridges:
 
 - `enwiro-bridge-rofi`: Browse and activate environments from [rofi](https://github.com/davatorium/rofi)
 
-### Background Recipe Caching
+### Daemon
 
-A background daemon keeps recipe listings cached to avoid blocking the UI on slow
-cookbook plugins (e.g., GitHub API calls). Start it with:
+`enw activate` and `enw list-all` rely on a background daemon to discover
+recipes. Some cookbooks talk to the network (e.g., the GitHub cookbook), and
+running that work in the daemon keeps the foreground commands fast. If the
+daemon isn't running, both commands will fail with a clear error.
+
+Start it manually:
 
 ```
 enw daemon
 ```
 
-- Recipes are refreshed every 5 minutes while the user is active
-- The daemon runs until stopped (SIGTERM/SIGINT/SIGHUP cause a clean shutdown)
-- If the cache is unavailable, `list-all` falls back to fetching recipes synchronously
+Or check the systemd user service:
 
-Runtime files are stored in `$XDG_RUNTIME_DIR/enwiro/` (or `$XDG_CACHE_HOME/enwiro/run/`
-as fallback).
+```
+systemctl --user status enwiro-daemon.service
+```
+
+- Recipes are refreshed periodically while the user is active
+- SIGTERM, SIGINT, and SIGHUP all cause a clean shutdown
+- Runtime files live in `$XDG_RUNTIME_DIR/enwiro/` (or
+  `$XDG_CACHE_HOME/enwiro/run/` as fallback)
 
 ### Notifications
 

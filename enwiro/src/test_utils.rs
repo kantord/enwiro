@@ -205,6 +205,36 @@ pub mod test_utilities {
             std::os::unix::fs::symlink(&target_dir, &inner_symlink)
                 .expect("Could not create inner symlink");
         }
+
+        /// Populate the daemon recipe cache with a single entry, overwriting any
+        /// previous contents. Use this when a test exercises cook_environment via
+        /// the daemon-required path.
+        pub fn write_cache_entry(&self, cookbook: &str, name: &str) {
+            self.write_cache_entries(&[(cookbook, name, None)]);
+        }
+
+        /// Populate the daemon recipe cache with the given entries, in order.
+        /// Each entry is `(cookbook, name, optional_description)`. An empty
+        /// slice writes an empty cache file (still "fresh" but listing nothing).
+        pub fn write_cache_entries(&self, entries: &[(&str, &str, Option<&str>)]) {
+            let cache_dir = self
+                .cache_dir
+                .as_ref()
+                .expect("cache_dir must be set by the fixture");
+            std::fs::create_dir_all(cache_dir).expect("Could not create cache dir");
+            let content: String = entries
+                .iter()
+                .map(|(cookbook, name, description)| match description {
+                    Some(d) => format!(
+                        "{{\"cookbook\":\"{}\",\"name\":\"{}\",\"description\":\"{}\"}}\n",
+                        cookbook, name, d
+                    ),
+                    None => format!("{{\"cookbook\":\"{}\",\"name\":\"{}\"}}\n", cookbook, name),
+                })
+                .collect();
+            std::fs::write(cache_dir.join("recipes.cache"), content)
+                .expect("Could not write cache file");
+        }
     }
 
     #[fixture]

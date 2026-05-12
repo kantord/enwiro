@@ -224,6 +224,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        ctx.write_cache_entry("git", "new-project");
         ctx.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["new-project"],
@@ -405,6 +406,7 @@ mod tests {
     ) {
         let (_temp_dir, mut ctx, _, notifications) = context_object;
 
+        ctx.write_cache_entry("git", "my-project");
         ctx.cookbooks = vec![Box::new(ChainedErrorCookbook {
             cookbook_name: "git".to_string(),
             recipe_name: "my-project".to_string(),
@@ -445,6 +447,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        ctx.write_cache_entry("git", "my-project");
         ctx.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["my-project"],
