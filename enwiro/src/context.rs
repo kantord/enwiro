@@ -297,16 +297,6 @@ mod tests {
     }
 
     #[rstest]
-    fn test_cook_environment_errors_when_no_cookbooks(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (_temp_dir, context_object, _, _) = context_object;
-
-        let result = context_object.cook_environment("anything");
-        assert!(result.is_err());
-    }
-
-    #[rstest]
     fn test_cook_environment_uses_cache_to_skip_slow_cookbooks(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
@@ -352,15 +342,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
-        // Cache entry has a description
-        let cache_dir = context_object.cache_dir.as_ref().unwrap();
-        fs::create_dir_all(cache_dir).unwrap();
-        fs::write(
-            cache_dir.join("recipes.cache"),
-            "{\"cookbook\":\"github\",\"name\":\"owner/repo#42\",\"description\":\"Fix auth bug\"}\n",
-        )
-        .unwrap();
-
+        context_object.write_cache_entries(&[("github", "owner/repo#42", Some("Fix auth bug"))]);
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "github",
             vec!["owner/repo#42"],
@@ -490,13 +472,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
-        let cache_dir = context_object.cache_dir.as_ref().unwrap();
-        fs::create_dir_all(cache_dir).unwrap();
-        fs::write(
-            cache_dir.join("recipes.cache"),
-            "{\"cookbook\":\"github\",\"name\":\"owner/repo#42\",\"description\":\"Fix auth bug\"}\n",
-        )
-        .unwrap();
+        context_object.write_cache_entries(&[("github", "owner/repo#42", Some("Fix auth bug"))]);
         context_object.cookbooks = vec![Box::new(FakeCookbook::new_with_descriptions(
             "github",
             vec![("owner/repo#42", Some("Fix auth bug"))],

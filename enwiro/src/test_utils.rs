@@ -13,7 +13,7 @@ pub mod test_utilities {
     use std::rc::Rc;
 
     use crate::{
-        client::{CookbookTrait, Recipe},
+        client::{CachedRecipe, CookbookTrait, Recipe},
         commands::adapter::EnwiroAdapterTrait,
         config::ConfigurationValues,
         context::CommandContext,
@@ -223,12 +223,18 @@ pub mod test_utilities {
             std::fs::create_dir_all(cache_dir).expect("Could not create cache dir");
             let content: String = entries
                 .iter()
-                .map(|(cookbook, name, description)| match description {
-                    Some(d) => format!(
-                        "{{\"cookbook\":\"{}\",\"name\":\"{}\",\"description\":\"{}\"}}\n",
-                        cookbook, name, d
-                    ),
-                    None => format!("{{\"cookbook\":\"{}\",\"name\":\"{}\"}}\n", cookbook, name),
+                .map(|(cookbook, name, description)| {
+                    let entry = CachedRecipe {
+                        cookbook: (*cookbook).to_string(),
+                        name: (*name).to_string(),
+                        description: description.map(|d| d.to_string()),
+                        sort_order: 0,
+                        scores: None,
+                    };
+                    let mut line = serde_json::to_string(&entry)
+                        .expect("CachedRecipe should always serialise");
+                    line.push('\n');
+                    line
                 })
                 .collect();
             std::fs::write(cache_dir.join("recipes.cache"), content)
