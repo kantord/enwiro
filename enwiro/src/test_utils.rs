@@ -13,7 +13,7 @@ pub mod test_utilities {
     use std::rc::Rc;
 
     use crate::{
-        client::{CookbookTrait, Recipe},
+        client::{CachedRecipe, CookbookTrait, Recipe},
         commands::adapter::EnwiroAdapterTrait,
         config::ConfigurationValues,
         context::CommandContext,
@@ -204,6 +204,41 @@ pub mod test_utilities {
             let inner_symlink = env_dir.join(environment_name);
             std::os::unix::fs::symlink(&target_dir, &inner_symlink)
                 .expect("Could not create inner symlink");
+        }
+
+        /// Populate the daemon recipe cache with a single entry, overwriting any
+        /// previous contents.
+        pub fn write_cache_entry(&self, cookbook: &str, name: &str) {
+            self.write_cache_entries(&[(cookbook, name, None)]);
+        }
+
+        /// Populate the daemon recipe cache with the given entries, in order.
+        /// Each entry is `(cookbook, name, optional_description)`. An empty
+        /// slice writes an empty cache file (still "fresh" but listing nothing).
+        pub fn write_cache_entries(&self, entries: &[(&str, &str, Option<&str>)]) {
+            let cache_dir = self
+                .cache_dir
+                .as_ref()
+                .expect("cache_dir must be set by the fixture");
+            std::fs::create_dir_all(cache_dir).expect("Could not create cache dir");
+            let content: String = entries
+                .iter()
+                .map(|(cookbook, name, description)| {
+                    let entry = CachedRecipe {
+                        cookbook: (*cookbook).to_string(),
+                        name: (*name).to_string(),
+                        description: description.map(|d| d.to_string()),
+                        sort_order: 0,
+                        scores: None,
+                    };
+                    let mut line = serde_json::to_string(&entry)
+                        .expect("CachedRecipe should always serialise");
+                    line.push('\n');
+                    line
+                })
+                .collect();
+            std::fs::write(cache_dir.join("recipes.cache"), content)
+                .expect("Could not write cache file");
         }
     }
 

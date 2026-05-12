@@ -1,4 +1,4 @@
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow};
 
 use crate::{
     client::{CachedRecipe, CookbookClient, CookbookTrait},
@@ -55,63 +55,40 @@ impl<W: Write> CommandContext<W> {
     }
 
     pub fn cook_environment(&self, name: &str) -> anyhow::Result<Environment> {
-        // Check the cache to avoid calling list_recipes() on every cookbook
-        // (which can be slow for API-based cookbooks like GitHub)
-        match self.find_recipe_in_cache(name) {
-            Some(Some((cached_cookbook, cached_description))) => {
-                // Cache hit: cook directly via the right cookbook
-                if let Some(cookbook) = self.cookbooks.iter().find(|c| c.name() == cached_cookbook)
-                {
-                    tracing::debug!(name = %name, cookbook = %cached_cookbook, "Found recipe in cache");
-                    let env_path = cookbook.cook(name)?;
-                    let env = self.create_environment_symlink(name, &env_path)?;
-                    let flat_name = name.replace('/', "-");
-                    self.save_cook_metadata(
-                        &flat_name,
-                        &cached_cookbook,
-                        cached_description.as_deref(),
-                    );
-                    self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
-                    return Ok(env);
-                }
-                tracing::warn!(name = %name, cookbook = %cached_cookbook, "Cache references cookbook not found in plugins");
-            }
-            Some(None) => {
-                // Cache is fresh but recipe not in it - fall through to slow path
-                // in case the cache is slightly stale (up to CACHE_MAX_AGE)
-                tracing::debug!(name = %name, "Recipe not found in cache, falling back to slow path");
-            }
-            None => {
-                // No cache available - fall through to slow path
-            }
-        }
+        let (cookbook_name, description) = self.find_recipe_in_cache(name).ok_or_else(|| {
+            tracing::error!(name = %name, "Recipe not in daemon cache");
+            anyhow!(
+                "No recipe '{}' in the daemon cache. \
+                 Check: systemctl --user status enwiro-daemon.service",
+                name
+            )
+        })?;
 
-        // Fallback: iterate cookbooks and call list_recipes()
-        for cookbook in &self.cookbooks {
-            let recipes = cookbook.list_recipes()?;
-            for recipe in recipes.into_iter() {
-                if recipe.name != name {
-                    continue;
-                }
-                let env_path = cookbook.cook(&recipe.name)?;
-                let env = self.create_environment_symlink(name, &env_path)?;
-                let flat_name = name.replace('/', "-");
-                self.save_cook_metadata(&flat_name, cookbook.name(), recipe.description.as_deref());
-                self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
-                return Ok(env);
-            }
-        }
+        let cookbook = self
+            .cookbooks
+            .iter()
+            .find(|c| c.name() == cookbook_name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Cache lists recipe '{}' under cookbook '{}', which is not installed",
+                    name,
+                    cookbook_name
+                )
+            })?;
 
-        tracing::error!(name = %name, "No recipe available to cook environment");
-        bail!("No recipe available to cook this environment.")
+        tracing::debug!(name = %name, cookbook = %cookbook_name, "Found recipe in cache");
+        let env_path = cookbook.cook(name)?;
+        let env = self.create_environment_symlink(name, &env_path)?;
+        let flat_name = name.replace('/', "-");
+        self.save_cook_metadata(&flat_name, &cookbook_name, description.as_deref());
+        self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
+        Ok(env)
     }
 
     /// Look up a recipe in the daemon cache.
-    /// Returns:
-    /// - `Some(Some((cookbook, description)))` - cache is fresh and recipe was found
-    /// - `Some(None)` - cache is fresh but recipe is NOT in it
-    /// - `None` - no cache available (missing, stale, or error)
-    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<Option<(String, Option<String>)>> {
+    /// Returns `Some((cookbook, description))` if the cache contains the recipe,
+    /// `None` for any miss (cache absent, stale, or recipe not listed).
+    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<(String, Option<String>)> {
         let runtime_dir = match &self.cache_dir {
             Some(dir) => dir.clone(),
             None => daemon::runtime_dir().ok()?,
@@ -124,10 +101,10 @@ impl<W: Write> CommandContext<W> {
             if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line)
                 && entry.name == recipe_name
             {
-                return Some(Some((entry.cookbook, entry.description)));
+                return Some((entry.cookbook, entry.description));
             }
         }
-        Some(None) // cache exists but recipe not found
+        None
     }
 
     fn save_cook_metadata(&self, env_name: &str, cookbook: &str, description: Option<&str>) {
@@ -224,6 +201,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        context_object.write_cache_entry("git", "my-project");
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["my-project"],
@@ -250,6 +228,7 @@ mod tests {
         fs::create_dir(&cooked_dir).unwrap();
 
         let recipe_name = "my-project@feature/my-thing";
+        context_object.write_cache_entry("git", recipe_name);
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec![recipe_name],
@@ -276,6 +255,7 @@ mod tests {
         fs::create_dir(&cooked_dir).unwrap();
 
         let recipe_name = "my-project@feature/my-thing";
+        context_object.write_cache_entry("git", recipe_name);
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec![recipe_name],
@@ -296,56 +276,24 @@ mod tests {
     }
 
     #[rstest]
-    fn test_cook_environment_finds_recipe_in_second_cookbook(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (temp_dir, mut context_object, _, _) = context_object;
-
-        let cooked_dir = temp_dir.path().join("cooked-target");
-        fs::create_dir(&cooked_dir).unwrap();
-
-        context_object.cookbooks = vec![
-            Box::new(FakeCookbook::new("npm", vec!["unrelated-project"], vec![])),
-            Box::new(FakeCookbook::new(
-                "git",
-                vec!["my-project"],
-                vec![("my-project", cooked_dir.to_str().unwrap())],
-            )),
-        ];
-
-        let env = context_object.cook_environment("my-project").unwrap();
-        assert_eq!(env.name, "my-project");
-    }
-
-    #[rstest]
-    fn test_cook_environment_errors_when_no_recipe_matches(
+    fn test_cook_environment_errors_when_recipe_not_in_cache(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
+        // Cookbook can produce the recipe, but the cache does not list it.
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
-            vec!["other-project"],
+            vec!["my-project"],
             vec![],
         ))];
 
         let result = context_object.cook_environment("my-project");
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("No recipe available")
+            err.contains("daemon"),
+            "Error should point at the daemon, got: {err}"
         );
-    }
-
-    #[rstest]
-    fn test_cook_environment_errors_when_no_cookbooks(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (_temp_dir, context_object, _, _) = context_object;
-
-        let result = context_object.cook_environment("anything");
-        assert!(result.is_err());
     }
 
     #[rstest]
@@ -386,36 +334,6 @@ mod tests {
     }
 
     #[rstest]
-    fn test_cook_environment_falls_through_when_recipe_not_in_cache(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (temp_dir, mut context_object, _, _) = context_object;
-
-        let cooked_dir = temp_dir.path().join("cooked-target");
-        fs::create_dir(&cooked_dir).unwrap();
-
-        // Write a fresh cache that does NOT contain the requested recipe
-        let cache_dir = context_object.cache_dir.as_ref().unwrap();
-        fs::create_dir_all(cache_dir).unwrap();
-        fs::write(
-            cache_dir.join("recipes.cache"),
-            "{\"cookbook\":\"git\",\"name\":\"other-project\"}\n",
-        )
-        .unwrap();
-
-        // The recipe isn't in the cache, but the cookbook has it.
-        // cook_environment should fall through to the slow path and find it.
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["new-branch"],
-            vec![("new-branch", cooked_dir.to_str().unwrap())],
-        ))];
-
-        let env = context_object.cook_environment("new-branch").unwrap();
-        assert_eq!(env.name, "new-branch");
-    }
-
-    #[rstest]
     fn test_cook_environment_cache_hit_with_description(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
@@ -424,15 +342,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
-        // Cache entry has a description
-        let cache_dir = context_object.cache_dir.as_ref().unwrap();
-        fs::create_dir_all(cache_dir).unwrap();
-        fs::write(
-            cache_dir.join("recipes.cache"),
-            "{\"cookbook\":\"github\",\"name\":\"owner/repo#42\",\"description\":\"Fix auth bug\"}\n",
-        )
-        .unwrap();
-
+        context_object.write_cache_entries(&[("github", "owner/repo#42", Some("Fix auth bug"))]);
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "github",
             vec!["owner/repo#42"],
@@ -444,7 +354,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_cook_environment_falls_through_when_cached_cookbook_missing(
+    fn test_cook_environment_errors_when_cache_references_uninstalled_cookbook(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -452,24 +362,21 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
-        // Cache says recipe belongs to "npm" cookbook, but only "git" is installed
-        let cache_dir = context_object.cache_dir.as_ref().unwrap();
-        fs::create_dir_all(cache_dir).unwrap();
-        fs::write(
-            cache_dir.join("recipes.cache"),
-            "{\"cookbook\":\"npm\",\"name\":\"my-project\"}\n",
-        )
-        .unwrap();
-
+        // Cache says recipe belongs to "npm" cookbook, but only "git" is installed.
+        context_object.write_cache_entry("npm", "my-project");
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["my-project"],
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        // Should fall through to slow path and find it via git cookbook
-        let env = context_object.cook_environment("my-project").unwrap();
-        assert_eq!(env.name, "my-project");
+        let result = context_object.cook_environment("my-project");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("npm") && err.contains("not installed"),
+            "Error should name the missing cookbook, got: {err}"
+        );
     }
 
     #[rstest]
@@ -494,6 +401,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        context_object.write_cache_entry("git", "new-project");
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["new-project"],
@@ -541,6 +449,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        context_object.write_cache_entry("git", "my-project");
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["my-project"],
@@ -563,6 +472,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        context_object.write_cache_entries(&[("github", "owner/repo#42", Some("Fix auth bug"))]);
         context_object.cookbooks = vec![Box::new(FakeCookbook::new_with_descriptions(
             "github",
             vec![("owner/repo#42", Some("Fix auth bug"))],
@@ -591,6 +501,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        context_object.write_cache_entry("git", "my-project");
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["my-project"],
@@ -634,6 +545,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        context_object.write_cache_entry("git", "my-project");
         let gear_data = serde_json::json!({"tool": "nvim", "lsp": "rust-analyzer"});
         context_object.cookbooks = vec![Box::new(
             FakeCookbook::new(
@@ -670,6 +582,7 @@ mod tests {
         let cooked_dir = temp_dir.path().join("cooked-target");
         fs::create_dir(&cooked_dir).unwrap();
 
+        context_object.write_cache_entry("git", "my-project");
         // FakeCookbook with no gear (default behaviour)
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",

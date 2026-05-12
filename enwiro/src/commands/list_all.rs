@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
@@ -92,18 +92,14 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
         None => daemon::runtime_dir()?,
     };
 
-    // 3. Read from cache if available, otherwise synchronous fallback
-    let recipes = match daemon::read_cached_recipes(&runtime_dir) {
-        Ok(Some(cached)) => cached,
-        Ok(None) => {
-            tracing::debug!("No cache available, falling back to synchronous recipe collection");
-            daemon::collect_all_recipes(&context.cookbooks)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "Could not read cache, falling back to sync");
-            daemon::collect_all_recipes(&context.cookbooks)
-        }
-    };
+    let recipes = daemon::read_cached_recipes(&runtime_dir)
+        .context("Could not read the daemon cache")?
+        .ok_or_else(|| {
+            anyhow!(
+                "Daemon cache is not available. \
+                 Check: systemctl --user status enwiro-daemon.service"
+            )
+        })?;
 
     // 5. Write recipes, excluding any that match an existing environment
     for line in recipes.lines() {
@@ -136,7 +132,7 @@ mod tests {
     use rstest::rstest;
 
     use crate::test_utils::test_utilities::{
-        AdapterLog, FakeContext, FakeCookbook, NotificationLog, context_object,
+        AdapterLog, FakeContext, NotificationLog, context_object,
     };
     use crate::usage_stats::UserIntentSignals;
 
@@ -154,11 +150,7 @@ mod tests {
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("my-env");
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["repo-a", "repo-b"],
-            vec![],
-        ))];
+        context_object.write_cache_entries(&[("git", "repo-a", None), ("git", "repo-b", None)]);
 
         list_all(&mut context_object, false).unwrap();
 
@@ -174,11 +166,7 @@ mod tests {
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("repo-a");
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["repo-a", "repo-b"],
-            vec![],
-        ))];
+        context_object.write_cache_entries(&[("git", "repo-a", None), ("git", "repo-b", None)]);
 
         list_all(&mut context_object, false).unwrap();
 
@@ -200,14 +188,10 @@ mod tests {
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("repo#42");
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new_with_descriptions(
-            "github",
-            vec![
-                ("repo#42", Some("Fix auth bug")),
-                ("repo#99", Some("Add feature")),
-            ],
-            vec![],
-        ))];
+        context_object.write_cache_entries(&[
+            ("github", "repo#42", Some("Fix auth bug")),
+            ("github", "repo#99", Some("Add feature")),
+        ]);
 
         list_all(&mut context_object, false).unwrap();
 
@@ -223,12 +207,13 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_with_no_cookbooks(
+    fn test_list_all_with_no_recipes_in_cache(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("env-a");
         context_object.create_mock_environment("env-b");
+        context_object.write_cache_entries(&[]);
 
         list_all(&mut context_object, false).unwrap();
 
@@ -243,11 +228,7 @@ mod tests {
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["some-repo"],
-            vec![],
-        ))];
+        context_object.write_cache_entries(&[("git", "some-repo", None)]);
 
         list_all(&mut context_object, false).unwrap();
 
@@ -261,10 +242,11 @@ mod tests {
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        context_object.cookbooks = vec![
-            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
-            Box::new(FakeCookbook::new("npm", vec!["pkg-x", "pkg-y"], vec![])),
-        ];
+        context_object.write_cache_entries(&[
+            ("git", "repo-a", None),
+            ("npm", "pkg-x", None),
+            ("npm", "pkg-y", None),
+        ]);
 
         list_all(&mut context_object, false).unwrap();
 
@@ -309,6 +291,7 @@ mod tests {
         context_object.create_mock_environment("rarely-used");
         context_object.create_mock_environment("often-used");
         context_object.create_mock_environment("never-used");
+        context_object.write_cache_entries(&[]);
 
         // Write per-env meta.json giving "often-used" a high score and "rarely-used" a low score
         let now = crate::usage_stats::now_timestamp();
@@ -364,6 +347,7 @@ mod tests {
         context_object.create_mock_environment("low-activity");
         context_object.create_mock_environment("mid-activity");
         context_object.create_mock_environment("high-activity");
+        context_object.write_cache_entries(&[]);
 
         let now = crate::usage_stats::now_timestamp();
 
@@ -440,6 +424,7 @@ mod tests {
         let (temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("alpha");
         context_object.create_mock_environment("beta");
+        context_object.write_cache_entries(&[]);
 
         let now = crate::usage_stats::now_timestamp();
 
@@ -499,6 +484,7 @@ mod tests {
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("owner-repo#42");
+        context_object.write_cache_entries(&[]);
 
         // Write per-env meta.json with description
         let now = crate::usage_stats::now_timestamp();
@@ -527,16 +513,20 @@ mod tests {
         );
     }
 
+    /// list_all preserves the order of recipes as they appear in the cache.
+    /// The daemon owns the ordering decision (priority, sort_order, name); list_all
+    /// just outputs cached entries in cache order.
     #[rstest]
-    fn test_list_all_sorts_recipes_by_cookbook_priority(
+    fn test_list_all_preserves_cache_order(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        context_object.cookbooks = vec![
-            Box::new(FakeCookbook::new("github", vec!["repo#1"], vec![]).with_priority(30)),
-            Box::new(FakeCookbook::new("chezmoi", vec!["dotfiles"], vec![]).with_priority(20)),
-            Box::new(FakeCookbook::new("git", vec!["my-repo"], vec![]).with_priority(10)),
-        ];
+        // Cache is pre-sorted by the daemon. list_all must preserve that order.
+        context_object.write_cache_entries(&[
+            ("git", "my-repo", None),
+            ("chezmoi", "dotfiles", None),
+            ("github", "repo#1", None),
+        ]);
 
         list_all(&mut context_object, false).unwrap();
 
@@ -548,23 +538,18 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_falls_back_to_sync_when_no_cache(
+    fn test_list_all_errors_when_cache_unavailable(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["sync-repo"],
-            vec![],
-        ))];
+        // No cache file written: simulates the daemon not running.
 
-        list_all(&mut context_object, false).unwrap();
-
-        let output = context_object.get_output();
+        let result = list_all(&mut context_object, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
         assert!(
-            output.contains("git: sync-repo"),
-            "Should fall back to sync, got: {}",
-            output
+            err.contains("daemon"),
+            "Error should point at the daemon, got: {err}"
         );
     }
 
@@ -574,7 +559,7 @@ mod tests {
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("my-env");
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]))];
+        context_object.write_cache_entries(&[("git", "repo-a", None)]);
 
         list_all(&mut context_object, true).unwrap();
 
@@ -599,7 +584,7 @@ mod tests {
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("my-env");
-        context_object.cookbooks = vec![];
+        context_object.write_cache_entries(&[]);
 
         list_all(&mut context_object, true).unwrap();
 
@@ -648,7 +633,7 @@ mod tests {
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        context_object.cookbooks = vec![Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]))];
+        context_object.write_cache_entries(&[("git", "repo-a", None)]);
 
         list_all(&mut context_object, true).unwrap();
 
@@ -679,7 +664,7 @@ mod tests {
         let (temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("often-used");
         context_object.create_mock_environment("never-used");
-        context_object.cookbooks = vec![];
+        context_object.write_cache_entries(&[]);
 
         // Give "often-used" a high activation history
         let now = crate::usage_stats::now_timestamp();
