@@ -207,8 +207,7 @@ pub mod test_utilities {
         }
 
         /// Populate the daemon recipe cache with a single entry, overwriting any
-        /// previous contents. Use this when a test exercises cook_environment via
-        /// the daemon-required path.
+        /// previous contents.
         pub fn write_cache_entry(&self, cookbook: &str, name: &str) {
             self.write_cache_entries(&[(cookbook, name, None)]);
         }

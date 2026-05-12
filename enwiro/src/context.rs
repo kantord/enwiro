@@ -58,9 +58,8 @@ impl<W: Write> CommandContext<W> {
         let (cookbook_name, description) = self.find_recipe_in_cache(name).ok_or_else(|| {
             tracing::error!(name = %name, "Recipe not in daemon cache");
             anyhow!(
-                "No recipe '{}' found in the daemon's recipe cache. \
-                 The enwiro daemon is required; check its status with: \
-                 systemctl --user status enwiro-daemon.service",
+                "No recipe '{}' in the daemon cache. \
+                 Check: systemctl --user status enwiro-daemon.service",
                 name
             )
         })?;
@@ -71,8 +70,7 @@ impl<W: Write> CommandContext<W> {
             .find(|c| c.name() == cookbook_name)
             .ok_or_else(|| {
                 anyhow!(
-                    "Daemon cache says recipe '{}' belongs to cookbook '{}', \
-                     but that cookbook is not installed",
+                    "Cache lists recipe '{}' under cookbook '{}', which is not installed",
                     name,
                     cookbook_name
                 )
@@ -282,8 +280,7 @@ mod tests {
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        // Cookbook can produce the recipe, but the cache doesn't list it.
-        // The new contract: cooks only succeed for recipes the daemon has cached.
+        // Cookbook can produce the recipe, but the cache does not list it.
         context_object.cookbooks = vec![Box::new(FakeCookbook::new(
             "git",
             vec!["my-project"],

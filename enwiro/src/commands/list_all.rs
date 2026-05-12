@@ -92,16 +92,12 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
         None => daemon::runtime_dir()?,
     };
 
-    // 3. Read recipes from the daemon's cache. The daemon is required
-    //    infrastructure; we never fetch recipes synchronously here because doing
-    //    so would block the listing on slow cookbook plugins (e.g. GitHub).
     let recipes = daemon::read_cached_recipes(&runtime_dir)
-        .context("Could not read the daemon's recipe cache")?
+        .context("Could not read the daemon cache")?
         .ok_or_else(|| {
             anyhow!(
-                "The daemon's recipe cache is unavailable. \
-                 The enwiro daemon is required; check its status with: \
-                 systemctl --user status enwiro-daemon.service"
+                "Daemon cache is not available. \
+                 Check: systemctl --user status enwiro-daemon.service"
             )
         })?;
 

@@ -130,10 +130,10 @@ List of currently available bridges:
 
 ### Daemon
 
-`enw activate` and `enw list-all` rely on a background daemon to discover
-recipes. Some cookbooks talk to the network (e.g., the GitHub cookbook), and
-running that work in the daemon keeps the foreground commands fast. If the
-daemon isn't running, both commands will fail with a clear error.
+`enw activate` and `enw list-all` need a background daemon. Some cookbooks
+fetch recipes over the network (the GitHub cookbook, for example), so enwiro
+does that work in a daemon to keep the foreground commands fast. Both
+commands will fail if the daemon is not running.
 
 Start it manually:
 
@@ -148,7 +148,7 @@ systemctl --user status enwiro-daemon.service
 ```
 
 - Recipes are refreshed periodically while the user is active
-- SIGTERM, SIGINT, and SIGHUP all cause a clean shutdown
+- SIGTERM, SIGINT, and SIGHUP all shut it down cleanly
 - Runtime files live in `$XDG_RUNTIME_DIR/enwiro/` (or
   `$XDG_CACHE_HOME/enwiro/run/` as fallback)
 
