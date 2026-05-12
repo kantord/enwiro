@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.11...enwiro-cookbook-git-v0.1.12) - 2026-05-11
+
+### Other
+
+- move shared types to sdk create ([#353](https://github.com/kantord/enwiro/pull/353))
+
 ## [0.1.11](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.10...enwiro-cookbook-git-v0.1.11) - 2026-05-10
 
 ### Added
