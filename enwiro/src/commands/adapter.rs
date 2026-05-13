@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use crate::plugin::{PluginKind, get_plugins};
 use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo};
 use enwiro_sdk::gear::Gear;
+use enwiro_sdk::plugin::{PluginKind, get_plugins};
 
 pub trait EnwiroAdapterTrait {
     fn get_active_environment_name(&self) -> anyhow::Result<String>;

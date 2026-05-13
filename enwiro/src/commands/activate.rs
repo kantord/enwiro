@@ -382,9 +382,9 @@ mod tests {
         recipe_name: String,
     }
 
-    impl crate::client::CookbookTrait for ChainedErrorCookbook {
-        fn list_recipes(&self) -> anyhow::Result<Vec<crate::client::Recipe>> {
-            Ok(vec![crate::client::Recipe::new(&self.recipe_name)])
+    impl enwiro_sdk::client::CookbookTrait for ChainedErrorCookbook {
+        fn list_recipes(&self) -> anyhow::Result<Vec<enwiro_sdk::cookbook::Recipe>> {
+            Ok(vec![enwiro_sdk::cookbook::Recipe::new(&self.recipe_name)])
         }
 
         fn cook(&self, _recipe: &str) -> anyhow::Result<String> {

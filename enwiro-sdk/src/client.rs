@@ -2,9 +2,8 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
+use crate::cookbook::{CookbookMetadata, Recipe};
 use crate::plugin::Plugin;
-
-pub use enwiro_sdk::{CookbookMetadata, Recipe};
 
 const DEFAULT_PRIORITY: u32 = 50;
 

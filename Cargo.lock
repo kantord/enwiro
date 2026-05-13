@@ -651,6 +651,7 @@ dependencies = [
  "rstest",
  "serde",
  "serde_json",
+ "strum_macros",
  "tempfile",
  "tracing",
  "tracing-appender",

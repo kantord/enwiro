@@ -13,12 +13,11 @@ pub mod test_utilities {
     use std::rc::Rc;
 
     use crate::{
-        client::{CachedRecipe, CookbookTrait, Recipe},
-        commands::adapter::EnwiroAdapterTrait,
-        config::ConfigurationValues,
-        context::CommandContext,
-        notifier::Notifier,
+        commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues,
+        context::CommandContext, notifier::Notifier,
     };
+    use enwiro_sdk::client::{CachedRecipe, CookbookTrait};
+    use enwiro_sdk::cookbook::Recipe;
 
     pub type AdapterLog = Rc<RefCell<Vec<String>>>;
     pub type NotificationLog = Rc<RefCell<Vec<String>>>;
