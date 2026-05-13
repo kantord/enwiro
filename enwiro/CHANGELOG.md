@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.31](https://github.com/kantord/enwiro/compare/enwiro-v0.3.30...enwiro-v0.3.31) - 2026-05-13
+
+### Other
+
+- move client and plugin modules into enwiro-sdk
+- consolidate atomic_write helper in enwiro-sdk
+
 ## [0.3.30](https://github.com/kantord/enwiro/compare/enwiro-v0.3.29...enwiro-v0.3.30) - 2026-05-12
 
 ### Added
