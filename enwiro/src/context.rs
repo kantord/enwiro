@@ -120,7 +120,7 @@ impl<W: Write> CommandContext<W> {
                     .join(enwiro_sdk::gear::gear_filename(cookbook.name()));
                 match serde_json::to_vec(&json) {
                     Ok(bytes) => {
-                        if let Err(e) = crate::usage_stats::atomic_write(&gear_path, &bytes) {
+                        if let Err(e) = enwiro_sdk::fs::atomic_write(&gear_path, &bytes) {
                             tracing::debug!(error = %e, "Failed to write gear file, continuing");
                         }
                     }

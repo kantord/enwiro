@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod cookbook;
+pub mod fs;
 pub mod gear;
 pub mod logging;
 

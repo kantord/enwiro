@@ -19,13 +19,10 @@ pub fn runtime_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Atomically write content to the cache file.
-/// Writes to a temporary file in the same directory, then renames.
 pub fn write_cache_atomic(runtime_dir: &Path, content: &str) -> anyhow::Result<()> {
-    fs::create_dir_all(runtime_dir).context("Could not create runtime directory")?;
     let cache_path = runtime_dir.join("recipes.cache");
-    let tmp_path = runtime_dir.join("recipes.cache.tmp");
-    fs::write(&tmp_path, content).context("Could not write temporary cache file")?;
-    fs::rename(&tmp_path, &cache_path).context("Could not rename cache file into place")?;
+    enwiro_sdk::fs::atomic_write(&cache_path, content.as_bytes())
+        .with_context(|| format!("Could not write cache file {}", cache_path.display()))?;
     tracing::debug!(path = %cache_path.display(), "Cache file updated");
     Ok(())
 }
