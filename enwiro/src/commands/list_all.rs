@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
-use crate::client::{CachedRecipe, EnvScores};
 use crate::context::CommandContext;
 use crate::daemon;
 use crate::usage_stats::EnvStats;
+use enwiro_sdk::client::{CachedRecipe, EnvScores};
 
 #[derive(clap::Args)]
 #[command(

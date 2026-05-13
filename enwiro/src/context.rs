@@ -1,14 +1,14 @@
 use anyhow::{Context, anyhow};
 
 use crate::{
-    client::{CachedRecipe, CookbookClient, CookbookTrait},
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
     config::ConfigurationValues,
     daemon,
     environments::Environment,
     notifier::{DesktopNotifier, Notifier},
-    plugin::{PluginKind, get_plugins},
 };
+use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
+use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, path::PathBuf};
 
 pub struct CommandContext<W: Write> {
@@ -38,7 +38,7 @@ impl<W: Write> CommandContext<W> {
             .into_iter()
             .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
-        crate::client::sort_cookbooks(&mut cookbooks);
+        enwiro_sdk::client::sort_cookbooks(&mut cookbooks);
 
         tracing::debug!(count = cookbooks.len(), "Cookbooks loaded");
 

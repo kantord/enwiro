@@ -5,10 +5,12 @@
 //! conventions, and any future plugin-protocol types.
 
 pub mod adapter;
+pub mod client;
 pub mod cookbook;
 pub mod fs;
 pub mod gear;
 pub mod logging;
+pub mod plugin;
 
 pub use cookbook::{CookbookMetadata, Recipe};
 pub use logging::init_logging;

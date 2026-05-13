@@ -1,11 +1,9 @@
-mod client;
 mod commands;
 mod config;
 mod context;
 mod daemon;
 mod environments;
 mod notifier;
-mod plugin;
 mod test_utils;
 mod usage_stats;
 

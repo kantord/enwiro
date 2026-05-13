@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::{PluginKind, get_plugins};
+use enwiro_sdk::plugin::{PluginKind, get_plugins};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConfigurationValues {

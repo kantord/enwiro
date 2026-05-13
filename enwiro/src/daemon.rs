@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 
-use crate::client::{CachedRecipe, CookbookClient, CookbookTrait};
-use crate::plugin::{PluginKind, get_plugins};
+use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
+use enwiro_sdk::plugin::{PluginKind, get_plugins};
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
 /// Prefers $XDG_RUNTIME_DIR/enwiro, falls back to $XDG_CACHE_HOME/enwiro/run.
@@ -309,8 +309,8 @@ pub fn run_daemon() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::CachedRecipe;
     use crate::test_utils::test_utilities::{FailingCookbook, FakeCookbook};
+    use enwiro_sdk::client::CachedRecipe;
 
     fn parse_cached_lines(output: &str) -> Vec<CachedRecipe> {
         output
