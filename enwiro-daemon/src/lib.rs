@@ -6,6 +6,10 @@
 //! `on_workspace_switch` callback; everything else (PID file, signal
 //! handling, idle detection, cache file location) is owned by this crate.
 
+pub mod config;
+pub mod meta;
+pub use config::ConfigurationValues;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

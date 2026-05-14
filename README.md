@@ -138,7 +138,7 @@ commands will fail if the daemon is not running.
 Start it manually:
 
 ```
-enw daemon
+enwiro-daemon
 ```
 
 Or check the systemd user service:

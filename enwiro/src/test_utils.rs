@@ -13,9 +13,9 @@ pub mod test_utilities {
     use std::rc::Rc;
 
     use crate::{
-        commands::adapter::EnwiroAdapterTrait, config::ConfigurationValues,
-        context::CommandContext, notifier::Notifier,
+        commands::adapter::EnwiroAdapterTrait, context::CommandContext, notifier::Notifier,
     };
+    use enwiro_daemon::ConfigurationValues;
     use enwiro_sdk::client::CachedRecipe;
     pub use enwiro_sdk::test_helpers::{FailingCookbook, FakeCookbook};
 

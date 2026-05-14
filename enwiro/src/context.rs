@@ -2,10 +2,10 @@ use anyhow::{Context, anyhow};
 
 use crate::{
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
-    config::ConfigurationValues,
     environments::Environment,
     notifier::{DesktopNotifier, Notifier},
 };
+use enwiro_daemon::ConfigurationValues;
 use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, path::PathBuf};

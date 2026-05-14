@@ -1,5 +1,4 @@
 mod commands;
-mod config;
 mod context;
 mod environments;
 mod notifier;
@@ -13,8 +12,8 @@ use commands::list_all::{ListAllArgs, list_all};
 use commands::list_environments::{ListEnvironmentsArgs, list_environments};
 use commands::show_path::{ShowPathArgs, show_path};
 use commands::wrap::{WrapArgs, wrap};
-use config::ConfigurationValues;
 use context::CommandContext;
+use enwiro_daemon::ConfigurationValues;
 use std::fs::create_dir;
 use std::io::Write;
 use std::path::Path;
@@ -26,9 +25,6 @@ enum EnwiroCli {
     ListAll(ListAllArgs),
     ShowPath(ShowPathArgs),
     Wrap(WrapArgs),
-    /// Internal: background daemon for recipe caching
-    #[command(hide = true)]
-    Daemon,
 }
 
 fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
@@ -44,16 +40,6 @@ fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     let args = EnwiroCli::parse();
 
-    // Daemon subcommand runs independently — it manages its own plugin discovery
-    if matches!(args, EnwiroCli::Daemon) {
-        let _guard = enwiro_sdk::init_logging("enwiro-daemon.log");
-        let config: ConfigurationValues = confy::load("enwiro", "enwiro").unwrap_or_default();
-        return enwiro_daemon::run(
-            std::path::PathBuf::from(config.workspaces_directory),
-            usage_stats::record_switch_per_env,
-        );
-    }
-
     let _guard = enwiro_sdk::init_logging("enwiro.log");
 
     let config: ConfigurationValues =
@@ -68,7 +54,6 @@ fn main() -> anyhow::Result<()> {
         EnwiroCli::ListAll(args) => list_all(&mut context_object, args.json),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
-        EnwiroCli::Daemon => unreachable!(),
     };
 
     context_object
