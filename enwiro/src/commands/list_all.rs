@@ -4,7 +4,6 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::context::CommandContext;
-use crate::daemon;
 use crate::usage_stats::EnvStats;
 use enwiro_sdk::client::{CachedRecipe, EnvScores};
 
@@ -86,13 +85,14 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
     // Collect environment names to filter out duplicate recipes
     let env_names: HashSet<&str> = envs.iter().map(|e| e.name.as_str()).collect();
 
-    // 2. Resolve runtime directory (test-injectable via cache_dir)
-    let runtime_dir = match &context.cache_dir {
-        Some(dir) => dir.clone(),
-        None => daemon::runtime_dir()?,
+    // 2. Resolve the daemon cache (test-injectable via cache_dir)
+    let cache = match &context.cache_dir {
+        Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
+        None => enwiro_daemon::DaemonCache::open()?,
     };
 
-    let recipes = daemon::read_cached_recipes(&runtime_dir)
+    let recipes = cache
+        .read_recipes()
         .context("Could not read the daemon cache")?
         .ok_or_else(|| {
             anyhow!(
@@ -264,8 +264,9 @@ mod tests {
         let cache_dir = context_object.cache_dir.clone().unwrap();
 
         // Pre-populate cache with JSONL (daemon format)
-        daemon::write_cache_atomic(
-            &cache_dir,
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(
+            cache_dir.join("recipes.cache"),
             "{\"cookbook\":\"git\",\"name\":\"cached-repo\"}\n",
         )
         .unwrap();

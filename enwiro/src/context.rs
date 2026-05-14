@@ -3,7 +3,6 @@ use anyhow::{Context, anyhow};
 use crate::{
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
     config::ConfigurationValues,
-    daemon,
     environments::Environment,
     notifier::{DesktopNotifier, Notifier},
 };
@@ -89,11 +88,11 @@ impl<W: Write> CommandContext<W> {
     /// Returns `Some((cookbook, description))` if the cache contains the recipe,
     /// `None` for any miss (cache absent, stale, or recipe not listed).
     fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<(String, Option<String>)> {
-        let runtime_dir = match &self.cache_dir {
-            Some(dir) => dir.clone(),
-            None => daemon::runtime_dir().ok()?,
+        let cache = match &self.cache_dir {
+            Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
+            None => enwiro_daemon::DaemonCache::open().ok()?,
         };
-        let cached = daemon::read_cached_recipes(&runtime_dir).ok()??;
+        let cached = cache.read_recipes().ok()??;
         for line in cached.lines() {
             if line.is_empty() {
                 continue;

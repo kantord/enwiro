@@ -1,3 +1,11 @@
+//! Background daemon for enwiro.
+//!
+//! Refreshes the cookbook recipe cache on a periodic interval (when the user
+//! is active) and forwards workspace switch events from the adapter's
+//! `listen` subcommand. The caller provides a `workspaces_directory` and a
+//! `on_workspace_switch` callback; everything else (PID file, signal
+//! handling, idle detection, cache file location) is owned by this crate.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,15 +19,51 @@ use enwiro_sdk::plugin::{PluginKind, get_plugins};
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
 /// Prefers $XDG_RUNTIME_DIR/enwiro, falls back to $XDG_CACHE_HOME/enwiro/run.
-pub fn runtime_dir() -> anyhow::Result<PathBuf> {
+fn runtime_dir() -> anyhow::Result<PathBuf> {
     let base = dirs::runtime_dir()
         .or_else(|| dirs::cache_dir().map(|d| d.join("run")))
         .context("Could not determine runtime or cache directory")?;
     Ok(base.join("enwiro"))
 }
 
+/// Read-only view of the daemon's on-disk cache. Resolves the runtime
+/// directory the same way the daemon does, so callers don't need to know
+/// where the cache file lives.
+pub struct DaemonCache {
+    runtime_dir: PathBuf,
+}
+
+impl DaemonCache {
+    /// Resolve the runtime directory and return a handle. Does not require
+    /// the daemon to be running.
+    pub fn open() -> anyhow::Result<Self> {
+        Ok(Self {
+            runtime_dir: runtime_dir()?,
+        })
+    }
+
+    /// Open a handle backed by an explicit runtime directory instead of the
+    /// XDG-derived one. Useful for tests and for tools pointing at a specific
+    /// daemon's cache.
+    pub fn with_runtime_dir(runtime_dir: PathBuf) -> Self {
+        Self { runtime_dir }
+    }
+
+    /// Read the cached recipes JSONL file. Returns `Ok(None)` when the cache
+    /// is missing or stale.
+    pub fn read_recipes(&self) -> anyhow::Result<Option<String>> {
+        read_cached_recipes(&self.runtime_dir)
+    }
+
+    /// The runtime directory in use. Exposed primarily so callers can mention
+    /// it in error messages.
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
+    }
+}
+
 /// Atomically write content to the cache file.
-pub fn write_cache_atomic(runtime_dir: &Path, content: &str) -> anyhow::Result<()> {
+pub(crate) fn write_cache_atomic(runtime_dir: &Path, content: &str) -> anyhow::Result<()> {
     let cache_path = runtime_dir.join("recipes.cache");
     enwiro_sdk::fs::atomic_write(&cache_path, content.as_bytes())
         .with_context(|| format!("Could not write cache file {}", cache_path.display()))?;
@@ -31,7 +75,7 @@ pub fn write_cache_atomic(runtime_dir: &Path, content: &str) -> anyhow::Result<(
 const CACHE_MAX_AGE: Duration = Duration::from_secs(70); // 40s + 30s
 
 /// Read the cached recipes. Returns None if cache doesn't exist or is stale.
-pub fn read_cached_recipes(runtime_dir: &Path) -> anyhow::Result<Option<String>> {
+fn read_cached_recipes(runtime_dir: &Path) -> anyhow::Result<Option<String>> {
     let cache_path = runtime_dir.join("recipes.cache");
     let metadata = match fs::metadata(&cache_path) {
         Ok(m) => m,
@@ -63,7 +107,7 @@ fn check_idle_with_timeout(get_idle: impl Fn() -> Option<Duration>, threshold: D
 }
 
 /// Returns true if the user has been idle longer than 90 minutes.
-pub fn check_idle() -> bool {
+pub(crate) fn check_idle() -> bool {
     check_idle_with_timeout(
         || system_idle_time::get_idle_time().ok(),
         USER_IDLE_THRESHOLD,
@@ -84,7 +128,7 @@ fn read_pid_file(runtime_dir: &Path) -> Option<(i32, Option<SystemTime>)> {
 }
 
 /// Write the current process PID to the PID file.
-pub fn write_pid_file(runtime_dir: &Path) -> anyhow::Result<()> {
+pub(crate) fn write_pid_file(runtime_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(runtime_dir).context("Could not create runtime directory")?;
     let pid_path = runtime_dir.join("daemon.pid");
     fs::write(&pid_path, std::process::id().to_string()).context("Could not write PID file")?;
@@ -92,7 +136,7 @@ pub fn write_pid_file(runtime_dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Remove the PID file on daemon exit, but only if it still belongs to this process.
-pub fn remove_pid_file(runtime_dir: &Path) {
+pub(crate) fn remove_pid_file(runtime_dir: &Path) {
     let pid_path = runtime_dir.join("daemon.pid");
     if let Some((stored_pid, _)) = read_pid_file(runtime_dir)
         && stored_pid == std::process::id() as i32
@@ -104,7 +148,7 @@ pub fn remove_pid_file(runtime_dir: &Path) {
 /// Check if a daemon is currently running by reading the PID file and
 /// sending signal 0 (no-op) to the process.
 #[allow(dead_code)]
-pub fn is_daemon_running(runtime_dir: &Path) -> bool {
+pub(crate) fn is_daemon_running(runtime_dir: &Path) -> bool {
     match read_pid_file(runtime_dir) {
         Some((pid, _)) => unsafe { libc::kill(pid, 0) == 0 },
         None => false,
@@ -120,7 +164,7 @@ struct SortableCachedRecipe {
 /// Collect recipes from all cookbooks as JSON lines, sorted globally
 /// by (sort_order, cookbook priority, name).
 /// Errors in individual cookbooks are logged and skipped.
-pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
+pub(crate) fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
     let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
 
     for cookbook in cookbooks {
@@ -170,7 +214,7 @@ pub fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
 /// Parse a JSONL workspace switch event line.
 /// Returns `Some((env_name, timestamp))` if the line is a valid `workspace_switch` event,
 /// or `None` for any other content (wrong type, missing fields, invalid JSON).
-pub fn parse_switch_event(line: &str) -> Option<(String, i64)> {
+pub(crate) fn parse_switch_event(line: &str) -> Option<(String, i64)> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     if v.get("type")?.as_str()? != "workspace_switch" {
         return None;
@@ -188,9 +232,15 @@ fn should_refresh_cache(is_idle: bool) -> bool {
     !is_idle
 }
 
-/// Entry point for the daemon. Called when `enwiro daemon` is invoked.
-pub fn run_daemon() -> anyhow::Result<()> {
-    // Detach from session
+/// Run the daemon. Blocks until SIGTERM/SIGINT/SIGHUP.
+///
+/// `workspaces_directory` is the root under which enwiro environments live;
+/// switch events emitted by the adapter `listen` subprocess are resolved as
+/// `<workspaces_directory>/<env_name>` and passed to `on_workspace_switch`.
+pub fn run(
+    workspaces_directory: PathBuf,
+    on_workspace_switch: impl Fn(&Path, i64) + Send + 'static,
+) -> anyhow::Result<()> {
     let setsid_result = unsafe { libc::setsid() };
     if setsid_result == -1 {
         tracing::warn!("setsid() failed, continuing anyway");
@@ -199,21 +249,13 @@ pub fn run_daemon() -> anyhow::Result<()> {
     let dir = runtime_dir()?;
     fs::create_dir_all(&dir)?;
 
-    // Write PID file
     write_pid_file(&dir)?;
 
-    // Register signal handler
     let term = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
 
-    // Load config to get workspaces directory
-    let config: crate::config::ConfigurationValues =
-        confy::load("enwiro", "enwiro").unwrap_or_default();
-    let workspaces_directory = config.workspaces_directory.clone();
-
-    // Spawn adapter listen subprocess if an adapter plugin exists
     let adapter_plugin = get_plugins(PluginKind::Adapter).into_iter().next();
     let mut listen_child: Option<std::process::Child> = None;
     if let Some(ref plugin) = adapter_plugin {
@@ -234,7 +276,6 @@ pub fn run_daemon() -> anyhow::Result<()> {
         }
     }
 
-    // Spawn a background reader thread that sends lines from the listen subprocess
     let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
     if let Some(ref mut child) = listen_child
         && let Some(stdout) = child.stdout.take()
@@ -259,15 +300,14 @@ pub fn run_daemon() -> anyhow::Result<()> {
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
-        // Drain available lines from the listen subprocess
         loop {
             match line_rx.try_recv() {
                 Ok(line) => {
                     if let Some((env_name, timestamp)) = parse_switch_event(&line)
                         && !env_name.is_empty()
                     {
-                        let env_dir = std::path::Path::new(&workspaces_directory).join(&env_name);
-                        crate::usage_stats::record_switch_per_env(&env_dir, timestamp);
+                        let env_dir = workspaces_directory.join(&env_name);
+                        on_workspace_switch(&env_dir, timestamp);
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -276,7 +316,6 @@ pub fn run_daemon() -> anyhow::Result<()> {
         }
 
         if should_refresh_cache(check_idle()) {
-            // Discover plugins fresh each cycle (new cookbooks may be installed)
             let plugins = get_plugins(PluginKind::Cookbook);
             let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
                 .into_iter()
@@ -289,7 +328,6 @@ pub fn run_daemon() -> anyhow::Result<()> {
             }
         }
 
-        // Sleep in 1-second increments, checking for termination signal
         let mut elapsed = Duration::ZERO;
         while elapsed < REFRESH_INTERVAL {
             if term.load(Ordering::Relaxed) {
@@ -309,8 +347,8 @@ pub fn run_daemon() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::test_utilities::{FailingCookbook, FakeCookbook};
     use enwiro_sdk::client::CachedRecipe;
+    use enwiro_sdk::test_helpers::{FailingCookbook, FakeCookbook};
 
     fn parse_cached_lines(output: &str) -> Vec<CachedRecipe> {
         output
@@ -494,7 +532,6 @@ mod tests {
     fn test_read_cache_returns_none_when_stale() {
         let dir = tempfile::tempdir().unwrap();
         write_cache_atomic(dir.path(), r#"{"cookbook":"git","name":"old-repo"}"#).unwrap();
-        // Backdate cache to 10 minutes ago (older than 40s + 30s staleness threshold)
         let past = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - std::time::Duration::from_secs(600),
         );
@@ -540,7 +577,6 @@ mod tests {
         ];
         let output = collect_all_recipes(&cookbooks);
         let entries = parse_cached_lines(&output);
-        // Global sort: (sort_order=0, priority=20, name) — alphabetical by recipe name
         assert_eq!(
             entries[0].name, "pkg-x",
             "Same sort_order and priority should tie-break by recipe name"
@@ -582,12 +618,10 @@ mod tests {
         let output = collect_all_recipes(&cookbooks);
         let entries = parse_cached_lines(&output);
         assert_eq!(entries.len(), 4);
-        // sort_order=0 items first (git before github due to priority tiebreak)
         assert_eq!(entries[0].name, "git-repo-a");
         assert_eq!(entries[0].sort_order, 0);
         assert_eq!(entries[1].name, "gh-issue-1");
         assert_eq!(entries[1].sort_order, 0);
-        // sort_order=50 items next
         assert_eq!(entries[2].name, "git-repo-b");
         assert_eq!(entries[2].sort_order, 50);
         assert_eq!(entries[3].name, "gh-issue-2");
@@ -596,7 +630,6 @@ mod tests {
 
     #[test]
     fn test_should_refresh_cache_when_not_idle() {
-        // When user is active, the cache refresh should proceed
         assert!(
             should_refresh_cache(false),
             "should_refresh_cache(false) must return true: active user means refresh is needed"
@@ -605,16 +638,12 @@ mod tests {
 
     #[test]
     fn test_should_not_refresh_cache_when_idle() {
-        // When user is idle, the cache refresh should be skipped (but the daemon keeps looping)
         assert!(
             !should_refresh_cache(true),
             "should_refresh_cache(true) must return false: idle user means skip the refresh"
         );
     }
 
-    // ── parse_switch_event tests ───────────────────────────────────────────
-
-    /// A valid JSONL workspace switch event line must return Some((env_name, timestamp)).
     #[test]
     fn test_parse_switch_event_valid_line() {
         let line = r#"{"type":"workspace_switch","timestamp":1700000000,"env_name":"my-project"}"#;
@@ -626,7 +655,6 @@ mod tests {
         );
     }
 
-    /// A line with a different `type` value must return None (not a workspace_switch event).
     #[test]
     fn test_parse_switch_event_wrong_type_returns_none() {
         let line = r#"{"type":"other_event","timestamp":1700000000,"env_name":"my-project"}"#;
@@ -637,7 +665,6 @@ mod tests {
         );
     }
 
-    /// A line missing the `env_name` field must return None.
     #[test]
     fn test_parse_switch_event_missing_env_name_returns_none() {
         let line = r#"{"type":"workspace_switch","timestamp":1700000000}"#;
@@ -645,7 +672,6 @@ mod tests {
         assert_eq!(result, None, "line without env_name field must return None");
     }
 
-    /// A line missing the `timestamp` field must return None.
     #[test]
     fn test_parse_switch_event_missing_timestamp_returns_none() {
         let line = r#"{"type":"workspace_switch","env_name":"my-project"}"#;
@@ -656,7 +682,6 @@ mod tests {
         );
     }
 
-    /// A line that is not valid JSON at all must return None.
     #[test]
     fn test_parse_switch_event_invalid_json_returns_none() {
         let line = "this is not json at all";
@@ -667,15 +692,12 @@ mod tests {
         );
     }
 
-    /// An empty string must return None without panicking.
     #[test]
     fn test_parse_switch_event_empty_string_returns_none() {
         let result = parse_switch_event("");
         assert_eq!(result, None, "empty string must return None");
     }
 
-    /// An `env_name` that is an empty string must still be returned as-is.
-    /// The caller decides whether an empty env_name is valid.
     #[test]
     fn test_parse_switch_event_empty_env_name_is_returned() {
         let line = r#"{"type":"workspace_switch","timestamp":1700000000,"env_name":""}"#;
@@ -687,7 +709,6 @@ mod tests {
         );
     }
 
-    /// Extra unknown fields in the JSON must be ignored (forward compatibility).
     #[test]
     fn test_parse_switch_event_extra_fields_are_ignored() {
         let line = r#"{"type":"workspace_switch","timestamp":1700000000,"env_name":"proj","extra":"ignored","count":42}"#;
@@ -701,8 +722,6 @@ mod tests {
 
     #[test]
     fn test_collect_all_recipes_interleaves_cookbooks_by_sort_order() {
-        // GitHub recipe with sort_order=0 should appear before git recipe with sort_order=50,
-        // even though git has higher priority
         let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
             Box::new(
                 FakeCookbook::new("git", vec!["low-priority-branch"], vec![])

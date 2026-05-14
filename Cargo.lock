@@ -520,6 +520,7 @@ dependencies = [
  "clap",
  "confy",
  "dirs",
+ "enwiro-daemon",
  "enwiro-sdk",
  "filetime",
  "home",
@@ -640,6 +641,22 @@ dependencies = [
  "serde_json",
  "tracing",
  "which",
+]
+
+[[package]]
+name = "enwiro-daemon"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "enwiro-sdk",
+ "filetime",
+ "libc",
+ "serde_json",
+ "signal-hook",
+ "system-idle-time",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

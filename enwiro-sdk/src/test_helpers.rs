@@ -20,7 +20,7 @@ impl FakeCookbook {
     pub fn new(name: &str, recipes: Vec<&str>, cook_results: Vec<(&str, &str)>) -> Self {
         Self {
             cookbook_name: name.to_string(),
-            recipes: recipes.into_iter().map(|s| Recipe::new(s)).collect(),
+            recipes: recipes.into_iter().map(Recipe::new).collect(),
             cook_results: cook_results
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))

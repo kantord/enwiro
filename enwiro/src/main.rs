@@ -1,7 +1,6 @@
 mod commands;
 mod config;
 mod context;
-mod daemon;
 mod environments;
 mod notifier;
 mod test_utils;
@@ -48,7 +47,11 @@ fn main() -> anyhow::Result<()> {
     // Daemon subcommand runs independently — it manages its own plugin discovery
     if matches!(args, EnwiroCli::Daemon) {
         let _guard = enwiro_sdk::init_logging("enwiro-daemon.log");
-        return daemon::run_daemon();
+        let config: ConfigurationValues = confy::load("enwiro", "enwiro").unwrap_or_default();
+        return enwiro_daemon::run(
+            std::path::PathBuf::from(config.workspaces_directory),
+            usage_stats::record_switch_per_env,
+        );
     }
 
     let _guard = enwiro_sdk::init_logging("enwiro.log");

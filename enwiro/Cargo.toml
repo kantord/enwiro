@@ -16,6 +16,7 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
 confy = "2.0.0"
+enwiro-daemon = { path = "../enwiro-daemon" }
 enwiro-sdk.workspace = true
 home.workspace = true
 serde = { version = "1.0.197", features = ["derive"] }
