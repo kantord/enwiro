@@ -134,7 +134,7 @@ mod tests {
     use crate::test_utils::test_utilities::{
         AdapterLog, FakeContext, NotificationLog, context_object,
     };
-    use crate::usage_stats::UserIntentSignals;
+    use enwiro_daemon::meta::UserIntentSignals;
 
     fn parse_json_entries(output: &str) -> Vec<CachedRecipe> {
         output

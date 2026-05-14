@@ -16,7 +16,7 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
 confy = "2.0.0"
-enwiro-daemon = { path = "../enwiro-daemon" }
+enwiro-daemon.workspace = true
 enwiro-sdk.workspace = true
 home.workspace = true
 serde = { version = "1.0.197", features = ["derive"] }
@@ -26,13 +26,9 @@ strum_macros = "0.27.0"
 notify-rust = "4"
 tracing.workspace = true
 dirs = "6"
-libc = "0.2"
-signal-hook = "0.3"
-system-idle-time = "1.0.4"
 
 [dev-dependencies]
 assertables = "9.0.0"
 enwiro-sdk = { workspace = true, features = ["test-helpers"] }
-filetime = "0.2"
 rstest = "0.26.0"
 tempfile = "3.25.0"
