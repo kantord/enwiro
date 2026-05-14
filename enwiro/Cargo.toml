@@ -31,6 +31,7 @@ system-idle-time = "1.0.4"
 
 [dev-dependencies]
 assertables = "9.0.0"
+enwiro-sdk = { workspace = true, features = ["test-helpers"] }
 filetime = "0.2"
 rstest = "0.26.0"
 tempfile = "3.25.0"

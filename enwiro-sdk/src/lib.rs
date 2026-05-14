@@ -12,5 +12,8 @@ pub mod gear;
 pub mod logging;
 pub mod plugin;
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod test_helpers;
+
 pub use cookbook::{CookbookMetadata, Recipe};
 pub use logging::init_logging;
