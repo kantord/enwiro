@@ -1,0 +1,22 @@
+[package]
+name = "enwiro-daemon"
+version = "0.0.1"
+edition = "2024"
+description = "Background daemon for enwiro: refreshes the recipe cache and forwards workspace switch events"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+enwiro-sdk.workspace = true
+libc = "0.2"
+serde_json = "1"
+signal-hook = "0.3"
+system-idle-time = "1.0.4"
+tracing.workspace = true
+
+[dev-dependencies]
+enwiro-sdk = { workspace = true, features = ["test-helpers"] }
+filetime = "0.2"
+tempfile = "3.25.0"
