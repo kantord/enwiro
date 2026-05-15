@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.15...enwiro-adapter-i3wm-v0.1.16) - 2026-05-15
+
+### Fixed
+
+- *(adapter-i3wm)* use non-reserved names for rebalance parking
+
 ## [0.1.15](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.14...enwiro-adapter-i3wm-v0.1.15) - 2026-05-13
 
 ### Other
