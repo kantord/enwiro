@@ -666,7 +666,7 @@ fn expand_with_parking(raw: Vec<(String, String)>) -> Vec<(String, String)> {
     }
     let token = std::process::id();
     let temp_names: Vec<String> = (0..raw.len())
-        .map(|i| format!("__enwiro-rebalance-{token}-{i}__"))
+        .map(|i| format!("enwiro-rebalance-{token}-{i}"))
         .collect();
     let parks = raw
         .iter()
@@ -2938,6 +2938,31 @@ mod tests {
                 nums.len(),
                 before,
                 "step {i}: duplicate num after rename '{old_name}' -> '{new_name}'. State: {state:?}",
+            );
+        }
+    }
+
+    /// Regression: i3 rejects any `rename workspace ... to <name>` where the
+    /// target name starts with `__`, since that prefix is reserved for
+    /// i3-internal workspaces. A rebalance plan that uses such names for
+    /// parking will fail at runtime with:
+    ///   "Cannot rename workspace to "__...__": names starting with __ are i3-internal."
+    /// and leave the rebalance half-applied.
+    #[test]
+    fn expand_with_parking_does_not_target_i3_internal_names() {
+        let plan = expand_with_parking(vec![
+            ("3: low".to_string(), "11: low".to_string()),
+            ("11: high".to_string(), "3: high".to_string()),
+        ]);
+        assert!(
+            !plan.is_empty(),
+            "precondition: non-empty input must yield a non-empty plan"
+        );
+        for (old, new) in &plan {
+            assert!(
+                !new.starts_with("__"),
+                "rename '{old}' -> '{new}' targets an i3-internal name (leading '__'); \
+                 i3 will refuse this rename at runtime"
             );
         }
     }
