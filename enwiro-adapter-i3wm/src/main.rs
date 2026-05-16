@@ -627,7 +627,8 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
 /// plan is therefore expanded into a park-then-place sequence by
 /// `expand_with_parking`.
 fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
-    let mut plan: Vec<(String, String)> = vec![];
+    let initial_slot_by_name: std::collections::HashMap<String, i32> =
+        slots.iter().map(|ws| (ws.name.clone(), ws.slot)).collect();
     loop {
         let moves = find_best_move(slots, 9, 0.0);
         if moves.is_empty() {
@@ -645,8 +646,19 @@ fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
                 ws.slot = new_slot;
             }
         }
-        plan.extend(moves);
     }
+    let plan: Vec<(String, String)> = slots
+        .iter()
+        .filter_map(|ws| {
+            let initial = initial_slot_by_name.get(&ws.name)?;
+            (*initial != ws.slot).then(|| {
+                (
+                    format!("{}: {}", initial, ws.name),
+                    format!("{}: {}", ws.slot, ws.name),
+                )
+            })
+        })
+        .collect();
     expand_with_parking(plan)
 }
 
@@ -2939,6 +2951,53 @@ mod tests {
                 before,
                 "step {i}: duplicate num after rename '{old_name}' -> '{new_name}'. State: {state:?}",
             );
+        }
+    }
+
+    /// Regression: when `find_best_move` needs multiple iterations to
+    /// converge, a single workspace can appear in more than one `(old, new)`
+    /// pair as it walks through intermediate slots (e.g. chezmoi 5 -> 4 -> 3
+    /// yields both (5: chezmoi, 4: chezmoi) and (4: chezmoi, 3: chezmoi)).
+    /// `expand_with_parking` then tries to park `4: chezmoi`, but no such
+    /// workspace exists in i3 - chezmoi is still physically at slot 5 when
+    /// parking runs. i3 fails the rename with "Old workspace not found",
+    /// aborting the plan mid-way and orphaning any workspaces already parked
+    /// to `enwiro-rebalance-*` names. The plan must therefore reference each
+    /// workspace by its initial i3 name only.
+    #[test]
+    fn build_rebalance_plan_uses_only_initial_workspace_names_as_olds() {
+        let mut slots: Vec<WorkspaceSlot> = vec![
+            make_slot(1, "filler-1", 0.9),
+            make_slot(2, "filler-2", 0.9),
+            make_slot(3, "low", 0.1),
+            make_slot(4, "mid", 0.5),
+            make_slot(5, "high", 0.95),
+        ];
+        let initial_names: std::collections::HashSet<String> = slots
+            .iter()
+            .map(|s| format!("{}: {}", s.slot, s.name))
+            .collect();
+
+        let plan = build_rebalance_plan(&mut slots);
+        assert!(
+            !plan.is_empty(),
+            "precondition: this layout must require a rebalance"
+        );
+
+        let mut seen_olds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (old, new) in &plan {
+            if new.starts_with("enwiro-rebalance-") {
+                assert!(
+                    initial_names.contains(old),
+                    "park step renames '{old}' -> '{new}', but '{old}' is not an initial \
+                     workspace name. i3 will reject this with 'Old workspace not found' \
+                     and leave earlier parks orphaned. Initial names: {initial_names:?}"
+                );
+                assert!(
+                    seen_olds.insert(old.clone()),
+                    "park step renames '{old}' more than once; only one park per workspace is valid"
+                );
+            }
         }
     }
 
