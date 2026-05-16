@@ -649,6 +649,7 @@ fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
     }
     let plan: Vec<(String, String)> = slots
         .iter()
+        .filter(|ws| ws.managed)
         .filter_map(|ws| {
             let initial = initial_slot_by_name.get(&ws.name)?;
             (*initial != ws.slot).then(|| {
@@ -2950,6 +2951,50 @@ mod tests {
                 nums.len(),
                 before,
                 "step {i}: duplicate num after rename '{old_name}' -> '{new_name}'. State: {state:?}",
+            );
+        }
+    }
+
+    /// Regression: unmanaged i3 workspaces (e.g. plain numeric `"10"` with
+    /// no `N: env-name` format) must never appear in the rebalance plan.
+    /// Their reconstructed name `format!("{}: {}", slot, "")` produces e.g.
+    /// `"10: "` which does not match the real i3 name `"10"`, so i3 fails
+    /// the rename with "Old workspace not found" and the plan aborts mid-way,
+    /// orphaning any workspaces already parked to `enwiro-rebalance-*` names.
+    /// The rebalance algorithm is only meant to relocate managed envs anyway
+    /// (see `test_unmanaged_slot_blocks_compaction`).
+    #[test]
+    fn build_rebalance_plan_does_not_emit_renames_for_unmanaged_slots() {
+        let mut slots: Vec<WorkspaceSlot> = vec![
+            make_slot(3, "low", 0.1),
+            make_slot(5, "high", 0.95),
+            WorkspaceSlot {
+                slot: 1,
+                name: String::new(),
+                score: 0.0,
+                managed: false,
+            },
+            WorkspaceSlot {
+                slot: 2,
+                name: String::new(),
+                score: 0.0,
+                managed: false,
+            },
+            WorkspaceSlot {
+                slot: 10,
+                name: String::new(),
+                score: 0.0,
+                managed: false,
+            },
+        ];
+
+        let plan = build_rebalance_plan(&mut slots);
+
+        for (old, new) in &plan {
+            assert!(
+                !old.ends_with(": ") && !old.is_empty(),
+                "plan emits rename '{old}' -> '{new}' for an unmanaged workspace with empty \
+                 env name; i3 will reject this with 'Old workspace not found'"
             );
         }
     }
