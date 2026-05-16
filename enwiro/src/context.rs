@@ -81,6 +81,7 @@ impl<W: Write> CommandContext<W> {
         let flat_name = name.replace('/', "-");
         self.save_cook_metadata(&flat_name, &cookbook_name, description.as_deref());
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
+        self.write_garnish_gear(&env_path, &flat_name);
         Ok(env)
     }
 
@@ -109,6 +110,31 @@ impl<W: Write> CommandContext<W> {
     fn save_cook_metadata(&self, env_name: &str, cookbook: &str, description: Option<&str>) {
         let env_dir = Path::new(&self.config.workspaces_directory).join(env_name);
         crate::usage_stats::record_cook_metadata_per_env(&env_dir, cookbook, description);
+    }
+
+    /// Run every discovered Garnish plugin against the cooked project;
+    /// write each contribution to `gear.d/garnish-<name>.json`.
+    /// Per-Garnish failures are debug-logged and swallowed — same
+    /// tolerance as `write_gear_if_present`.
+    fn write_garnish_gear(&self, project_dir: &str, flat_name: &str) {
+        let project_path = Path::new(project_dir);
+        let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
+        let gear_dir = enwiro_sdk::gear::gear_dir(&env_dir);
+
+        use enwiro_sdk::garnish::Garnish;
+        for plugin in enwiro_sdk::plugin::get_plugins(enwiro_sdk::plugin::PluginKind::Garnish) {
+            let garnish = enwiro_sdk::garnish::GarnishClient::new(plugin);
+            let Some(data) = enwiro_sdk::garnish::run_garnish(&garnish, project_path) else {
+                continue;
+            };
+            let path = gear_dir.join(garnish.filename());
+            let result = serde_json::to_vec(&data)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| enwiro_sdk::fs::atomic_write(&path, &bytes).map_err(Into::into));
+            if let Err(e) = result {
+                tracing::debug!(error = %e, garnish = garnish.name(), "garnish gear write failed, continuing");
+            }
+        }
     }
 
     fn write_gear_if_present(&self, cookbook: &dyn CookbookTrait, recipe: &str, flat_name: &str) {

@@ -1,0 +1,17 @@
+[package]
+name = "enwiro-garnish-just"
+version = "0.1.0"
+edition = "2024"
+description = "Garnish that surfaces `just` recipes as enwiro CLI gear"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5.4", features = ["derive"] }
+enwiro-sdk.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

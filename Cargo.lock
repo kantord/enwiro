@@ -659,6 +659,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "enwiro-garnish-just"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "enwiro-sdk",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "enwiro-sdk"
 version = "0.2.2"
 dependencies = [

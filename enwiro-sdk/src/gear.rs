@@ -4,14 +4,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-/// Wire version of the gear schema. Bumped when any of the gear wire types
-/// ([`GearFileData`], [`Gear`], [`WebEntry`], [`GuiEntry`]) change shape.
-/// Cookbook authors should set `GearFileData { version: SCHEMA_VERSION, ... }`
-/// to ride future upgrades rather than hardcoding a literal.
+/// Wire version of the gear schema. Bumped on **breaking** wire changes
+/// only — additive optional fields don't bump (readers default them via
+/// serde, producers can omit). Cookbook authors set
+/// `GearFileData { version: SCHEMA_VERSION, ... }` to track upgrades.
 ///
-/// All gear wire structs use `#[serde(rename_all = "kebab-case")]`, so any
-/// multi-word field added in the future will serialize with hyphens (e.g.
-/// `linux_gui` → `linux-gui`). Single-word fields are unaffected.
+/// All gear wire structs use `#[serde(rename_all = "kebab-case")]`, so
+/// multi-word fields serialize with hyphens (`linux_gui` → `linux-gui`).
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// Subdirectory inside an env where gear files live. Each cookbook drops
@@ -30,17 +29,15 @@ pub fn gear_filename(cookbook_name: &str) -> String {
     format!("cookbook-{cookbook_name}.json")
 }
 
-/// Validate the wire-format `version` field at deserialize time. A schema
-/// version this build does not understand fails parsing immediately with
-/// a clear message, instead of producing misleading "missing field X"
-/// errors when v2-shaped data hits v1's struct shape.
+/// Reject unknown versions with a clear message instead of falling
+/// through to misleading "missing field X" errors.
 fn deserialize_supported_version<'de, D: serde::Deserializer<'de>>(de: D) -> Result<u32, D::Error> {
     let v = u32::deserialize(de)?;
     if v == SCHEMA_VERSION {
         Ok(v)
     } else {
         Err(serde::de::Error::custom(format!(
-            "unsupported gear schema version {v}; this build of enwiro-sdk handles version {SCHEMA_VERSION}"
+            "unsupported gear schema version {v}; this build handles version {SCHEMA_VERSION}"
         )))
     }
 }
@@ -100,6 +97,8 @@ pub struct Gear {
     pub web: HashMap<String, WebEntry>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub linux_gui: HashMap<String, GuiEntry>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub cli: HashMap<String, CliEntry>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -118,6 +117,19 @@ pub struct WebEntry {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct GuiEntry {
+    pub command: Vec<String>,
+}
+
+/// A user-invokable CLI entry inside a [`Gear`]. `command` is the argv to
+/// exec (e.g. `["just", "build"]`); `description` is optional because
+/// upstream sources (justfile recipes without doc comments, etc.) may not
+/// provide one. The dispatcher (`enw :<gear> <entry>`) resolves the entry
+/// and execs `command` followed by any user-supplied passthrough args.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct CliEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub command: Vec<String>,
 }
 
@@ -216,7 +228,7 @@ impl LoadedGear {
 #[cfg(test)]
 mod tests {
     mod schema {
-        use super::super::{Gear, GearFileData, GuiEntry, WebEntry};
+        use super::super::{CliEntry, Gear, GearFileData, GuiEntry, WebEntry};
         use rstest::rstest;
 
         /// Sample valid JSON document conforming to the gear schema.
@@ -326,6 +338,14 @@ mod tests {
                 "linux-gui": { "app": { "command": ["obsidian"], "rogue": 42 } } } } }"#
         )]
         #[case::unsupported_schema_version(r#"{ "version": 999, "gear": {} }"#)]
+        #[case::cli_entry_no_command(
+            r#"{ "version": 1, "gear": { "just": { "description": "x",
+                "cli": { "build": { "description": "Build" } } } } }"#
+        )]
+        #[case::unknown_field_in_cli_entry(
+            r#"{ "version": 1, "gear": { "just": { "description": "x",
+                "cli": { "build": { "command": ["just", "build"], "rogue": 1 } } } } }"#
+        )]
         fn rejects_invalid_schema(#[case] json: &str) {
             let result: Result<GearFileData, _> = serde_json::from_str(json);
             assert!(result.is_err(), "expected rejection, got: {result:?}");
@@ -353,6 +373,72 @@ mod tests {
                 "absent `web` field must default to empty map, got {} entries",
                 cli_only.web.len()
             );
+        }
+
+        #[test]
+        fn deserializes_cli_entries_with_optional_description() {
+            let json = r#"{
+                "version": 1,
+                "gear": {
+                    "just": {
+                        "description": "Tasks from the project's justfile",
+                        "cli": {
+                            "build": {
+                                "description": "Build the project",
+                                "command": ["just", "build"]
+                            },
+                            "deploy": {
+                                "command": ["just", "deploy"]
+                            }
+                        }
+                    }
+                }
+            }"#;
+            let parsed: GearFileData = serde_json::from_str(json).unwrap();
+            let cli = &parsed.gear["just"].cli;
+            assert_eq!(cli.len(), 2);
+            assert_eq!(
+                cli["build"].description.as_deref(),
+                Some("Build the project")
+            );
+            assert_eq!(cli["build"].command, vec!["just", "build"]);
+            assert!(cli["deploy"].description.is_none());
+            assert_eq!(cli["deploy"].command, vec!["just", "deploy"]);
+        }
+
+        #[test]
+        fn cli_entry_with_none_description_serializes_without_the_field() {
+            let entry = CliEntry {
+                description: None,
+                command: vec!["just".into(), "deploy".into()],
+            };
+            let json = serde_json::to_string(&entry).expect("CliEntry must serialize");
+            assert!(
+                !json.contains("description"),
+                "None description must be omitted from JSON, got: {json}"
+            );
+        }
+
+        #[test]
+        fn cli_entry_with_some_description_round_trips() {
+            let original = CliEntry {
+                description: Some("Build the project".into()),
+                command: vec!["just".into(), "build".into()],
+            };
+            let json = serde_json::to_string(&original).unwrap();
+            let parsed: CliEntry = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.description, original.description);
+            assert_eq!(parsed.command, original.command);
+        }
+
+        #[test]
+        fn cli_field_defaults_to_empty_when_absent() {
+            // Producers that don't emit cli (e.g. existing cookbooks) must
+            // still parse — the empty map is the additive-compat path.
+            let parsed: GearFileData = serde_json::from_str(valid_full_schema_json()).unwrap();
+            for gear in parsed.gear.values() {
+                assert!(gear.cli.is_empty());
+            }
         }
 
         #[test]
