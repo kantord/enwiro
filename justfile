@@ -15,9 +15,11 @@ install-dev:
         pkill -x enw && sleep 0.2 || true
     fi
     installed=$(cargo install --list | grep -E '^enwiro' | awk '{print $1}')
-    # enwiro-daemon is a core binary; include it even on first-time setups
-    # where it isn't yet in `cargo install --list`.
-    echo "$installed" | grep -qx 'enwiro-daemon' || installed="$installed enwiro-daemon"
+    # Core binaries that ship with enwiro: include them even on first-time
+    # setups where they aren't yet in `cargo install --list`.
+    for core in enwiro-daemon enwiro-garnish-just; do
+        echo "$installed" | grep -qx "$core" || installed="$installed $core"
+    done
     for crate in $installed; do
         [ "$crate" = "enwiro-sdk" ] && continue
         # The `enwiro` crate produces a binary named `enw`; all other crates
@@ -49,7 +51,9 @@ install-release:
     #!/usr/bin/env bash
     set -euo pipefail
     installed=$(cargo install --list | grep -E '^enwiro' | awk '{print $1}')
-    echo "$installed" | grep -qx 'enwiro-daemon' || installed="$installed enwiro-daemon"
+    for core in enwiro-daemon enwiro-garnish-just; do
+        echo "$installed" | grep -qx "$core" || installed="$installed $core"
+    done
     for crate in $installed; do
         [ "$crate" = "enwiro-sdk" ] && continue
         echo "Installing $crate from crates.io..."

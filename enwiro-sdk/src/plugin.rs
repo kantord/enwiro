@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub enum PluginKind {
     Adapter,
     Cookbook,
+    Garnish,
 }
 
 #[derive(Hash, Eq, PartialEq, Debug)]

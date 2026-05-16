@@ -8,6 +8,7 @@ pub mod adapter;
 pub mod client;
 pub mod cookbook;
 pub mod fs;
+pub mod garnish;
 pub mod gear;
 pub mod logging;
 pub mod plugin;

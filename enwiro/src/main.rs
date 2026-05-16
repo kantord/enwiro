@@ -10,10 +10,12 @@ use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
 use commands::list_all::{ListAllArgs, list_all};
 use commands::list_environments::{ListEnvironmentsArgs, list_environments};
+use commands::run_gear;
 use commands::show_path::{ShowPathArgs, show_path};
 use commands::wrap::{WrapArgs, wrap};
 use context::CommandContext;
 use enwiro_daemon::ConfigurationValues;
+use std::ffi::OsString;
 use std::fs::create_dir;
 use std::io::Write;
 use std::path::Path;
@@ -37,13 +39,26 @@ fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    let args = EnwiroCli::parse();
+/// True iff argv looks like `enw :<gear> …`. Sniffed before clap so the
+/// `:` prefix bypasses subcommand parsing.
+fn is_dispatch_invocation(argv: &[OsString]) -> bool {
+    argv.get(1)
+        .and_then(|a| a.to_str())
+        .is_some_and(|s| s.starts_with(':'))
+}
 
+fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro.log");
 
     let config: ConfigurationValues =
         confy::load("enwiro", "enwiro").context("Could not load configuration")?;
+
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    if is_dispatch_invocation(&argv) {
+        return run_gear::dispatch(Path::new(&config.workspaces_directory), &argv[1..]);
+    }
+
+    let args = EnwiroCli::parse();
     let mut writer = std::io::stdout();
     let mut context_object = CommandContext::new(config, &mut writer)?;
     ensure_can_run(&context_object)?;
