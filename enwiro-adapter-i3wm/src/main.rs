@@ -5,16 +5,7 @@ use i3ipc_types::reply::Workspace;
 use tokio_i3ipc::I3;
 use tokio_stream::StreamExt;
 
-/// Minimum NetBenefit required to justify evicting a workspace from a single-digit slot.
-/// A swap that yields less than this gain is treated as not worth the disruption.
-/// Tune upward to make the layout more stable; downward to make it more aggressive.
-const STABILITY_THRESHOLD: f64 = 0.05;
-
-/// DCG position discount: the value of occupying slot `i`.
-/// Mirrors the standard formula `1 / log₂(i + 1)` from information retrieval.
-fn disc(slot: i32) -> f64 {
-    1.0_f64 / (slot as f64 + 1.0).log2()
-}
+mod rebalance;
 
 use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo};
 
@@ -37,17 +28,6 @@ pub struct GetActiveWorkspaceIdArgs {}
 #[derive(clap::Args)]
 pub struct ActivateArgs {
     pub name: String,
-}
-
-fn build_workspace_command(workspace_name: &str) -> String {
-    let escaped = workspace_name.replace('\\', r"\\").replace('"', r#"\""#);
-    format!(r#"workspace "{}""#, escaped)
-}
-
-fn build_rename_workspace_command(old_name: &str, new_name: &str) -> String {
-    let esc_old = old_name.replace('\\', r"\\").replace('"', r#"\""#);
-    let esc_new = new_name.replace('\\', r"\\").replace('"', r#"\""#);
-    format!(r#"rename workspace "{}" to "{}""#, esc_old, esc_new)
 }
 
 /// Read the activate stdin payload from core. Returns a default
@@ -79,9 +59,8 @@ struct AdapterConfig {
     web_open_command: Option<Vec<String>>,
 }
 
-/// Load `web_open_command` from the i3 adapter's confy TOML at `config_path`,
-/// falling back to the default when the file is missing, malformed, or has
-/// no `web_open_command` field.
+/// Falls back to `default_web_open_command` when the file is missing,
+/// malformed, or has no `web_open_command` field.
 fn load_web_open_command(config_path: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(config_path)
         .ok()
@@ -182,16 +161,11 @@ fn resolve_enw_binary() -> String {
         .unwrap_or_else(|| "enw".to_string())
 }
 
-/// Builds the per-URL `i3-msg exec` payload for a single activation, given
-/// the activation-level constants (binary, env name, configured open
-/// command). One instance is constructed per `open_gear_urls` call and then
-/// queried per URL.
-///
 /// Wraps the user's `web_open_command` inside
 /// `<absolute-enw> wrap <command> <env> -- <args>` so the spawned process
 /// inherits `cwd` / `ENWIRO_ENV` from `enw wrap`, while `i3-msg exec`
 /// supplies daemonization and graphical-session env normalization. The
-/// absolute `enw` path is required - see [`resolve_enw_binary`].
+/// absolute `enw` path is required — see [`resolve_enw_binary`].
 struct WrapPayloadBuilder<'a> {
     enw_binary: String,
     env_name: &'a str,
@@ -207,11 +181,8 @@ impl<'a> WrapPayloadBuilder<'a> {
         }
     }
 
-    /// Construct the full `"exec <enw> wrap <command> <env> -- <args>"`
-    /// string for one URL, with `{url}` substituted into every argv element
-    /// and shell-unsafe components quoted. Returns `None` only if
-    /// `command_template` is empty (no binary to wrap) - callers should
-    /// have guarded already.
+    /// Substitutes `{url}` into every argv element and shell-quotes them.
+    /// `None` only when `command_template` is empty — callers guard upstream.
     fn payload_for(&self, url: &str) -> Option<String> {
         let (command_name, child_args) = self.command_template.split_first()?;
         let mut parts: Vec<String> = vec![
@@ -257,9 +228,7 @@ fn open_gear_urls(gear: &serde_json::Value, command_template: &[String], env_nam
     }
 }
 
-/// Build the `"exec <enw> wrap <argv[0]> <env> -- <argv[1..]>"` string for
-/// one linux-gui command. Returns `None` only if `argv` is empty (collectors
-/// already filter that case; this is belt-and-suspenders).
+/// `None` only when `argv` is empty (collectors already filter; belt-and-suspenders).
 fn build_gui_payload(enw_binary: &str, env_name: &str, argv: &[String]) -> Option<String> {
     let (binary, args) = argv.split_first()?;
     let mut parts: Vec<String> = vec![
@@ -372,7 +341,7 @@ fn fetch_managed_envs() -> Vec<ManagedEnvInfo> {
     }
 }
 
-async fn run_i3_command(i3: &mut I3, command: String) -> anyhow::Result<()> {
+async fn run_i3_command(i3: &mut I3, command: &str) -> anyhow::Result<()> {
     let outcomes = i3.run_command(command).await?;
     if let Some(outcome) = outcomes.first()
         && !outcome.success
@@ -384,13 +353,67 @@ async fn run_i3_command(i3: &mut I3, command: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns `true` when a rebalance should run, `false` when it should be skipped
-/// because one already ran within the debounce window.
+async fn apply_plan(i3: &mut I3, plan: &rebalance::plan::Plan) -> anyhow::Result<()> {
+    use rebalance::compile::compile;
+    use rebalance::i3_op::render;
+    for op in compile(plan) {
+        tracing::info!(op = ?op, "i3 op");
+        run_i3_command(i3, &render(&op)).await?;
+    }
+    Ok(())
+}
+
+/// Translate i3's workspace list + the managed-env score table into typed
+/// inputs for the rebalance pipeline.
 ///
-/// # Parameters
-/// * `last` – when the previous rebalance completed, or `None` if none has run yet.
-/// * `debounce` – minimum time that must have elapsed before another rebalance is allowed.
-/// * `now` – the current instant (passed in for testability).
+/// Returns `(managed_envs, unmanaged_slots)`. An env is "managed" iff it has
+/// an entry in `managed_envs` (i.e. enwiro knows about it). Workspaces whose
+/// name doesn't parse as `N: env` extract to env_name="" — these are always
+/// unmanaged.
+fn snapshot_for_rebalance(
+    workspaces: &[Workspace],
+    managed_envs: &[ManagedEnvInfo],
+) -> (Vec<rebalance::types::Env>, Vec<rebalance::types::Slot>) {
+    use rebalance::types::{Env, EnvName, Slot};
+    let score_map: std::collections::HashMap<&str, f64> = managed_envs
+        .iter()
+        .map(|e| (e.name.as_str(), e.slot_score))
+        .collect();
+    let mut managed = Vec::new();
+    let mut unmanaged = Vec::new();
+    for ws in workspaces {
+        let env_name = extract_environment_name(ws);
+        match score_map.get(env_name.as_str()) {
+            Some(&score) => managed.push(Env {
+                name: EnvName(env_name),
+                slot: Slot(ws.num),
+                score,
+            }),
+            None => unmanaged.push(Slot(ws.num)),
+        }
+    }
+    (managed, unmanaged)
+}
+
+/// Lowest workspace number not currently occupied by ANY workspace (managed
+/// or unmanaged). Used as the initial slot for a freshly-activating env.
+fn lowest_unused_slot(workspaces: &[Workspace]) -> rebalance::types::Slot {
+    let used: std::collections::HashSet<i32> = workspaces.iter().map(|ws| ws.num).collect();
+    let mut n = 1;
+    while used.contains(&n) {
+        n += 1;
+    }
+    rebalance::types::Slot(n)
+}
+
+fn current_slot_map(
+    managed: &[rebalance::types::Env],
+) -> std::collections::HashMap<rebalance::types::EnvName, rebalance::types::Slot> {
+    managed.iter().map(|e| (e.name.clone(), e.slot)).collect()
+}
+
+/// Rate limit: true iff no prior rebalance has run, or `debounce` has elapsed
+/// since the last one. `now` is injected for testability.
 fn should_rebalance(
     last: Option<std::time::Instant>,
     debounce: std::time::Duration,
@@ -399,157 +422,6 @@ fn should_rebalance(
     match last {
         None => true,
         Some(last_instant) => now.duration_since(last_instant) >= debounce,
-    }
-}
-
-/// A workspace slot entry used by `find_best_move`.
-///
-/// Represents a currently-placed managed environment occupying `slot` with the
-/// given `name` and frecency-based `score`.
-struct WorkspaceSlot {
-    slot: i32,
-    name: String,
-    score: f64,
-    managed: bool,
-}
-
-/// Find the single highest-NetBenefit swap across ALL currently placed managed envs.
-///
-/// # Algorithm
-///
-/// **Score-swap** (both slots occupied, slot_i < slot_j, score_j > score_i):
-///   NetBenefit = (score_j − score_i) × (disc(slot_i) − disc(slot_j)) − STABILITY_THRESHOLD
-///   The threshold guards against thrashing when two occupied slots are nearly equal.
-///
-/// **Compaction** (slot_i ≤ max_shortcut_slot is empty, env at slot_j, j > i):
-///   NetBenefit = score_j × (disc(slot_i) − disc(slot_j))
-///   No STABILITY_THRESHOLD - filling an empty slot has no thrashing risk, so the
-///   move fires whenever score_j > 0 and disc(slot_i) > disc(slot_j) (i.e. NB > 0).
-///
-/// Boost the effective slot score of a newly-activated env that landed outside
-/// the shortcut zone.
-///
-/// If `env_name` sits at a slot > `max_shortcut_slot` and its current score is
-/// below the minimum score among managed shortcut envs, raise it to just above
-/// that minimum (`min + f64::EPSILON`). This guarantees the env will win exactly
-/// one swap into the shortcut zone during the convergence loop that follows.
-///
-/// No-op when:
-/// - the env is already inside the shortcut zone, or
-/// - there are no managed envs in the shortcut zone (all slots unmanaged).
-fn boost_incoming_score(slots: &mut [WorkspaceSlot], env_name: &str, max_shortcut_slot: i32) {
-    let free_num = match slots.iter().find(|ws| ws.name == env_name) {
-        Some(ws) => ws.slot,
-        None => return,
-    };
-    if free_num <= max_shortcut_slot {
-        return;
-    }
-    let min_shortcut_score = slots
-        .iter()
-        .filter(|ws| ws.managed && ws.slot <= max_shortcut_slot)
-        .map(|ws| ws.score)
-        .fold(f64::INFINITY, f64::min);
-    if min_shortcut_score.is_finite()
-        && let Some(new_ws) = slots.iter_mut().find(|ws| ws.name == env_name)
-    {
-        new_ws.score = new_ws.score.max(min_shortcut_score + f64::EPSILON);
-    }
-}
-
-/// Picks the pair with highest NetBenefit > 0; returns empty vec if none.
-///
-/// For a swap between two occupied slots: returns two rename pairs (lower-slot env
-/// moves to higher slot first, then higher-slot env moves to lower slot).
-/// For compaction (env moves into empty slot): returns one rename pair.
-fn find_best_move(
-    workspaces: &[WorkspaceSlot],
-    max_shortcut_slot: i32,
-    stability_threshold: f64,
-) -> Vec<(String, String)> {
-    // All physically occupied slots (managed + unmanaged) - used to detect truly empty slots.
-    let all_occupied: std::collections::HashSet<i32> =
-        workspaces.iter().map(|ws| ws.slot).collect();
-
-    // Only managed workspaces - used for score-swap candidates and move generation.
-    let managed_occupied: std::collections::HashMap<i32, (&str, f64)> = workspaces
-        .iter()
-        .filter(|ws| ws.managed)
-        .map(|ws| (ws.slot, (ws.name.as_str(), ws.score)))
-        .collect();
-
-    let managed_slots: Vec<&WorkspaceSlot> = workspaces.iter().filter(|ws| ws.managed).collect();
-
-    let mut best_nb: f64 = 0.0;
-    let mut best_move: Option<(i32, i32, bool)> = None; // (slot_i, slot_j, is_swap)
-
-    // --- Score-swap: both slots occupied (managed only), slot_i < slot_j, score_j > score_i ---
-    for i in 0..managed_slots.len() {
-        for j in (i + 1)..managed_slots.len() {
-            let (slot_i, score_i) = (managed_slots[i].slot, managed_slots[i].score);
-            let (slot_j, score_j) = (managed_slots[j].slot, managed_slots[j].score);
-            let (slot_lo, score_lo, slot_hi, score_hi) = if slot_i < slot_j {
-                (slot_i, score_i, slot_j, score_j)
-            } else {
-                (slot_j, score_j, slot_i, score_i)
-            };
-            if score_hi > score_lo {
-                let nb =
-                    (score_hi - score_lo) * (disc(slot_lo) - disc(slot_hi)) - stability_threshold;
-                if nb > best_nb {
-                    best_nb = nb;
-                    best_move = Some((slot_lo, slot_hi, true));
-                }
-            }
-        }
-    }
-
-    // --- Compaction: empty slot i (1 ≤ i ≤ max_shortcut_slot, not in all_occupied), managed env at slot j > i ---
-    for slot_i in 1..=max_shortcut_slot {
-        if all_occupied.contains(&slot_i) {
-            continue; // slot physically taken (managed OR unmanaged)
-        }
-        for ws_j in managed_slots.iter() {
-            let slot_j = ws_j.slot;
-            let score_j = ws_j.score;
-            if slot_j <= slot_i || score_j <= 0.0 {
-                continue;
-            }
-            let nb = score_j * (disc(slot_i) - disc(slot_j));
-            if nb > best_nb {
-                best_nb = nb;
-                best_move = Some((slot_i, slot_j, false));
-            }
-        }
-    }
-
-    match best_move {
-        None => vec![],
-        Some((slot_i, slot_j, is_swap)) => {
-            if is_swap {
-                // Both occupied: move lower-slot env out first (avoids name collision in i3),
-                // then higher-slot env into the lower slot.
-                let (name_i, _) = managed_occupied[&slot_i];
-                let (name_j, _) = managed_occupied[&slot_j];
-                vec![
-                    (
-                        format!("{}: {}", slot_i, name_i),
-                        format!("{}: {}", slot_j, name_i),
-                    ),
-                    (
-                        format!("{}: {}", slot_j, name_j),
-                        format!("{}: {}", slot_i, name_j),
-                    ),
-                ]
-            } else {
-                // Compaction: env at slot_j moves to empty slot_i.
-                let (name_j, _) = managed_occupied[&slot_j];
-                vec![(
-                    format!("{}: {}", slot_j, name_j),
-                    format!("{}: {}", slot_i, name_j),
-                )]
-            }
-        }
     }
 }
 
@@ -567,38 +439,6 @@ fn extract_environment_name_from_str(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-/// Build a `Vec<WorkspaceSlot>` from a list of i3 workspaces, including only managed
-/// environments (those with a score entry in `managed_envs`).
-fn build_workspace_slots(
-    workspaces: &[Workspace],
-    managed_envs: &[ManagedEnvInfo],
-) -> Vec<WorkspaceSlot> {
-    let score_map: std::collections::HashMap<&str, f64> = managed_envs
-        .iter()
-        .map(|e| (e.name.as_str(), e.slot_score))
-        .collect();
-    workspaces
-        .iter()
-        .map(|ws| {
-            let env_name = extract_environment_name(ws);
-            match score_map.get(env_name.as_str()) {
-                Some(&score) => WorkspaceSlot {
-                    slot: ws.num,
-                    name: env_name,
-                    score,
-                    managed: true,
-                },
-                None => WorkspaceSlot {
-                    slot: ws.num,
-                    name: env_name,
-                    score: 0.0,
-                    managed: false,
-                },
-            }
-        })
-        .collect()
-}
-
 fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
     serde_json::json!({
         "type": "workspace_switch",
@@ -606,157 +446,6 @@ fn format_workspace_switch_event(env_name: &str, timestamp: i64) -> String {
         "env_name": env_name,
     })
     .to_string()
-}
-
-/// First GUI activation for an env: create the i3 workspace, rebalance the
-/// slot layout, and fire the env's gear (web URLs today; GUI apps to come).
-/// Gear fires only on this path; re-activations of an existing env hit the
-/// switch-back branch in the activate handler and intentionally do not
-/// re-fire (would yank focus on single-instance native apps and multiply
-/// chromium app-mode windows).
-/// Run `find_best_move` to convergence and return an i3-safe sequence of
-/// rename commands that achieves the converged placement.
-///
-/// Mutates `slots` in place so it reflects the converged placement on return.
-/// Uses a stability threshold of 0.0 because explicit user activation has no
-/// thrash risk, so loop until stable.
-///
-/// The raw convergence plan can contain cycles (e.g. a 2-cycle swap), which
-/// would transiently leave two workspaces sharing the same parsed `num` and
-/// trigger i3's "Old workspace not found" failure (issue #346). The returned
-/// plan is therefore expanded into a park-then-place sequence by
-/// `expand_with_parking`.
-fn build_rebalance_plan(slots: &mut [WorkspaceSlot]) -> Vec<(String, String)> {
-    let initial_slot_by_name: std::collections::HashMap<String, i32> =
-        slots.iter().map(|ws| (ws.name.clone(), ws.slot)).collect();
-    loop {
-        let moves = find_best_move(slots, 9, 0.0);
-        if moves.is_empty() {
-            break;
-        }
-        for (old_name, new_name) in &moves {
-            let new_slot: i32 = new_name
-                .split_once(": ")
-                .and_then(|(s, _)| s.parse().ok())
-                .unwrap_or(0);
-            if let Some(ws) = slots
-                .iter_mut()
-                .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
-            {
-                ws.slot = new_slot;
-            }
-        }
-    }
-    let plan: Vec<(String, String)> = slots
-        .iter()
-        .filter(|ws| ws.managed)
-        .filter_map(|ws| {
-            let initial = initial_slot_by_name.get(&ws.name)?;
-            (*initial != ws.slot).then(|| {
-                (
-                    format!("{}: {}", initial, ws.name),
-                    format!("{}: {}", ws.slot, ws.name),
-                )
-            })
-        })
-        .collect();
-    expand_with_parking(plan)
-}
-
-/// Expand a raw `(from, to)` rename sequence into a park-then-place sequence
-/// so each `from` uniquely addresses its intended workspace at execution time.
-///
-/// Phase 1 (park): every workspace in the plan is renamed to a unique
-/// num-less temporary name. Because parked names carry no `N:` prefix, i3
-/// assigns them no `num`, so no `num` collisions can occur during this phase.
-///
-/// Phase 2 (place): each parked workspace is renamed to its final target.
-/// Because the previous occupant of every target `num` was moved out in
-/// phase 1, no two live workspaces ever share a `num`.
-fn expand_with_parking(raw: Vec<(String, String)>) -> Vec<(String, String)> {
-    if raw.is_empty() {
-        return raw;
-    }
-    let token = std::process::id();
-    let temp_names: Vec<String> = (0..raw.len())
-        .map(|i| format!("enwiro-rebalance-{token}-{i}"))
-        .collect();
-    let parks = raw
-        .iter()
-        .enumerate()
-        .map(|(i, (old, _))| (old.clone(), temp_names[i].clone()));
-    let places = raw
-        .iter()
-        .enumerate()
-        .map(|(i, (_, new))| (temp_names[i].clone(), new.clone()));
-    parks.chain(places).collect()
-}
-
-async fn activate_new_workspace(
-    i3: &mut I3,
-    workspaces: &[Workspace],
-    payload: &ActivatePayload,
-    env_name: &str,
-) -> anyhow::Result<()> {
-    // Find the lowest unused workspace number
-    let used_numbers: std::collections::HashSet<i32> = workspaces.iter().map(|ws| ws.num).collect();
-    let mut free_num = 1;
-    while used_numbers.contains(&free_num) {
-        free_num += 1;
-    }
-
-    // Build the slot list: existing managed workspaces + the incoming env at free_num.
-    let incoming_score = payload
-        .managed_envs
-        .iter()
-        .find(|e| e.name == env_name)
-        .map(|e| e.slot_score)
-        .unwrap_or(0.0);
-    let mut slots = build_workspace_slots(workspaces, &payload.managed_envs);
-    slots.push(WorkspaceSlot {
-        slot: free_num,
-        name: env_name.to_string(),
-        score: incoming_score,
-        managed: true,
-    });
-
-    // If the new env lands outside the shortcut zone with a low score,
-    // boost its effective score so it can always displace the worst
-    // managed shortcut env. This represents the "just activated" recency
-    // signal that hasn't been written to disk yet.
-    boost_incoming_score(&mut slots, env_name, 9);
-
-    // Create the workspace at free_num first so it exists in i3
-    // before any rename commands reference it.
-    let initial_workspace_name = format!("{}: {}", free_num, env_name);
-    tracing::info!(workspace = %initial_workspace_name, "Creating workspace at free slot");
-    run_i3_command(i3, build_workspace_command(&initial_workspace_name)).await?;
-
-    let all_rename_cmds = build_rebalance_plan(&mut slots);
-
-    // Determine the final slot for the incoming env from the converged slot state.
-    let target_num = slots
-        .iter()
-        .find(|ws| ws.name == env_name)
-        .map(|ws| ws.slot)
-        .unwrap_or(free_num);
-
-    for (old_name, new_name) in all_rename_cmds {
-        tracing::info!(from = %old_name, to = %new_name, "Renaming workspace");
-        run_i3_command(i3, build_rename_workspace_command(&old_name, &new_name)).await?;
-    }
-
-    let workspace_name = format!("{}: {}", target_num, env_name);
-    tracing::info!(workspace = %workspace_name, num = target_num, "Focusing final workspace slot");
-    run_i3_command(i3, build_workspace_command(&workspace_name)).await?;
-
-    let web_open_command = adapter_config_path()
-        .map(|p| load_web_open_command(&p))
-        .unwrap_or_else(default_web_open_command);
-    open_gear_urls(&payload.gear, &web_open_command, env_name);
-    spawn_gui_commands(&payload.gear, env_name);
-
-    Ok(())
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -779,6 +468,11 @@ async fn main() -> anyhow::Result<()> {
             print!("{}", environment_name);
         }
         EnwiroAdapterI3WmCLI::Activate(args) => {
+            use rebalance::derive::derive;
+            use rebalance::i3_op::{I3Op, render};
+            use rebalance::optimize::optimize;
+            use rebalance::types::{Env, EnvName, Handle, Slot};
+
             let payload = read_activate_payload();
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
@@ -788,60 +482,97 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .find(|ws| extract_environment_name(ws) == args.name)
             {
-                // Switching back: gear was fired during the original
-                // first-creation activation and must not re-fire here (would
-                // yank focus on single-instance native apps and multiply
-                // chromium app-mode windows).
+                // Re-activation: gear stays silent (single-instance apps would
+                // yank focus; chromium app-mode would multiply windows).
                 tracing::info!(workspace = %existing.name, "Found existing workspace");
-                run_i3_command(&mut i3, build_workspace_command(&existing.name)).await?;
+                let op = I3Op::Focus {
+                    ws: Handle(existing.name.clone()),
+                };
+                run_i3_command(&mut i3, &render(&op)).await?;
             } else {
-                activate_new_workspace(&mut i3, &workspaces, &payload, &args.name).await?;
+                let (existing, unmanaged) =
+                    snapshot_for_rebalance(&workspaces, &payload.managed_envs);
+                let free_num = lowest_unused_slot(&workspaces);
+                let score = payload
+                    .managed_envs
+                    .iter()
+                    .find(|e| e.name == args.name)
+                    .map(|e| e.slot_score)
+                    .unwrap_or(0.0);
+                let incoming = Env {
+                    name: EnvName(args.name.clone()),
+                    slot: free_num,
+                    score,
+                };
+                tracing::info!(env = %args.name, free_num = free_num.0, "Activating new env");
+                let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
+                let plan = derive(&current_slot_map(&existing), &spec);
+                apply_plan(&mut i3, &plan).await?;
+
+                let web_open_command = adapter_config_path()
+                    .map(|p| load_web_open_command(&p))
+                    .unwrap_or_else(default_web_open_command);
+                open_gear_urls(&payload.gear, &web_open_command, &args.name);
+                spawn_gui_commands(&payload.gear, &args.name);
             }
         }
         EnwiroAdapterI3WmCLI::Listen(listen_args) => {
+            use rebalance::derive::derive;
+            use rebalance::optimize::{STABILITY_THRESHOLD, optimize_single_step};
+            use rebalance::types::Slot;
+
             let debounce = std::time::Duration::from_secs(listen_args.debounce_secs);
             let mut last_rebalance: Option<std::time::Instant> = None;
             let mut i3 = I3::connect().await?;
             i3.subscribe([Subscribe::Workspace]).await?;
             let mut listener = i3.listen();
+            // Separate command-issuing socket: the listener socket can only
+            // stream events.
+            let mut i3_cmd = I3::connect().await?;
             loop {
-                if let Some(Ok(Event::Workspace(ws_event))) = listener.next().await
-                    && let Some(current) = ws_event.current
-                {
-                    let raw_name = current.name.unwrap_or_default();
-                    let env_name = extract_environment_name_from_str(&raw_name);
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    println!("{}", format_workspace_switch_event(&env_name, ts));
-
-                    let now = std::time::Instant::now();
-                    if should_rebalance(last_rebalance, debounce, now) {
-                        tracing::debug!("Rebalance check triggered");
-                        let managed_envs = fetch_managed_envs();
-                        tracing::debug!(count = managed_envs.len(), "Fetched managed envs");
-                        let mut i3_rebalance = I3::connect().await?;
-                        let workspaces = i3_rebalance.get_workspaces().await?;
-                        let slots = build_workspace_slots(&workspaces, &managed_envs);
-                        tracing::debug!(count = slots.len(), "Built workspace slots");
-                        let commands = find_best_move(&slots, 9, STABILITY_THRESHOLD);
-                        if commands.is_empty() {
-                            tracing::debug!("No rebalance needed");
-                        }
-                        for (old_name, new_name) in commands {
-                            tracing::info!(from = %old_name, to = %new_name, "Rebalancing workspace");
-                            run_i3_command(
-                                &mut i3_rebalance,
-                                build_rename_workspace_command(&old_name, &new_name),
-                            )
-                            .await?;
-                        }
-                        last_rebalance = Some(std::time::Instant::now());
-                    } else {
-                        tracing::debug!("Rebalance skipped (rate limited)");
+                let Some(item) = listener.next().await else {
+                    tracing::info!("i3 closed the event stream — exiting Listen loop");
+                    break;
+                };
+                let ws_event = match item {
+                    Ok(Event::Workspace(ws_event)) => ws_event,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::error!(error = %e, "i3 IPC error on listener stream — exiting Listen loop");
+                        break;
                     }
+                };
+                let Some(current) = ws_event.current else {
+                    continue;
+                };
+                let Some(raw_name) = current.name.filter(|n| !n.is_empty()) else {
+                    continue;
+                };
+                let env_name = extract_environment_name_from_str(&raw_name);
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                println!("{}", format_workspace_switch_event(&env_name, ts));
+
+                let now = std::time::Instant::now();
+                if !should_rebalance(last_rebalance, debounce, now) {
+                    tracing::debug!("Rebalance skipped (rate limited)");
+                    continue;
                 }
+                tracing::debug!("Rebalance check triggered");
+                let managed_envs = fetch_managed_envs();
+                tracing::debug!(count = managed_envs.len(), "Fetched managed envs");
+                let workspaces = i3_cmd.get_workspaces().await?;
+                let (existing, unmanaged) = snapshot_for_rebalance(&workspaces, &managed_envs);
+                let spec =
+                    optimize_single_step(&existing, &unmanaged, Slot(9), STABILITY_THRESHOLD);
+                let plan = derive(&current_slot_map(&existing), &spec);
+                if plan.relocations.is_empty() && plan.spawn.is_none() {
+                    tracing::debug!("No rebalance needed");
+                }
+                apply_plan(&mut i3_cmd, &plan).await?;
+                last_rebalance = Some(std::time::Instant::now());
             }
         }
     };
@@ -933,70 +664,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_rename_workspace_command() {
-        let cmd = build_rename_workspace_command("5: old-project", "10: old-project");
-        assert_eq!(
-            cmd,
-            r#"rename workspace "5: old-project" to "10: old-project""#
-        );
-    }
-
-    #[test]
-    fn test_build_rename_workspace_command_escapes_quotes() {
-        let cmd = build_rename_workspace_command(r#"5: has"quote"#, "10: safe");
-        assert!(cmd.contains(r#"\""#), "Quote in old name should be escaped");
-    }
-
-    #[test]
-    fn test_workspace_command_with_semicolon_is_quoted() {
-        // A semicolon outside quotes would cause i3 to parse a second command.
-        // The workspace name must be wrapped in quotes to prevent injection.
-        let cmd = build_workspace_command("1: evil;exec rm -rf /");
-        assert!(
-            cmd.starts_with(r#"workspace ""#) && cmd.ends_with('"'),
-            "Workspace name with semicolon must be quoted: {cmd}"
-        );
-    }
-
-    #[test]
-    fn test_workspace_command_with_quote_is_safe() {
-        let cmd = build_workspace_command(r#"1: has"quote"#);
-        // The command should be quoted so the " doesn't break out
-        assert!(
-            cmd.starts_with(r#"workspace ""#) && cmd.ends_with('"'),
-            "Workspace name should be quoted in the i3 command: {cmd}"
-        );
-    }
-
-    #[test]
-    fn test_workspace_command_with_backslash_quote_does_not_inject() {
-        // A name containing \" (literal backslash+quote) must not allow
-        // the quote to end the quoted string. Without escaping backslashes,
-        // \" becomes \\" which i3 parses as \\ (literal backslash) + "
-        // (end of string), enabling injection.
-        let cmd = build_workspace_command(r#"1: evil\";exec bad"#);
-        // After proper escaping: backslash → \\, then quote → \"
-        // Result should be: workspace "1: evil\\\";exec bad"
-        // The key check: the command must not contain an unescaped quote
-        // in the middle that would terminate the string early.
-        let inner = cmd
-            .strip_prefix(r#"workspace ""#)
-            .and_then(|s| s.strip_suffix('"'))
-            .expect("Command should be wrapped in workspace \"...\"");
-
-        // Walk the inner string: no unescaped quotes should appear
-        let mut chars = inner.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '"' {
-                panic!("Found unescaped quote in workspace command interior: {cmd}");
-            }
-            if ch == '\\' {
-                // Skip the next char (it's escaped)
-                chars.next();
-            }
-        }
-    }
+    // (rename/workspace command builder tests removed — covered by
+    // `rebalance::i3_op::tests::*` against the typed `render` function.)
 
     // ── listen subcommand tests ───────────────────────────────────────────────
 
@@ -1747,1327 +1416,5 @@ mod tests {
         );
         assert_eq!(result[0].name, "the-keeper");
         assert!((result[0].slot_score - 0.6).abs() < 1e-10);
-    }
-
-    // ── find_best_move tests ──────────────────────────────────────────────────
-    //
-    // `find_best_move` is a pure function:
-    //
-    //   fn find_best_move(
-    //       workspaces: &[WorkspaceSlot],
-    //       max_shortcut_slot: i32,
-    //   ) -> Vec<(String, String)>
-    //
-    // It finds the single highest-NetBenefit swap across ALL currently-placed
-    // managed envs, considering:
-    //
-    //   Score-swap (both slots occupied, slot_i < slot_j, score_j > score_i):
-    //     NB = (score_j − score_i) × (disc(slot_i) − disc(slot_j)) − STABILITY_THRESHOLD
-    //     (threshold guards against thrashing between two occupied slots)
-    //
-    //   Compaction (slot_i ≤ max_shortcut_slot is empty, env at slot_j, j > i):
-    //     NB = score_j × (disc(slot_i) − disc(slot_j))
-    //     (no STABILITY_THRESHOLD - filling an empty slot has no thrashing risk;
-    //      fires whenever score_j > 0 and NB > 0)
-    //
-    // Returns empty vec when no NB > 0.
-    // Score-swap: two rename pairs (lower-slot env out first, higher-slot env in).
-    // Compaction: one rename pair.
-
-    fn make_slot(slot: i32, name: &str, score: f64) -> WorkspaceSlot {
-        WorkspaceSlot {
-            slot,
-            name: name.to_string(),
-            score,
-            managed: true,
-        }
-    }
-
-    /// FBM-1: Empty input - no workspaces at all → empty vec.
-    #[test]
-    fn test_find_best_move_empty_input_returns_empty() {
-        let result = find_best_move(&[], 9, STABILITY_THRESHOLD);
-        assert!(
-            result.is_empty(),
-            "find_best_move with empty input must return [], got {:?}",
-            result
-        );
-    }
-
-    /// FBM-2: Score-zero env - no move fires.
-    ///
-    /// A single workspace with score 0.0 has no profitable compaction
-    /// (NB = 0 × disc_diff = 0, which does not beat `best_nb` initialised to 0.0)
-    /// and no swap partner. Expected: empty vec.
-    #[test]
-    fn test_find_best_move_single_workspace_no_swap_possible() {
-        // score = 0.0: compaction NB = 0×(disc(i)-disc(j)) - 0.05 < 0, no score-swap partner
-        let ws = [make_slot(5, "zero-score-env", 0.0)];
-        let result = find_best_move(&ws, 9, STABILITY_THRESHOLD);
-        assert!(
-            result.is_empty(),
-            "single workspace with score 0.0 cannot benefit from compaction or swap, \
-             got {:?}",
-            result
-        );
-    }
-
-    /// FBM-3: Score-swap between two occupied slots fires.
-    ///
-    /// slot 1: low-score-env,  score = 0.1
-    /// slot 5: high-score-env, score = 0.9
-    ///
-    /// NB = (0.9 − 0.1) × (disc(1) − disc(5)) − 0.05
-    ///    disc(1) = 1.0, disc(5) = 1/log2(6) ≈ 0.387
-    ///    NB ≈ 0.8 × 0.613 − 0.05 ≈ 0.440 > 0  ✓
-    ///
-    /// Expected: two rename pairs - low-score-env from slot 1 → slot 5 first,
-    /// then high-score-env from slot 5 → slot 1.
-    #[test]
-    fn test_find_best_move_score_swap_between_two_occupied_slots() {
-        let ws = [
-            make_slot(1, "low-score-env", 0.1),
-            make_slot(5, "high-score-env", 0.9),
-        ];
-        // max_shortcut_slot = 9; both slots are well within range
-        let result = find_best_move(&ws, 9, STABILITY_THRESHOLD);
-
-        let nb = (0.9_f64 - 0.1) * (disc(1) - disc(5)) - STABILITY_THRESHOLD;
-        assert!(nb > 0.0, "precondition: NB={nb} must be positive");
-
-        assert!(
-            !result.is_empty(),
-            "score-swap with positive NB must fire, got []"
-        );
-        let new_names: Vec<&str> = result.iter().map(|(_, n)| n.as_str()).collect();
-        assert!(
-            new_names
-                .iter()
-                .any(|n| n.contains("high-score-env") && n.starts_with("1:")),
-            "high-score-env must end up in slot 1; got {:?}",
-            result
-        );
-        assert!(
-            new_names
-                .iter()
-                .any(|n| n.contains("low-score-env") && n.starts_with("5:")),
-            "low-score-env must end up in slot 5; got {:?}",
-            result
-        );
-    }
-
-    /// FBM-4: Score-swap still fires when one slot is > max_shortcut_slot.
-    ///
-    /// The slot restriction only applies to empty-slot compaction targets; occupied
-    /// score-swaps can involve ANY slot number.
-    ///
-    /// To isolate the score-swap path, all shortcut slots 1–9 must be occupied so
-    /// the unified compaction loop finds no empty target.
-    ///
-    /// Setup (max_shortcut_slot = 9):
-    ///   slot 1:  filler-1,      score = 0.9  ─┐
-    ///   slot 2:  filler-2,      score = 0.9   │  occupy all shortcut slots
-    ///   slot 4:  filler-4,      score = 0.9   │  except slot 3 is low-score
-    ///   slots 5–9: filler envs, score = 0.9  ─┘
-    ///   slot 3:  low-score-env, score = 0.1   ← inside shortcut range, low score
-    ///   slot 11: high-score-env, score = 0.9  ← outside shortcut range
-    ///
-    /// No empty slot ≤ 9 → no compaction.
-    /// Score-swap 3 ↔ 11:
-    ///   NB = (0.9 − 0.1) × (disc(3) − disc(11)) − 0.05
-    ///      disc(3) = 0.5,  disc(11) ≈ 0.278
-    ///      NB ≈ 0.8 × 0.222 − 0.05 ≈ 0.128 > 0  ✓
-    ///
-    /// Expected: score-swap fires, high-score-env ends up in slot 3.
-    #[test]
-    fn test_find_best_move_score_swap_fires_when_one_slot_exceeds_max_shortcut() {
-        let mut ws: Vec<WorkspaceSlot> = vec![
-            make_slot(3, "low-score-env", 0.1),
-            make_slot(11, "high-score-env", 0.9),
-        ];
-        // Fill all shortcut slots except slot 3 with neutral-score envs.
-        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
-            ws.push(make_slot(s, &format!("filler-{s}"), 0.9));
-        }
-        let result = find_best_move(&ws, 9, STABILITY_THRESHOLD);
-
-        let nb = (0.9_f64 - 0.1) * (disc(3) - disc(11)) - STABILITY_THRESHOLD;
-        assert!(nb > 0.0, "precondition: NB={nb} must be positive");
-
-        assert!(
-            !result.is_empty(),
-            "score-swap must fire even when one slot ({}) > max_shortcut_slot (9); got []",
-            11
-        );
-        let new_names: Vec<&str> = result.iter().map(|(_, n)| n.as_str()).collect();
-        assert!(
-            new_names
-                .iter()
-                .any(|n| n.contains("high-score-env") && n.starts_with("3:")),
-            "high-score-env must end up in slot 3; got {:?}",
-            result
-        );
-    }
-
-    /// FBM-5: Compaction - empty slot ≤ max_shortcut_slot, env at slot > max_shortcut_slot.
-    ///
-    /// slot 11: my-env, score = 0.9
-    /// Slots 1–9: all empty (no WorkspaceSlots for those slots).
-    /// max_shortcut_slot = 9
-    ///
-    /// Best compaction: slot 11 → slot 1.
-    /// NB = 0.9 × (disc(1) − disc(11)) − 0.05
-    ///    disc(1) = 1.0, disc(11) ≈ 0.278
-    ///    NB ≈ 0.9 × 0.722 − 0.05 ≈ 0.600 > 0  ✓
-    ///
-    /// Expected: one rename pair moving "11: my-env" → "1: my-env".
-    #[test]
-    fn test_find_best_move_compaction_from_above_shortcut_into_empty_shortcut_slot() {
-        let ws = [make_slot(11, "my-env", 0.9)];
-        let result = find_best_move(&ws, 9, STABILITY_THRESHOLD);
-
-        let nb = 0.9_f64 * (disc(1) - disc(11)) - STABILITY_THRESHOLD;
-        assert!(nb > 0.0, "precondition: NB={nb} must be positive");
-
-        assert_eq!(
-            result.len(),
-            1,
-            "compaction must produce exactly one rename pair, got {:?}",
-            result
-        );
-        let (old, new) = &result[0];
-        assert_eq!(old, "11: my-env", "old name should reflect original slot");
-        assert_eq!(
-            new, "1: my-env",
-            "compaction must target the best empty slot (slot 1)"
-        );
-    }
-
-    /// FBM-6: No move when all shortcut slots are occupied and scores are equal.
-    ///
-    /// Slots 1–9 all occupied (score 0.9), env-slot-11 at slot 11 (score 0.9).
-    /// No empty slot ≤ 9 → compaction cannot fire.
-    /// All score diffs = 0 → NB = 0 − 0.05 < 0 for every swap pair → no swap fires.
-    /// Expected: empty vec.
-    #[test]
-    fn test_find_best_move_no_compaction_when_all_shortcut_slots_occupied() {
-        // Slots 1–9 occupied with score 0.9, slot 11 also score 0.9.
-        // No empty slot ≤ 9.
-        // Score-swap between any pair: all scores equal → NB = 0 × (…) − 0.05 < 0.
-        let mut ws: Vec<WorkspaceSlot> = (1..=9_i32)
-            .map(|s| make_slot(s, &format!("env-slot-{}", s), 0.9))
-            .collect();
-        ws.push(make_slot(11, "env-slot-11", 0.9));
-        let result = find_best_move(&ws, 9, STABILITY_THRESHOLD);
-        assert!(
-            result.is_empty(),
-            "no compaction when all shortcut slots are occupied and no score difference, \
-             got {:?}",
-            result
-        );
-    }
-
-    /// FBM-8: Stability threshold blocks a small-gain swap.
-    ///
-    /// To isolate the score-swap path (and prevent the unified compaction loop from
-    /// firing on empty slots), use max_shortcut_slot = 1 with slot 1 already occupied.
-    /// There are then no empty slots ≤ max_shortcut_slot, so no compaction is possible.
-    ///
-    /// slot 1: env-a, score = 0.64   (occupies the only shortcut slot)
-    /// slot 5: env-b, score = 0.65
-    /// max_shortcut_slot = 1
-    ///
-    /// Score-swap NB = (0.65 − 0.64) × (disc(1) − disc(5)) − 0.05
-    ///    = 0.01 × (1.0 − 0.387) − 0.05
-    ///    ≈ 0.006 − 0.05 = −0.044 < 0
-    ///
-    /// No compaction targets (slot 1 occupied, max_shortcut_slot = 1).
-    /// Expected: empty vec (gain too small to clear STABILITY_THRESHOLD).
-    #[test]
-    fn test_find_best_move_stability_threshold_blocks_small_gain_swap() {
-        let ws = [make_slot(1, "env-a", 0.64), make_slot(5, "env-b", 0.65)];
-        let nb = (0.65_f64 - 0.64) * (disc(1) - disc(5)) - STABILITY_THRESHOLD;
-        assert!(
-            nb < 0.0,
-            "precondition: NB={nb} must be negative (below stability threshold)"
-        );
-
-        // max_shortcut_slot=1: slot 1 is occupied → no empty compaction targets.
-        let result = find_best_move(&ws, 1, STABILITY_THRESHOLD);
-        assert!(
-            result.is_empty(),
-            "stability threshold must block a swap with NB={nb:.5} < 0, got {:?}",
-            result
-        );
-    }
-
-    /// FBM-9: Multiple candidates - picks the highest NetBenefit.
-    ///
-    /// Candidates:
-    ///   A - compaction: env at slot 7, score = 0.8, empty slot 1.
-    ///       NB_A = 0.8 × (disc(1) − disc(7)) − 0.05
-    ///            = 0.8 × (1.0 − 0.356) − 0.05 ≈ 0.8 × 0.644 − 0.05 ≈ 0.465
-    ///
-    ///   B - score-swap: slot 2: low-score-env (0.1) ↔ slot 3: mid-score-env (0.5).
-    ///       NB_B = (0.5 − 0.1) × (disc(2) − disc(3)) − 0.05
-    ///            = 0.4 × (0.631 − 0.5) − 0.05 ≈ 0.4 × 0.131 − 0.05 ≈ 0.002 > 0
-    ///
-    /// NB_A ≈ 0.465 >> NB_B ≈ 0.002 → compaction (A) wins.
-    ///
-    /// Verify that result is the compaction pair (env-at-7 → slot 1).
-    #[test]
-    fn test_find_best_move_picks_highest_net_benefit_among_multiple_candidates() {
-        // Slot 1: empty (no WorkspaceSlot).
-        // Slot 2: low-score-env, score = 0.1
-        // Slot 3: mid-score-env, score = 0.5
-        // Slot 7: compact-env,   score = 0.8
-        let ws = [
-            make_slot(2, "low-score-env", 0.1),
-            make_slot(3, "mid-score-env", 0.5),
-            make_slot(7, "compact-env", 0.8),
-        ];
-        let max_shortcut_slot = 9;
-
-        // Verify NB values numerically.
-        let nb_a = 0.8_f64 * (disc(1) - disc(7)) - STABILITY_THRESHOLD;
-        let nb_b = (0.5_f64 - 0.1) * (disc(2) - disc(3)) - STABILITY_THRESHOLD;
-        assert!(nb_a > 0.0, "precondition: NB_A={nb_a} must be positive");
-        assert!(nb_b > 0.0, "precondition: NB_B={nb_b} must be positive");
-        assert!(
-            nb_a > nb_b,
-            "precondition: NB_A={nb_a} must exceed NB_B={nb_b}"
-        );
-
-        let result = find_best_move(&ws, max_shortcut_slot, STABILITY_THRESHOLD);
-
-        assert_eq!(
-            result.len(),
-            1,
-            "compaction produces one rename pair; got {:?}",
-            result
-        );
-        let (old, new) = &result[0];
-        assert_eq!(
-            old, "7: compact-env",
-            "argmax must select compaction of compact-env out of slot 7; got old={old:?}"
-        );
-        assert_eq!(
-            new, "1: compact-env",
-            "compact-env must move to empty slot 1; got new={new:?}"
-        );
-    }
-
-    /// FBM-10: Cross-boundary compaction still finds an empty slot when the slot
-    /// immediately after max_shortcut_occupied is itself occupied.
-    ///
-    /// The original "next-after-max" heuristic only checked ONE candidate slot.
-    /// If that slot was occupied it silently gave up.  The unified loop must
-    /// scan ALL empty slots ≤ max_shortcut_slot.
-    ///
-    /// Setup (max_shortcut_slot = 9):
-    ///   slot  5: anchor-env,  score = 0.9   (inside shortcut range, occupies slot 5 + 6 = 6)
-    ///   slot  6: filler-env,  score = 0.9   (occupies the "next-after-5" candidate slot)
-    ///   slot 11: cross-env,   score = 0.9   (outside shortcut range)
-    ///
-    /// "Next after max occupied shortcut slot (5)" is slot 6, but slot 6 is occupied.
-    /// The unified loop must find slot 7 (or any other empty slot ≤ 9) and compact
-    /// cross-env into it.
-    ///
-    /// NB for cross-env (slot 11) → slot 7:
-    ///   NB = 0.9 × (disc(7) - disc(11)) - 0.05
-    ///      disc(7)  = 1/log2(8) = 1/3 ≈ 0.333
-    ///      disc(11) = 1/log2(12) ≈ 0.278
-    ///      NB ≈ 0.9 × 0.055 - 0.05 ≈ 0.0 -- possibly below threshold
-    ///
-    /// Use slot 3 (empty) instead of slot 7 to get a clearly positive NB:
-    ///   slot  5: anchor-env, score = 0.9
-    ///   slot  6: filler-env, score = 0.9
-    ///   slot 11: cross-env,  score = 0.9
-    ///   (slots 1–4 are all empty, as are 7–9)
-    ///
-    /// NB for cross-env → slot 1:
-    ///   NB = 0.9 × (disc(1) - disc(11)) - 0.05
-    ///      = 0.9 × (1.0 - 0.278) - 0.05 ≈ 0.600 > 0  ✓
-    ///
-    /// Expected: exactly one rename pair moving "11: cross-env" → "1: cross-env".
-    #[test]
-    fn test_find_best_move_cross_boundary_skips_occupied_next_slot_finds_other_empty() {
-        let ws = [
-            make_slot(5, "anchor-env", 0.9),
-            make_slot(6, "filler-env", 0.9),
-            make_slot(11, "cross-env", 0.9),
-        ];
-        let max_shortcut_slot = 9;
-
-        let nb = 0.9_f64 * (disc(1) - disc(11)) - STABILITY_THRESHOLD;
-        assert!(nb > 0.0, "precondition: NB={nb} must be positive");
-
-        let result = find_best_move(&ws, max_shortcut_slot, STABILITY_THRESHOLD);
-
-        assert_eq!(
-            result.len(),
-            1,
-            "cross-boundary compaction must produce exactly one rename pair; got {:?}",
-            result
-        );
-        let (old, new_name) = &result[0];
-        assert_eq!(
-            old, "11: cross-env",
-            "source must be '11: cross-env'; got {old:?}"
-        );
-        assert_eq!(
-            new_name, "1: cross-env",
-            "cross-env must compact into slot 1; got {new_name:?}"
-        );
-    }
-
-    /// FBM-11: Internal shortcut gap - compaction fills a gap inside the shortcut range,
-    /// not just before the minimum occupied shortcut slot.
-    ///
-    /// The original "within-shortcut" branch only targeted slots BEFORE the minimum
-    /// occupied shortcut slot, so an internal gap (e.g. slot 5 empty while slots 1–3
-    /// and 7 are occupied) was never targeted.
-    ///
-    /// Setup (max_shortcut_slot = 9):
-    ///   slot 1: env-a, score = 0.9
-    ///   slot 2: env-b, score = 0.9
-    ///   slot 3: env-c, score = 0.9
-    ///   slot 7: env-d, score = 0.9
-    ///   (slot 5 is empty - internal gap)
-    ///
-    /// NB for env-d (slot 7) → slot 5 (empty):
-    ///   NB = 0.9 × (disc(5) - disc(7)) - 0.05
-    ///      disc(5) = 1/log2(6) ≈ 0.387
-    ///      disc(7) = 1/log2(8) ≈ 0.333
-    ///      NB ≈ 0.9 × 0.054 - 0.05 ≈ -0.001 - likely below threshold
-    ///
-    /// Use slot 4 (empty) instead, and env at slot 8:
-    ///   slot 1: env-a, score = 0.9
-    ///   slot 2: env-b, score = 0.9
-    ///   slot 3: env-c, score = 0.9
-    ///   slot 8: env-d, score = 0.9
-    ///   (slot 4 is empty - internal gap between 3 and 8)
-    ///
-    /// NB for env-d (slot 8) → slot 4 (empty):
-    ///   NB = 0.9 × (disc(4) - disc(8)) - 0.05
-    ///      disc(4) = 1/log2(5) ≈ 0.431
-    ///      disc(8) = 1/log2(9) ≈ 0.315
-    ///      NB ≈ 0.9 × 0.116 - 0.05 ≈ 0.054 > 0  ✓
-    ///
-    /// Expected: exactly one rename pair moving "8: env-d" → "4: env-d".
-    #[test]
-    fn test_find_best_move_internal_shortcut_gap_compaction() {
-        let ws = [
-            make_slot(1, "env-a", 0.9),
-            make_slot(2, "env-b", 0.9),
-            make_slot(3, "env-c", 0.9),
-            make_slot(8, "env-d", 0.9),
-        ];
-        let max_shortcut_slot = 9;
-
-        let nb = 0.9_f64 * (disc(4) - disc(8)) - STABILITY_THRESHOLD;
-        assert!(nb > 0.0, "precondition: NB={nb:.4} must be positive");
-
-        let result = find_best_move(&ws, max_shortcut_slot, STABILITY_THRESHOLD);
-
-        assert_eq!(
-            result.len(),
-            1,
-            "internal gap compaction must produce exactly one rename pair; got {:?}",
-            result
-        );
-        let (old, new_name) = &result[0];
-        assert_eq!(old, "8: env-d", "source must be '8: env-d'; got {old:?}");
-        assert_eq!(
-            new_name, "4: env-d",
-            "env-d must move to internal empty slot 4; got {new_name:?}"
-        );
-    }
-
-    /// FBM-12-pre: Compaction between adjacent high-numbered slots fires without stability
-    /// threshold.
-    ///
-    /// Filling an empty slot has no thrashing risk, so STABILITY_THRESHOLD must NOT be
-    /// applied to compaction moves.  Only score-swaps between two occupied slots need it.
-    ///
-    /// Setup:
-    ///   slot 7: empty
-    ///   slot 8: chezmoi, score = 0.8
-    ///   max_shortcut_slot = 9
-    ///
-    /// disc(7) ≈ 0.333, disc(8) ≈ 0.315 → disc diff ≈ 0.018, well below STABILITY_THRESHOLD=0.05.
-    ///
-    /// With threshold:    NB = 0.8 × 0.018 − 0.05 ≈ −0.036 < 0  → currently blocked (bug)
-    /// Without threshold: NB = 0.8 × 0.018 ≈ 0.014 > 0           → should fire (fix)
-    ///
-    /// Expected: one rename pair moving "8: chezmoi" → "7: chezmoi".
-    #[test]
-    fn test_find_best_move_compaction_fires_without_stability_threshold() {
-        // Occupy slots 1–6 so slot 7 is the only available empty shortcut slot.
-        // chezmoi sits at slot 8 with score 0.8.
-        let mut ws: Vec<WorkspaceSlot> = (1..=6_i32)
-            .map(|s| make_slot(s, &format!("filler-{s}"), 0.9))
-            .collect();
-        ws.push(make_slot(8, "chezmoi", 0.8));
-        let max_shortcut_slot = 9;
-
-        // Confirm the disc diff is below STABILITY_THRESHOLD (this is what the bug is about).
-        let disc_diff = disc(7) - disc(8);
-        assert!(
-            disc_diff < STABILITY_THRESHOLD,
-            "precondition: disc diff {disc_diff:.6} must be < STABILITY_THRESHOLD \
-             {STABILITY_THRESHOLD} to reproduce the bug"
-        );
-        // Confirm move has positive benefit without the threshold.
-        let nb_no_threshold = 0.8_f64 * disc_diff;
-        assert!(
-            nb_no_threshold > 0.0,
-            "precondition: NB without threshold {nb_no_threshold:.6} must be > 0"
-        );
-
-        let result = find_best_move(&ws, max_shortcut_slot, STABILITY_THRESHOLD);
-
-        assert_eq!(
-            result.len(),
-            1,
-            "compaction of chezmoi from slot 8 → 7 must fire (no threshold for compaction); \
-             got {:?}",
-            result
-        );
-        let (old, new_name) = &result[0];
-        assert_eq!(
-            old, "8: chezmoi",
-            "source must be '8: chezmoi'; got {old:?}"
-        );
-        assert_eq!(
-            new_name, "7: chezmoi",
-            "chezmoi must move to empty slot 7; got {new_name:?}"
-        );
-    }
-
-    /// FBM-12: Score-swap pair ordering - the lower-slot env moves OUT first.
-    ///
-    /// i3 identifies workspaces by name, so both cannot share a name even momentarily.
-    /// The correct order is:
-    ///   result[0]: move lower-slot env from slot_lo to slot_hi  (vacates slot_lo)
-    ///   result[1]: move higher-slot env from slot_hi to slot_lo (fills vacated slot_lo)
-    ///
-    /// Setup:
-    ///   slot 1: low-score-env,  score = 0.1
-    ///   slot 5: high-score-env, score = 0.9
-    ///
-    /// NB = (0.9 - 0.1) × (disc(1) - disc(5)) - 0.05 > 0  ✓  (same as FBM-3)
-    ///
-    /// Expected ordering:
-    ///   result[0]: ("1: low-score-env",  "5: low-score-env")   ← lower slot out first
-    ///   result[1]: ("5: high-score-env", "1: high-score-env")  ← higher slot fills gap
-    #[test]
-    fn test_find_best_move_swap_pair_lower_slot_moves_out_first() {
-        let ws = [
-            make_slot(1, "low-score-env", 0.1),
-            make_slot(5, "high-score-env", 0.9),
-        ];
-        let result = find_best_move(&ws, 9, STABILITY_THRESHOLD);
-
-        assert_eq!(
-            result.len(),
-            2,
-            "score-swap must produce exactly two pairs; got {:?}",
-            result
-        );
-
-        // result[0]: lower-slot env moves OUT (from slot 1 → slot 5)
-        let (old0, new0) = &result[0];
-        assert_eq!(
-            old0, "1: low-score-env",
-            "result[0] old must be '1: low-score-env' (lower-slot env moves out first); got {old0:?}"
-        );
-        assert_eq!(
-            new0, "5: low-score-env",
-            "result[0] new must be '5: low-score-env'; got {new0:?}"
-        );
-
-        // result[1]: higher-slot env moves IN (from slot 5 → slot 1)
-        let (old1, new1) = &result[1];
-        assert_eq!(
-            old1, "5: high-score-env",
-            "result[1] old must be '5: high-score-env'; got {old1:?}"
-        );
-        assert_eq!(
-            new1, "1: high-score-env",
-            "result[1] new must be '1: high-score-env'; got {new1:?}"
-        );
-    }
-
-    // ── Unmanaged workspace slot tests ───────────────────────────────────────
-    //
-    // These tests require `WorkspaceSlot` to have a `managed: bool` field.
-    // The `ws!` macro and helpers below will fail to COMPILE until that field
-    // is added - the compile error IS the expected "red" state for a data model
-    // change under TDD.
-
-    /// Build a `Vec<WorkspaceSlot>` using a compact fixture syntax.
-    ///
-    /// Usage:
-    ///   `ws![ N => unmanaged, N => "name" @ score, … ]`
-    ///
-    /// - `N => unmanaged`      → slot N, name = N.to_string(), score = 0.0, managed = false
-    /// - `N => "name" @ score` → slot N, name = "name",        score,       managed = true
-    ///
-    /// NOTE: This macro requires `WorkspaceSlot` to have a `managed: bool` field.
-    /// It will fail to compile until that field is added.
-    macro_rules! ws {
-        [ $( $slot:literal => $kind:tt $( @ $score:expr )? ),* $(,)? ] => {
-            {
-                let mut v: Vec<WorkspaceSlot> = Vec::new();
-                $(
-                    ws!(@push v, $slot, $kind $(, $score)?);
-                )*
-                v
-            }
-        };
-
-        // unmanaged arm
-        (@push $v:expr, $slot:expr, unmanaged) => {
-            $v.push(WorkspaceSlot {
-                slot: $slot,
-                name: $slot.to_string(),
-                score: 0.0,
-                managed: false,
-            });
-        };
-
-        // managed arm: "name" @ score
-        (@push $v:expr, $slot:expr, $name:literal, $score:expr) => {
-            $v.push(WorkspaceSlot {
-                slot: $slot,
-                name: $name.to_string(),
-                score: $score,
-                managed: true,
-            });
-        };
-    }
-
-    /// Apply a list of rename moves to a set of workspace slots (for convergence testing).
-    ///
-    /// Each move is `(old_name, new_name)` in `"N: env_name"` format.
-    /// Finds the slot whose formatted name matches `old_name` and updates its slot number.
-    fn apply_moves(
-        mut slots: Vec<WorkspaceSlot>,
-        moves: &[(String, String)],
-    ) -> Vec<WorkspaceSlot> {
-        for (old_name, new_name) in moves {
-            let new_slot: i32 = new_name.split(": ").next().unwrap().parse().unwrap();
-            if let Some(ws) = slots
-                .iter_mut()
-                .find(|ws| format!("{}: {}", ws.slot, ws.name) == *old_name)
-            {
-                ws.slot = new_slot;
-            }
-        }
-        slots
-    }
-
-    /// Run `find_best_move` repeatedly until it returns an empty vec (fixed point).
-    fn run_to_convergence(
-        mut slots: Vec<WorkspaceSlot>,
-        max_shortcut_slot: i32,
-        stability_threshold: f64,
-    ) -> Vec<WorkspaceSlot> {
-        loop {
-            let moves = find_best_move(&slots, max_shortcut_slot, stability_threshold);
-            if moves.is_empty() {
-                break;
-            }
-            slots = apply_moves(slots, &moves);
-        }
-        slots
-    }
-
-    /// Assert that `find_best_move` produces exactly the expected moves.
-    #[allow(dead_code)]
-    fn assert_rebalances_to(
-        slots: &[WorkspaceSlot],
-        max_shortcut_slot: i32,
-        stability_threshold: f64,
-        expected: &[(String, String)],
-    ) {
-        let result = find_best_move(slots, max_shortcut_slot, stability_threshold);
-        assert_eq!(result, expected, "find_best_move returned unexpected moves");
-    }
-
-    /// Run to convergence, verify it is a fixed point, then check that each named
-    /// env ends up at the expected slot.
-    #[allow(dead_code)]
-    fn assert_converges_to(
-        slots: Vec<WorkspaceSlot>,
-        max_shortcut_slot: i32,
-        stability_threshold: f64,
-        expected_slots: &[(i32, &str)],
-    ) {
-        let final_slots = run_to_convergence(slots, max_shortcut_slot, stability_threshold);
-
-        // Verify it is truly a fixed point: three more rounds must all return empty.
-        for _ in 0..3 {
-            let moves = find_best_move(&final_slots, max_shortcut_slot, stability_threshold);
-            assert!(
-                moves.is_empty(),
-                "Not at fixed point after convergence: {:?}",
-                moves
-            );
-        }
-
-        // Check each expected (slot, name) pair.
-        for (expected_slot, expected_name) in expected_slots {
-            let found = final_slots.iter().find(|ws| ws.name == *expected_name);
-            assert!(
-                found.is_some(),
-                "Expected env '{}' not found after convergence",
-                expected_name
-            );
-            assert_eq!(
-                found.unwrap().slot,
-                *expected_slot,
-                "Env '{}' should be at slot {}, but is at slot {}",
-                expected_name,
-                expected_slot,
-                found.unwrap().slot
-            );
-        }
-    }
-
-    /// T1 - Unmanaged slot blocks compaction (THIS IS THE BUG TEST).
-    ///
-    /// Real-session fixture:
-    ///   slot 1: unmanaged  (bare "1" workspace, not managed by enwiro)
-    ///   slot 2: "enwiro"   @ 0.60  (managed)
-    ///   slot 3: "chezmoi"  @ 0.80  (managed)
-    ///   slot 4: "apple"    @ 0.94  (managed)
-    ///   slot 5: "banana"   @ 0.71  (managed)
-    ///   slot 6: "cherry"   @ 0.55  (managed)
-    ///   slot 8: "grape"    @ 0.45  (managed)
-    ///
-    /// Bug: because `build_workspace_slots` never adds an entry for the unmanaged
-    /// workspace, `find_best_move` sees slot 1 as empty and moves a managed env
-    /// there, creating two slot-1 workspaces in i3.
-    ///
-    /// Fix: `WorkspaceSlot` gains `managed: bool`; `find_best_move` treats ANY
-    /// occupied slot (managed or not) as non-empty for compaction targets.
-    ///
-    /// Expected after fix: no move in the returned vec has "1: ..." as its
-    /// destination, because slot 1 is occupied by an unmanaged workspace.
-    #[test]
-    fn test_unmanaged_slot_blocks_compaction() {
-        // NOTE: This test requires WorkspaceSlot to have a `managed: bool` field.
-        // The ws! macro will fail to compile until that field is added.
-        let slots = ws![
-            1 => unmanaged,
-            2 => "enwiro"  @ 0.60,
-            3 => "chezmoi" @ 0.80,
-            4 => "apple"   @ 0.94,
-            5 => "banana"  @ 0.71,
-            6 => "cherry"  @ 0.55,
-            8 => "grape"   @ 0.45,
-        ];
-
-        let moves = find_best_move(&slots, 9, STABILITY_THRESHOLD);
-
-        // The bug: before the fix, a move targeting "1: ..." appears here.
-        // After the fix, slot 1 is treated as occupied, so no move targets it.
-        for (_, new_name) in &moves {
-            assert!(
-                !new_name.starts_with("1: "),
-                "find_best_move must NOT target slot 1 (occupied by unmanaged workspace); \
-                 got move to {:?}",
-                new_name
-            );
-        }
-    }
-
-    /// T2 - Compaction into a truly empty slot fires correctly (ws! macro smoke test).
-    ///
-    /// All slots 1–3 are genuinely absent from the slice (no WorkspaceSlot at all),
-    /// so they are empty. The algorithm must compact the lowest-numbered env that
-    /// benefits from moving toward slot 1.
-    ///
-    ///   slot 4: "apple"  @ 0.94
-    ///   slot 5: "banana" @ 0.71
-    ///   slot 8: "grape"  @ 0.45
-    ///
-    /// Slots 1–3 are absent → NB for apple → slot 1 is strongly positive.
-    /// Expected: at least one move targets a slot with number < the source slot,
-    /// and specifically a move into slot 1 (highest gain).
-    #[test]
-    fn test_compaction_into_truly_empty_slot() {
-        let slots = ws![
-            4 => "apple"  @ 0.94,
-            5 => "banana" @ 0.71,
-            8 => "grape"  @ 0.45,
-        ];
-
-        let moves = find_best_move(&slots, 9, STABILITY_THRESHOLD);
-
-        assert!(
-            !moves.is_empty(),
-            "compaction must fire when slots 1–3 are genuinely empty; got []"
-        );
-
-        // At least one move should target slot 1 (highest-gain empty slot).
-        let targets_slot_1 = moves
-            .iter()
-            .any(|(_, new_name)| new_name.starts_with("1: "));
-        assert!(
-            targets_slot_1,
-            "highest-gain compaction should target slot 1; got {:?}",
-            moves
-        );
-    }
-
-    /// T3 - All-managed base fixture converges to a fixed point.
-    ///
-    /// Same score distribution as T1 but WITHOUT the unmanaged slot - all entries
-    /// are managed. Starting layout has a gap (slot 7 empty) and apple buried at slot 4.
-    ///
-    /// The algorithm guarantees:
-    ///   1. A true fixed point is reached.
-    ///   2. apple (0.94, highest score, starts at slot 4) compacts to slot 1 - the
-    ///      NB for that move (≈ 0.535) is far above STABILITY_THRESHOLD, so it always fires.
-    ///   3. All 6 envs compact into contiguous slots 1–6 (slot 7 gap gets filled).
-    ///
-    /// Note: the algorithm uses STABILITY_THRESHOLD = 0.05 to prevent thrashing between
-    /// similarly-scored envs. Pairs like banana (0.71) vs enwiro (0.60) have a score diff
-    /// too small to clear the threshold for any adjacent slot pair, so their relative order
-    /// is not guaranteed by the algorithm.
-    #[test]
-    fn test_real_session_fixture_converges() {
-        let slots = ws![
-            2 => "enwiro"  @ 0.60,
-            3 => "chezmoi" @ 0.80,
-            4 => "apple"   @ 0.94,
-            5 => "banana"  @ 0.71,
-            6 => "cherry"  @ 0.55,
-            8 => "grape"   @ 0.45,
-        ];
-
-        let final_slots = run_to_convergence(slots, 9, STABILITY_THRESHOLD);
-
-        // Must be a true fixed point (3 extra rounds all return empty).
-        for _ in 0..3 {
-            let moves = find_best_move(&final_slots, 9, STABILITY_THRESHOLD);
-            assert!(
-                moves.is_empty(),
-                "Not at fixed point after convergence: {:?}",
-                moves
-            );
-        }
-
-        // apple (0.94) has the largest compaction NB and must end up at slot 1.
-        let apple_slot = final_slots
-            .iter()
-            .find(|ws| ws.name == "apple")
-            .unwrap()
-            .slot;
-        assert_eq!(
-            apple_slot, 1,
-            "apple (0.94) must compact to slot 1 (highest NB), but ended at slot {}",
-            apple_slot
-        );
-
-        // All 6 managed envs must have compacted into contiguous slots 1–6 (no gap at slot 7).
-        let mut occupied_slots: Vec<i32> = final_slots.iter().map(|ws| ws.slot).collect();
-        occupied_slots.sort();
-        assert_eq!(
-            occupied_slots,
-            vec![1, 2, 3, 4, 5, 6],
-            "All 6 envs must compact into contiguous slots 1–6; got {:?}",
-            occupied_slots
-        );
-    }
-
-    /// T5 - Activate: new env placed at free_num must reach a shortcut slot via
-    /// convergence with no stability threshold.
-    ///
-    /// Two bugs compound when a new env lands at free_num > max_shortcut_slot:
-    ///
-    ///   Bug A (single call): the Activate path calls `find_best_move` once. When a
-    ///   higher-NB swap between two existing envs fires first, the new env is not
-    ///   involved and stays at free_num.
-    ///
-    ///   Bug B (threshold): `STABILITY_THRESHOLD` makes score-swaps from slot > 9 into
-    ///   slot ≤ 9 impossible when the slots are close together in disc space.
-    ///
-    /// Fix: Activate must call `find_best_move(..., 0.0)` (no threshold - explicit user
-    /// intent, no thrash risk) and loop to convergence.
-    ///
-    /// Concrete scenario (all slots 1–9 occupied):
-    ///   slot 9: chezmoi @ 0.95 - high score, badly placed (drives a big first-round swap)
-    ///   slot 1: apple   @ 0.10 - low score  → chezmoi↔apple NB ≈ 0.544 (wins round 1)
-    ///   slot 10: kiwi   @ 0.80 - new env    → kiwi↔enwiro  NB ≈ 0.068 (wins round 2)
-    ///
-    /// After full convergence with threshold=0.0, kiwi reaches slot ≤ 9. ✓
-    ///
-    /// NOTE: Calls `find_best_move` with a third `stability_threshold: f64` argument
-    /// that does not exist yet - will fail to COMPILE until the parameter is added.
-    #[test]
-    fn test_new_env_gets_shortcut_slot_after_activate() {
-        // All shortcut slots 1–9 occupied. "kiwi" is the new env placed at free_num = 10.
-        let mut slots = ws![
-             1 => "apple"   @ 0.10,
-             2 => "enwiro"  @ 0.60,
-             3 => "banana"  @ 0.75,
-             4 => "cherry"  @ 0.55,
-             5 => "grape"   @ 0.50,
-             6 => "fig"     @ 0.48,
-             7 => "date"    @ 0.45,
-             8 => "lime"    @ 0.42,
-             9 => "chezmoi" @ 0.95,
-            10 => "kiwi"    @ 0.80,
-        ];
-
-        // Precondition: first find_best_move (with threshold) does NOT move kiwi.
-        // chezmoi↔apple NB ≈ 0.544 > any kiwi-involving move.
-        let first_moves = find_best_move(&slots, 9, STABILITY_THRESHOLD);
-        assert!(
-            !first_moves
-                .iter()
-                .any(|(_, n)| n.split_once(": ").map(|(_, e)| e) == Some("kiwi")),
-            "precondition: chezmoi↔apple should fire first, not kiwi; got {:?}",
-            first_moves
-        );
-
-        // Simulate the fixed Activate path: loop find_best_move with threshold=0.0.
-        loop {
-            let moves = find_best_move(&slots, 9, 0.0);
-            if moves.is_empty() {
-                break;
-            }
-            slots = apply_moves(slots, &moves);
-        }
-        let kiwi_slot = slots.iter().find(|ws| ws.name == "kiwi").unwrap().slot;
-
-        assert!(
-            kiwi_slot <= 9,
-            "kiwi should be at a shortcut slot (≤ 9) after activate convergence, \
-             but stayed at slot {}",
-            kiwi_slot
-        );
-    }
-
-    /// T6 - Cross-boundary swap (slot > max_shortcut_slot → slot ≤ max_shortcut_slot)
-    /// fires with `stability_threshold=0.0` but is blocked by `STABILITY_THRESHOLD`.
-    ///
-    /// Models the real production scenario (observed in logs 2026-04-16):
-    ///   - slots 1, 2, 4, 9, 10 occupied by unmanaged bare workspaces
-    ///   - slots 3, 5, 6, 7, 8 occupied by managed envs (all 9 shortcut slots full)
-    ///   - "chezmoi" (score 0.910) just activated → lands at free_num = 11
-    ///   - listen loop says "no rebalance needed" forever: disc(6)−disc(11)=0.078,
-    ///     so NB = 0.129×0.078 − 0.05 = −0.040 < 0 (threshold blocks the swap)
-    ///   - but with threshold=0.0: NB = 0.129×0.078 = 0.010 > 0 → swap fires ✓
-    ///
-    /// NOTE: Calls `find_best_move` with a third `stability_threshold: f64` argument
-    /// that does not exist yet - will fail to COMPILE until the parameter is added.
-    #[test]
-    fn test_cross_boundary_swap_fires_without_stability_threshold() {
-        let slots = ws![
-             1 => unmanaged,
-             2 => unmanaged,
-             3 => "enwiro"     @ 0.955,
-             4 => unmanaged,
-             5 => "costae"     @ 0.942,
-             6 => "blogtato"   @ 0.781,
-             7 => "board-game" @ 0.800,
-             8 => "newsboat"   @ 0.665,
-             9 => unmanaged,
-            10 => unmanaged,
-            11 => "chezmoi"    @ 0.910,
-        ];
-
-        // With STABILITY_THRESHOLD (listen-loop behaviour): no move fires.
-        // Best cross-boundary NB = 0.129×0.078 − 0.05 = −0.040 < 0.
-        let listen_moves = find_best_move(&slots, 9, STABILITY_THRESHOLD);
-        assert!(
-            listen_moves.is_empty(),
-            "listen loop must NOT rebalance when threshold blocks cross-boundary swap; \
-             got {:?}",
-            listen_moves
-        );
-
-        // With threshold=0.0 (Activate behaviour): chezmoi↔blogtato fires.
-        // NB = (0.910−0.781) × (disc(6)−disc(11)) = 0.129 × 0.078 = 0.010 > 0.
-        let activate_moves = find_best_move(&slots, 9, 0.0);
-        assert!(
-            !activate_moves.is_empty(),
-            "activate path must fire cross-boundary swap with threshold=0.0; got []"
-        );
-        let chezmoi_slot = activate_moves.iter().find_map(|(_, n)| {
-            let (s, e) = n.split_once(": ")?;
-            if e == "chezmoi" {
-                s.parse::<i32>().ok()
-            } else {
-                None
-            }
-        });
-        assert!(
-            chezmoi_slot.is_some_and(|s| s <= 9),
-            "chezmoi must move to a shortcut slot (≤ 9); got activate_moves={:?}",
-            activate_moves
-        );
-    }
-
-    /// T7 - Score-zero new env is boosted into the shortcut zone.
-    ///
-    /// A brand-new env (score 0.0) lands at free_num = 10 while all nine shortcut
-    /// slots are occupied by managed envs. Without a score boost, `find_best_move`
-    /// would never swap it in (it has the lowest score). The activate path calls
-    /// `boost_incoming_score` to raise its effective score to just above the worst
-    /// managed shortcut env before the convergence loop runs.
-    ///
-    /// Expected: after `boost_incoming_score` + loop with threshold=0.0, the new
-    /// env lands at a shortcut slot (≤ 9).
-    #[test]
-    fn test_score_zero_new_env_boosted_into_shortcut_zone() {
-        let mut slots = ws![
-            1 => "alpha"   @ 0.90,
-            2 => "beta"    @ 0.80,
-            3 => "gamma"   @ 0.70,
-            4 => "delta"   @ 0.65,
-            5 => "epsilon" @ 0.60,
-            6 => "zeta"    @ 0.55,
-            7 => "eta"     @ 0.50,
-            8 => "theta"   @ 0.45,
-            9 => "iota"    @ 0.40,
-           10 => "new-env" @ 0.00,
-        ];
-
-        boost_incoming_score(&mut slots, "new-env", 9);
-
-        let new_env_score = slots.iter().find(|ws| ws.name == "new-env").unwrap().score;
-        assert!(
-            new_env_score > 0.0,
-            "score must be boosted above 0.0 before loop; got {new_env_score}"
-        );
-
-        loop {
-            let moves = find_best_move(&slots, 9, 0.0);
-            if moves.is_empty() {
-                break;
-            }
-            slots = apply_moves(slots, &moves);
-        }
-
-        let new_env_slot = slots.iter().find(|ws| ws.name == "new-env").unwrap().slot;
-        assert!(
-            new_env_slot <= 9,
-            "new env must reach a shortcut slot after boost + convergence; got slot {new_env_slot}"
-        );
-    }
-
-    /// T8 - Score boost causes exactly one swap: the worst shortcut env is displaced,
-    /// all others stay put (shortcut stability).
-    ///
-    /// Same fixture as T7. After boost + convergence:
-    ///   - "iota" (the lowest-scored shortcut env, 0.40 @ slot 9) is displaced to slot 10.
-    ///   - Every other shortcut env remains at its original slot number.
-    ///
-    /// This is the "one swap" / muscle-memory invariant: activating a new workspace
-    /// only ever moves one thing out of the shortcut zone.
-    #[test]
-    fn test_score_boost_displaces_only_the_worst_shortcut_env() {
-        let mut slots = ws![
-            1 => "alpha"   @ 0.90,
-            2 => "beta"    @ 0.80,
-            3 => "gamma"   @ 0.70,
-            4 => "delta"   @ 0.65,
-            5 => "epsilon" @ 0.60,
-            6 => "zeta"    @ 0.55,
-            7 => "eta"     @ 0.50,
-            8 => "theta"   @ 0.45,
-            9 => "iota"    @ 0.40,
-           10 => "new-env" @ 0.00,
-        ];
-
-        boost_incoming_score(&mut slots, "new-env", 9);
-
-        loop {
-            let moves = find_best_move(&slots, 9, 0.0);
-            if moves.is_empty() {
-                break;
-            }
-            slots = apply_moves(slots, &moves);
-        }
-
-        // iota (lowest score) must have been displaced.
-        let iota_slot = slots.iter().find(|ws| ws.name == "iota").unwrap().slot;
-        assert!(
-            iota_slot > 9,
-            "iota (lowest score 0.40) must be displaced to slot > 9; got slot {iota_slot}"
-        );
-
-        // All other shortcut envs must be unchanged.
-        for (expected_slot, name) in [
-            (1, "alpha"),
-            (2, "beta"),
-            (3, "gamma"),
-            (4, "delta"),
-            (5, "epsilon"),
-            (6, "zeta"),
-            (7, "eta"),
-            (8, "theta"),
-        ] {
-            let actual = slots.iter().find(|ws| ws.name == name).unwrap().slot;
-            assert_eq!(
-                actual, expected_slot,
-                "{name} must stay at slot {expected_slot} (shortcut stability); \
-                 got slot {actual}"
-            );
-        }
-    }
-
-    /// T9 - When all shortcut slots are unmanaged, boost is skipped and the new
-    /// env stays at its free slot.
-    ///
-    /// `boost_incoming_score` finds no managed env in slots 1–9, so
-    /// `min_shortcut_score` is `f64::INFINITY` and the boost is a no-op.
-    /// `find_best_move` with threshold=0.0 also finds nothing (no managed swap
-    /// partner, all shortcut slots blocked by unmanaged workspaces).
-    ///
-    /// Expected: score stays 0.0, `find_best_move` returns empty.
-    #[test]
-    fn test_no_boost_when_all_shortcut_slots_unmanaged() {
-        let mut slots = ws![
-            1 => unmanaged,  2 => unmanaged,  3 => unmanaged,
-            4 => unmanaged,  5 => unmanaged,  6 => unmanaged,
-            7 => unmanaged,  8 => unmanaged,  9 => unmanaged,
-           10 => "new-env" @ 0.00,
-        ];
-
-        boost_incoming_score(&mut slots, "new-env", 9);
-
-        let new_env_score = slots.iter().find(|ws| ws.name == "new-env").unwrap().score;
-        assert_eq!(
-            new_env_score, 0.0,
-            "score must not be boosted when all shortcut slots are unmanaged; \
-             got {new_env_score}"
-        );
-
-        let moves = find_best_move(&slots, 9, 0.0);
-        assert!(
-            moves.is_empty(),
-            "no move must fire when all shortcut slots are unmanaged; got {:?}",
-            moves
-        );
-    }
-
-    /// T4 - No-op when already at a fixed point (all envs in score-descending slot order,
-    /// no gaps between them).
-    ///
-    ///   slot 1: "apple"   @ 0.94
-    ///   slot 2: "banana"  @ 0.71
-    ///   slot 3: "chezmoi" @ 0.60
-    ///   slot 4: "cherry"  @ 0.55
-    ///   slot 5: "grape"   @ 0.45
-    ///
-    /// Every possible score-swap NB < 0 (would move a high-score env to a worse slot).
-    /// No gaps exist for compaction.
-    /// Expected: `find_best_move` returns an empty vec.
-    #[test]
-    fn test_no_op_at_fixed_point() {
-        let slots = ws![
-            1 => "apple"   @ 0.94,
-            2 => "banana"  @ 0.71,
-            3 => "chezmoi" @ 0.60,
-            4 => "cherry"  @ 0.55,
-            5 => "grape"   @ 0.45,
-        ];
-
-        // Verify numerically that NB < 0 for any swap of adjacent envs.
-        // Swapping apple (slot 1, 0.94) ↔ banana (slot 2, 0.71) would put
-        // lower-score banana at slot 1 and higher-score apple at slot 2 - never chosen.
-        // The algorithm only swaps when score_hi > score_lo AND env at lower slot is
-        // lower-scored, which cannot happen in a perfectly sorted layout.
-        //
-        // Additionally, no slot in [1..5] is empty (all occupied), so no compaction target.
-
-        let moves = find_best_move(&slots, 9, STABILITY_THRESHOLD);
-        assert!(
-            moves.is_empty(),
-            "already-at-fixed-point layout must return [], got {:?}",
-            moves
-        );
-    }
-
-    /// Regression for #346.
-    ///
-    /// i3 lets you address a workspace by full name OR by `num` alone, so
-    /// any moment where two live workspaces share the same `num` makes
-    /// number-based addressing ambiguous and triggers the "Old workspace
-    /// not found" failure observed in the issue. A correct rebalance plan
-    /// must keep `num`s unique at every intermediate state.
-    ///
-    /// Setup forces a 2-cycle (score-swap) by placing the only profitable
-    /// move between two occupied slots: "low" at slot 3 (score 0.1) and
-    /// "high" at slot 11 (score 0.9), with fillers blocking compaction
-    /// into any shortcut slot. The plan must therefore swap them, and
-    /// applied sequentially the first rename leaves both workspaces with
-    /// `num=11`, which this test catches.
-    #[test]
-    fn build_rebalance_plan_keeps_nums_unique_during_swap() {
-        let mut slots: Vec<WorkspaceSlot> =
-            vec![make_slot(3, "low", 0.1), make_slot(11, "high", 0.9)];
-        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
-            slots.push(make_slot(s, &format!("filler-{s}"), 0.9));
-        }
-
-        let plan = build_rebalance_plan(&mut slots);
-        assert!(
-            !plan.is_empty(),
-            "precondition: setup must produce a non-empty plan (a swap)"
-        );
-
-        let parse_num =
-            |name: &str| -> Option<i32> { name.split_once(": ").and_then(|(s, _)| s.parse().ok()) };
-
-        let mut state: std::collections::HashMap<String, Option<i32>> =
-            std::collections::HashMap::new();
-        state.insert("3: low".to_string(), Some(3));
-        state.insert("11: high".to_string(), Some(11));
-        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
-            state.insert(format!("{s}: filler-{s}"), Some(s));
-        }
-
-        for (i, (old_name, new_name)) in plan.iter().enumerate() {
-            assert!(
-                state.contains_key(old_name),
-                "step {i}: rename '{old_name}' -> '{new_name}' references a workspace that no longer exists. State: {state:?}",
-            );
-            state.remove(old_name);
-            state.insert(new_name.clone(), parse_num(new_name));
-
-            let mut nums: Vec<i32> = state.values().filter_map(|n| *n).collect();
-            nums.sort();
-            let before = nums.len();
-            nums.dedup();
-            assert_eq!(
-                nums.len(),
-                before,
-                "step {i}: duplicate num after rename '{old_name}' -> '{new_name}'. State: {state:?}",
-            );
-        }
-    }
-
-    /// Regression: unmanaged i3 workspaces (e.g. plain numeric `"10"` with
-    /// no `N: env-name` format) must never appear in the rebalance plan.
-    /// Their reconstructed name `format!("{}: {}", slot, "")` produces e.g.
-    /// `"10: "` which does not match the real i3 name `"10"`, so i3 fails
-    /// the rename with "Old workspace not found" and the plan aborts mid-way,
-    /// orphaning any workspaces already parked to `enwiro-rebalance-*` names.
-    /// The rebalance algorithm is only meant to relocate managed envs anyway
-    /// (see `test_unmanaged_slot_blocks_compaction`).
-    #[test]
-    fn build_rebalance_plan_does_not_emit_renames_for_unmanaged_slots() {
-        let mut slots: Vec<WorkspaceSlot> = vec![
-            make_slot(3, "low", 0.1),
-            make_slot(5, "high", 0.95),
-            WorkspaceSlot {
-                slot: 1,
-                name: String::new(),
-                score: 0.0,
-                managed: false,
-            },
-            WorkspaceSlot {
-                slot: 2,
-                name: String::new(),
-                score: 0.0,
-                managed: false,
-            },
-            WorkspaceSlot {
-                slot: 10,
-                name: String::new(),
-                score: 0.0,
-                managed: false,
-            },
-        ];
-
-        let plan = build_rebalance_plan(&mut slots);
-
-        for (old, new) in &plan {
-            assert!(
-                !old.ends_with(": ") && !old.is_empty(),
-                "plan emits rename '{old}' -> '{new}' for an unmanaged workspace with empty \
-                 env name; i3 will reject this with 'Old workspace not found'"
-            );
-        }
-    }
-
-    /// Regression: when `find_best_move` needs multiple iterations to
-    /// converge, a single workspace can appear in more than one `(old, new)`
-    /// pair as it walks through intermediate slots (e.g. chezmoi 5 -> 4 -> 3
-    /// yields both (5: chezmoi, 4: chezmoi) and (4: chezmoi, 3: chezmoi)).
-    /// `expand_with_parking` then tries to park `4: chezmoi`, but no such
-    /// workspace exists in i3 - chezmoi is still physically at slot 5 when
-    /// parking runs. i3 fails the rename with "Old workspace not found",
-    /// aborting the plan mid-way and orphaning any workspaces already parked
-    /// to `enwiro-rebalance-*` names. The plan must therefore reference each
-    /// workspace by its initial i3 name only.
-    #[test]
-    fn build_rebalance_plan_uses_only_initial_workspace_names_as_olds() {
-        let mut slots: Vec<WorkspaceSlot> = vec![
-            make_slot(1, "filler-1", 0.9),
-            make_slot(2, "filler-2", 0.9),
-            make_slot(3, "low", 0.1),
-            make_slot(4, "mid", 0.5),
-            make_slot(5, "high", 0.95),
-        ];
-        let initial_names: std::collections::HashSet<String> = slots
-            .iter()
-            .map(|s| format!("{}: {}", s.slot, s.name))
-            .collect();
-
-        let plan = build_rebalance_plan(&mut slots);
-        assert!(
-            !plan.is_empty(),
-            "precondition: this layout must require a rebalance"
-        );
-
-        let mut seen_olds: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for (old, new) in &plan {
-            if new.starts_with("enwiro-rebalance-") {
-                assert!(
-                    initial_names.contains(old),
-                    "park step renames '{old}' -> '{new}', but '{old}' is not an initial \
-                     workspace name. i3 will reject this with 'Old workspace not found' \
-                     and leave earlier parks orphaned. Initial names: {initial_names:?}"
-                );
-                assert!(
-                    seen_olds.insert(old.clone()),
-                    "park step renames '{old}' more than once; only one park per workspace is valid"
-                );
-            }
-        }
-    }
-
-    /// Regression: i3 rejects any `rename workspace ... to <name>` where the
-    /// target name starts with `__`, since that prefix is reserved for
-    /// i3-internal workspaces. A rebalance plan that uses such names for
-    /// parking will fail at runtime with:
-    ///   "Cannot rename workspace to "__...__": names starting with __ are i3-internal."
-    /// and leave the rebalance half-applied.
-    #[test]
-    fn expand_with_parking_does_not_target_i3_internal_names() {
-        let plan = expand_with_parking(vec![
-            ("3: low".to_string(), "11: low".to_string()),
-            ("11: high".to_string(), "3: high".to_string()),
-        ]);
-        assert!(
-            !plan.is_empty(),
-            "precondition: non-empty input must yield a non-empty plan"
-        );
-        for (old, new) in &plan {
-            assert!(
-                !new.starts_with("__"),
-                "rename '{old}' -> '{new}' targets an i3-internal name (leading '__'); \
-                 i3 will refuse this rename at runtime"
-            );
-        }
     }
 }
