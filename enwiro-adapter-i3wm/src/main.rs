@@ -692,6 +692,23 @@ fn expand_with_parking(raw: Vec<(String, String)>) -> Vec<(String, String)> {
     parks.chain(places).collect()
 }
 
+/// Drop rename pairs that reference the new env's full workspace name.
+///
+/// During first activation the new env is hypothetically placed at `free_num`
+/// in the slot list passed to `build_rebalance_plan`, so the returned plan
+/// may include parking/placement entries for the new env. The new env's
+/// workspace does not yet exist in i3 (we create it at its final target
+/// slot only after the other renames have moved siblings out of the way),
+/// so any rename touching `"_: <env_name>"` must be skipped, otherwise i3
+/// fails the park with "Old workspace not found" and the plan aborts
+/// mid-way, leaving siblings orphaned under `enwiro-rebalance-*` names.
+fn filter_plan_for_new_env(plan: Vec<(String, String)>, env_name: &str) -> Vec<(String, String)> {
+    let suffix = format!(": {}", env_name);
+    plan.into_iter()
+        .filter(|(old, new)| !old.ends_with(&suffix) && !new.ends_with(&suffix))
+        .collect()
+}
+
 async fn activate_new_workspace(
     i3: &mut I3,
     workspaces: &[Workspace],
@@ -705,7 +722,14 @@ async fn activate_new_workspace(
         free_num += 1;
     }
 
-    // Build the slot list: existing managed workspaces + the incoming env at free_num.
+    // Build the slot list: existing managed workspaces + the incoming env at
+    // free_num as a hypothetical entry. The new workspace is NOT yet created
+    // in i3 - creating it now and renaming siblings around it triggers i3 to
+    // auto-destroy the empty new workspace when focus state changes during
+    // the renames, then the new env's own park rename fails with "Old
+    // workspace not found" and aborts the plan mid-way. We instead compute
+    // the plan against the hypothetical state, apply only the sibling
+    // renames, then create the new workspace directly at its target slot.
     let incoming_score = payload
         .managed_envs
         .iter()
@@ -726,12 +750,6 @@ async fn activate_new_workspace(
     // signal that hasn't been written to disk yet.
     boost_incoming_score(&mut slots, env_name, 9);
 
-    // Create the workspace at free_num first so it exists in i3
-    // before any rename commands reference it.
-    let initial_workspace_name = format!("{}: {}", free_num, env_name);
-    tracing::info!(workspace = %initial_workspace_name, "Creating workspace at free slot");
-    run_i3_command(i3, build_workspace_command(&initial_workspace_name)).await?;
-
     let all_rename_cmds = build_rebalance_plan(&mut slots);
 
     // Determine the final slot for the incoming env from the converged slot state.
@@ -741,13 +759,14 @@ async fn activate_new_workspace(
         .map(|ws| ws.slot)
         .unwrap_or(free_num);
 
-    for (old_name, new_name) in all_rename_cmds {
+    let sibling_rename_cmds = filter_plan_for_new_env(all_rename_cmds, env_name);
+    for (old_name, new_name) in sibling_rename_cmds {
         tracing::info!(from = %old_name, to = %new_name, "Renaming workspace");
         run_i3_command(i3, build_rename_workspace_command(&old_name, &new_name)).await?;
     }
 
     let workspace_name = format!("{}: {}", target_num, env_name);
-    tracing::info!(workspace = %workspace_name, num = target_num, "Focusing final workspace slot");
+    tracing::info!(workspace = %workspace_name, num = target_num, "Creating and focusing new workspace at target slot");
     run_i3_command(i3, build_workspace_command(&workspace_name)).await?;
 
     let web_open_command = adapter_config_path()
@@ -2953,6 +2972,78 @@ mod tests {
                 "step {i}: duplicate num after rename '{old_name}' -> '{new_name}'. State: {state:?}",
             );
         }
+    }
+
+    /// Regression: when activating a new env at `free_num=6` that will end
+    /// up at target slot 5 after a swap with `enwiro#377` (at slot 5), the
+    /// build_rebalance_plan output (parking-expanded) contains 4 entries:
+    /// park enwiro#377, park new env, place new env, place enwiro#377.
+    /// The new env's i3 workspace does not yet exist at the time these
+    /// renames run, so its park entry must be filtered out (along with the
+    /// matching place) before the renames execute. Otherwise i3 fails the
+    /// rename with "Old workspace not found", aborting the plan mid-way
+    /// and orphaning siblings already parked to `enwiro-rebalance-*` names.
+    #[test]
+    fn filter_plan_for_new_env_drops_renames_referencing_new_env() {
+        let plan = vec![
+            (
+                "5: enwiro#377".to_string(),
+                "enwiro-rebalance-1-0".to_string(),
+            ),
+            (
+                "6: enwiro#376".to_string(),
+                "enwiro-rebalance-1-1".to_string(),
+            ),
+            (
+                "enwiro-rebalance-1-0".to_string(),
+                "6: enwiro#377".to_string(),
+            ),
+            (
+                "enwiro-rebalance-1-1".to_string(),
+                "5: enwiro#376".to_string(),
+            ),
+        ];
+        let filtered = filter_plan_for_new_env(plan, "enwiro#376");
+        assert_eq!(
+            filtered,
+            vec![
+                (
+                    "5: enwiro#377".to_string(),
+                    "enwiro-rebalance-1-0".to_string()
+                ),
+                (
+                    "enwiro-rebalance-1-0".to_string(),
+                    "6: enwiro#377".to_string()
+                ),
+            ],
+            "must drop both the park whose OLD is the new env (it does not \
+             exist in i3 yet) and the place whose NEW is the new env (we \
+             create + focus the new workspace at its target slot directly)"
+        );
+    }
+
+    /// `filter_plan_for_new_env` must only match the exact env name as a
+    /// trailing component after `": "`; names that share a prefix with the
+    /// new env (e.g. activating `enwiro` while `enwiro#370` exists at slot
+    /// 5) must remain in the plan.
+    #[test]
+    fn filter_plan_for_new_env_does_not_drop_envs_with_shared_prefix() {
+        let plan = vec![
+            (
+                "5: enwiro#370".to_string(),
+                "enwiro-rebalance-1-0".to_string(),
+            ),
+            ("7: enwiro".to_string(), "enwiro-rebalance-1-1".to_string()),
+        ];
+        let filtered = filter_plan_for_new_env(plan, "enwiro");
+        assert_eq!(
+            filtered,
+            vec![(
+                "5: enwiro#370".to_string(),
+                "enwiro-rebalance-1-0".to_string()
+            )],
+            "name match must be exact: 'enwiro#370' must not be matched by env_name 'enwiro'"
+        );
     }
 
     /// Regression: unmanaged i3 workspaces (e.g. plain numeric `"10"` with
