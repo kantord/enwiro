@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::types::*;
 
 /// Typed delta between the current i3 layout and a target `LayoutSpec`.

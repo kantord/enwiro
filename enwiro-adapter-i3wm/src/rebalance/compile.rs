@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! The only function in the rebalance pipeline that knows about i3's quirks:
 //! reserved `__` prefix, num collisions (resolved by park-then-place), and
 //! spawn-last ordering. Everything above this layer is data; this is where

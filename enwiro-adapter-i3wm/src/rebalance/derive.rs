@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Layer 3 → Layer 2 — diff `current` vs `LayoutSpec`, produce a `Plan`.
 //!
 //! Uses optative's `Lifecycle` + `ManagedSet::reconcile`:

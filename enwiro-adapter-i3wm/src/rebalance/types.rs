@@ -1,9 +1,3 @@
-// TODO: drop `#![allow(dead_code)]` once `rebalance::derive` / `rebalance::compile`
-// land in step (5) of the migration — they pull in `EnvName`, `Slot`, `Env`,
-// `Handle::slotted`, and `Handle::parked`. Until then these types are
-// referenced only by the validation gate in `crate::tests`.
-#![allow(dead_code)]
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EnvName(pub String);
 

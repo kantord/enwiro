@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Layer 4 → 3 — score-based optimization. Given the current managed envs +
 //! their scores, the incoming env, and which slots are occupied by unmanaged
 //! workspaces, return a `LayoutSpec` of target slot assignments.
@@ -153,6 +151,26 @@ pub fn optimize(
         }
     }
 
+    let targets: HashMap<EnvName, Slot> = managed.into_iter().map(|e| (e.name, e.slot)).collect();
+    LayoutSpec { targets }
+}
+
+/// Single-iteration optimization for the listener path. Returns a `LayoutSpec`
+/// that differs from the current layout by at most one swap or compaction.
+/// Uses the supplied `stability_threshold` to suppress thrash.
+pub fn optimize_single_step(
+    existing: &[Env],
+    unmanaged_slots: &[Slot],
+    max_slot: Slot,
+    stability_threshold: f64,
+) -> LayoutSpec {
+    let mut managed: Vec<Env> = existing.to_vec();
+    let moves = find_best_move(&managed, unmanaged_slots, max_slot, stability_threshold);
+    for (env_name, new_slot) in moves {
+        if let Some(env) = managed.iter_mut().find(|e| e.name == env_name) {
+            env.slot = new_slot;
+        }
+    }
     let targets: HashMap<EnvName, Slot> = managed.into_iter().map(|e| (e.name, e.slot)).collect();
     LayoutSpec { targets }
 }

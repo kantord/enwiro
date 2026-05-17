@@ -1,7 +1,3 @@
-// TODO: drop `#![allow(dead_code)]` once `rebalance::compile` lands in
-// step (5) — it produces `I3Op` values consumed by `render`.
-#![allow(dead_code)]
-
 use super::types::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

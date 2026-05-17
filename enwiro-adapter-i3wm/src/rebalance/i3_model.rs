@@ -1,8 +1,3 @@
-// TODO: drop `#![allow(dead_code)]` once the new pipeline replaces
-// `activate_new_workspace` and the simulator becomes the property-test
-// driver (steps 5–7 of the migration).
-#![allow(dead_code)]
-
 use super::i3_op::I3Op;
 use super::types::*;
 use std::collections::HashMap;
