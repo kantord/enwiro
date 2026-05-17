@@ -112,6 +112,10 @@ pub enum Hook {
     Cook,
 }
 
+/// Safe-by-construction today (opening a URL); an additive
+/// `require_confirmation: Option<bool>` field is reserved for a future
+/// PR (no schema bump). See `CliEntry` for the same field on the
+/// CLI-entry side.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WebEntry {
@@ -125,6 +129,11 @@ pub struct WebEntry {
 /// Assumed to be a single-instance app: re-spawning a running app is
 /// typically a no-op or raises the existing window, so callers may safely
 /// fire-and-forget without deduplicating themselves.
+///
+/// Safe-by-construction today (single-instance launch); an additive
+/// `require_confirmation: Option<bool>` field is reserved for a future
+/// PR (no schema bump). See `CliEntry` for the same field on the
+/// CLI-entry side.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct GuiEntry {
@@ -140,6 +149,13 @@ pub struct GuiEntry {
 /// `run_on` lists hook points on which the daemon fires this entry
 /// automatically (in addition to the user-invoked path). Empty (default)
 /// means user-invoked only.
+///
+/// `require_confirmation` defaults to `true`: a producer that does not
+/// know an entry is safe must leave it gated. Garnishes/cookbooks set
+/// `false` only for entries they can vouch for. Web and `linux_gui`
+/// entries do not carry this field today — they are safe-by-construction;
+/// a `require_confirmation: Option<bool>` field on those structs is
+/// reserved for a future PR (additive, no schema bump).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CliEntry {
@@ -148,6 +164,16 @@ pub struct CliEntry {
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub run_on: Vec<Hook>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub require_confirmation: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 /// All gear collected for an env, merged across every `gear.d/*.json`
@@ -440,6 +466,7 @@ mod tests {
             let entry = CliEntry {
                 description: None,
                 command: vec!["just".into(), "deploy".into()],
+                require_confirmation: true,
                 ..Default::default()
             };
             let json = serde_json::to_string(&entry).expect("CliEntry must serialize");
@@ -454,12 +481,78 @@ mod tests {
             let original = CliEntry {
                 description: Some("Build the project".into()),
                 command: vec!["just".into(), "build".into()],
+                require_confirmation: true,
                 ..Default::default()
             };
             let json = serde_json::to_string(&original).unwrap();
             let parsed: CliEntry = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.description, original.description);
             assert_eq!(parsed.command, original.command);
+            assert_eq!(parsed.require_confirmation, original.require_confirmation);
+        }
+
+        #[test]
+        fn cli_entry_require_confirmation_defaults_to_true_when_absent() {
+            let json = r#"{
+                "version": 1,
+                "gear": {
+                    "just": {
+                        "description": "x",
+                        "cli": {
+                            "deploy": { "command": ["just", "deploy"] }
+                        }
+                    }
+                }
+            }"#;
+            let parsed: GearFileData = serde_json::from_str(json).unwrap();
+            assert!(parsed.gear["just"].cli["deploy"].require_confirmation);
+        }
+
+        #[test]
+        fn cli_entry_require_confirmation_false_round_trips() {
+            let json = r#"{
+                "version": 1,
+                "gear": {
+                    "just": {
+                        "description": "x",
+                        "cli": {
+                            "build": {
+                                "command": ["just", "build"],
+                                "require-confirmation": false
+                            }
+                        }
+                    }
+                }
+            }"#;
+            let parsed: GearFileData = serde_json::from_str(json).unwrap();
+            assert!(!parsed.gear["just"].cli["build"].require_confirmation);
+        }
+
+        #[test]
+        fn cli_entry_serializes_require_confirmation_only_when_non_default() {
+            let safe = CliEntry {
+                description: None,
+                command: vec!["just".into(), "build".into()],
+                require_confirmation: false,
+                ..Default::default()
+            };
+            let safe_json = serde_json::to_string(&safe).unwrap();
+            assert!(
+                safe_json.contains("require-confirmation"),
+                "non-default value must serialize, got: {safe_json}"
+            );
+
+            let unsafe_entry = CliEntry {
+                description: None,
+                command: vec!["just".into(), "deploy".into()],
+                require_confirmation: true,
+                ..Default::default()
+            };
+            let unsafe_json = serde_json::to_string(&unsafe_entry).unwrap();
+            assert!(
+                !unsafe_json.contains("require-confirmation"),
+                "default value must be elided, got: {unsafe_json}"
+            );
         }
 
         #[test]

@@ -72,6 +72,10 @@ fn build_gear() -> GearFileData {
                 "--recursive".into(),
             ],
             run_on: vec![Hook::Cook],
+            // Author opted into autorun (`run_on: Cook`) — implies they
+            // already vouch for the command, so it shouldn't also require
+            // a per-invocation `-y` from the user.
+            require_confirmation: false,
         },
     )]);
     let gear = HashMap::from([(

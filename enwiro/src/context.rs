@@ -284,6 +284,7 @@ mod fire_autorun_tests {
                 description: None,
                 command: touch_command(&fires),
                 run_on: vec![Hook::Cook],
+                ..Default::default()
             },
         );
         cli.insert(
@@ -292,6 +293,7 @@ mod fire_autorun_tests {
                 description: None,
                 command: touch_command(&skipped),
                 run_on: vec![],
+                ..Default::default()
             },
         );
         let mut gear_map = HashMap::new();
@@ -331,6 +333,7 @@ mod fire_autorun_tests {
                 description: None,
                 command: vec![],
                 run_on: vec![Hook::Cook],
+                ..Default::default()
             },
         );
         let mut gear_map = HashMap::new();

@@ -12,18 +12,46 @@ use enwiro_sdk::gear::{CliEntry, Gear, LoadedGear};
 const ACTIVE_ENV_VAR: &str = "ENWIRO_ENV";
 const NONE_PLACEHOLDER: &str = "<none>";
 
-/// Parsed `enw :<gear> [<entry> [args...]]` invocation (no program name).
-/// `entry_name` is `None` when the user invoked `enw :<gear>` with no
-/// further args — that's a request to list available entries.
+/// Short form of the pre-positional confirmation-bypass flag. The flag
+/// is parsed in two places (the pre-clap argv sniffer in `main.rs` and
+/// the dispatcher's `strip_yes_flag`) which must stay in lockstep, so
+/// the spelling lives here.
+pub const SHORT_YES_FLAG: &str = "-y";
+pub const LONG_YES_FLAG: &str = "--yes";
+
+/// Parsed `enw [-y] :<gear> [<entry> [args...]]` invocation (no program
+/// name). `entry_name` is `None` when the user invoked `enw :<gear>` with
+/// no further args — that's a request to list available entries. `yes`
+/// reflects an optional pre-positional `-y`/`--yes` flag (`enw -y :gear
+/// entry`), which lets the dispatcher run entries marked
+/// `require_confirmation: true`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DispatchTarget {
     pub gear_name: String,
     pub entry_name: Option<String>,
     pub passthrough: Vec<OsString>,
+    pub yes: bool,
+}
+
+/// Strip a single leading `-y`/`--yes` flag from the front of `args`.
+/// Pre-positional is the only accepted shape — placing the flag after
+/// `:<gear>` would let it be matched as a passthrough arg by command-
+/// prefix ACLs (e.g. claude-code's `Bash(enw :*)`), defeating the gating.
+fn strip_yes_flag(args: &[OsString]) -> (bool, &[OsString]) {
+    let is_yes = args
+        .first()
+        .and_then(|a| a.to_str())
+        .is_some_and(|s| s == SHORT_YES_FLAG || s == LONG_YES_FLAG);
+    if is_yes {
+        (true, &args[1..])
+    } else {
+        (false, args)
+    }
 }
 
 pub fn parse_dispatch_args(args: &[OsString]) -> anyhow::Result<DispatchTarget> {
-    let first = args
+    let (yes, rest) = strip_yes_flag(args);
+    let first = rest
         .first()
         .ok_or_else(|| anyhow!("missing :<gear> argument"))?;
     let first_str = first
@@ -35,7 +63,7 @@ pub fn parse_dispatch_args(args: &[OsString]) -> anyhow::Result<DispatchTarget> 
     if gear_name.is_empty() {
         bail!("gear name is empty (got just `:`)");
     }
-    let entry_name = args
+    let entry_name = rest
         .get(1)
         .map(|e| {
             e.to_str()
@@ -46,7 +74,8 @@ pub fn parse_dispatch_args(args: &[OsString]) -> anyhow::Result<DispatchTarget> 
     Ok(DispatchTarget {
         gear_name: gear_name.to_owned(),
         entry_name,
-        passthrough: args.iter().skip(2).cloned().collect(),
+        passthrough: rest.iter().skip(2).cloned().collect(),
+        yes,
     })
 }
 
@@ -93,6 +122,24 @@ pub fn resolve_entry<'a>(
             format_available(gear.cli.keys().map(String::as_str))
         )
     })
+}
+
+/// Reject a `require_confirmation` entry when the user did not pass
+/// `-y`. The error message names the entry and includes a ready-to-run
+/// `enw -y :<gear> <entry>` invocation so the user (or an AI agent that
+/// just got a permission denial) can retry with one extra token.
+pub fn ensure_confirmed(
+    gear_name: &str,
+    entry_name: &str,
+    entry: &CliEntry,
+    yes: bool,
+) -> anyhow::Result<()> {
+    if entry.require_confirmation && !yes {
+        bail!(
+            "gear entry `:{gear_name} {entry_name}` requires confirmation; pass `-y` (e.g. `enw -y :{gear_name} {entry_name}`) to run it"
+        );
+    }
+    Ok(())
 }
 
 pub fn build_argv(entry: &CliEntry, passthrough: &[OsString]) -> Vec<OsString> {
@@ -160,6 +207,7 @@ pub fn dispatch(workspaces_directory: &Path, args: &[OsString]) -> anyhow::Resul
     };
 
     let entry = resolve_entry(&gear_map, &target.gear_name, entry_name)?;
+    ensure_confirmed(&target.gear_name, entry_name, entry, target.yes)?;
     let argv = build_argv(entry, &target.passthrough);
     let (program, rest) = argv
         .split_first()
@@ -195,6 +243,7 @@ mod tests {
         CliEntry {
             description: None,
             command: command.iter().map(|s| (*s).to_owned()).collect(),
+            require_confirmation: false,
             ..Default::default()
         }
     }
@@ -248,6 +297,33 @@ mod tests {
         fn rejects_with_helpful_message(#[case] args: &[&str], #[case] needle: &str) {
             let err = parse_dispatch_args(&osvec(args)).expect_err("must reject");
             assert!(err.to_string().contains(needle), "got: {err}");
+        }
+
+        #[test]
+        fn yes_defaults_to_false_when_flag_absent() {
+            let t = parse_dispatch_args(&osvec(&[":just", "build"])).unwrap();
+            assert!(!t.yes);
+        }
+
+        #[rstest]
+        #[case::short(&["-y", ":just", "deploy"])]
+        #[case::long(&["--yes", ":just", "deploy"])]
+        fn pre_positional_yes_flag_is_consumed(#[case] args: &[&str]) {
+            let t = parse_dispatch_args(&osvec(args)).unwrap();
+            assert!(t.yes);
+            assert_eq!(t.gear_name, "just");
+            assert_eq!(t.entry_name.as_deref(), Some("deploy"));
+            assert!(t.passthrough.is_empty());
+        }
+
+        #[test]
+        fn yes_flag_after_gear_is_treated_as_passthrough() {
+            // Post-positional `--yes` must not be confused with the
+            // pre-positional gate-bypass flag — it is a passthrough arg
+            // for the gear's own command.
+            let t = parse_dispatch_args(&osvec(&[":just", "deploy", "--yes"])).unwrap();
+            assert!(!t.yes);
+            assert_eq!(t.passthrough, osvec(&["--yes"]));
         }
     }
 
@@ -312,6 +388,7 @@ mod tests {
                         CliEntry {
                             description: desc.map(str::to_owned),
                             command: vec!["just".into(), (*name).into()],
+                            require_confirmation: false,
                             ..Default::default()
                         },
                     )
@@ -374,6 +451,38 @@ mod tests {
                 build_argv(&cli_entry(&["just", "build"]), &[]),
                 osvec(&["just", "build"])
             );
+        }
+    }
+
+    mod confirmation {
+        use super::*;
+
+        fn entry_requiring_confirmation() -> CliEntry {
+            CliEntry {
+                description: None,
+                command: vec!["just".into(), "deploy".into()],
+                require_confirmation: true,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn safe_entry_runs_without_yes() {
+            ensure_confirmed("just", "build", &cli_entry(&["just", "build"]), false).unwrap();
+        }
+
+        #[test]
+        fn unsafe_entry_with_yes_runs() {
+            ensure_confirmed("just", "deploy", &entry_requiring_confirmation(), true).unwrap();
+        }
+
+        #[test]
+        fn unsafe_entry_without_yes_errors_with_retry_hint() {
+            let err = ensure_confirmed("just", "deploy", &entry_requiring_confirmation(), false)
+                .expect_err("must refuse");
+            let msg = err.to_string();
+            assert!(msg.contains(":just deploy"), "{msg}");
+            assert!(msg.contains("enw -y :just deploy"), "{msg}");
         }
     }
 

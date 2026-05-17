@@ -84,11 +84,13 @@ fn build_gear(project_dir: &Path) -> anyhow::Result<GearFileData> {
         .into_iter()
         .filter(|(_, r)| !r.private)
         .map(|(name, r)| {
+            let require_confirmation = r.attributes.iter().any(|a| a.has_name("confirm"));
             (
                 name.clone(),
                 CliEntry {
                     description: r.doc,
                     command: vec![JUST_BINARY.into(), name],
+                    require_confirmation,
                     ..Default::default()
                 },
             )
@@ -109,9 +111,11 @@ fn build_gear(project_dir: &Path) -> anyhow::Result<GearFileData> {
     })
 }
 
-/// Minimal projection of `just --dump --dump-format json` — everything we
-/// don't reference (attributes, parameters, body, modules, aliases, ...)
-/// is ignored on purpose.
+/// Minimal projection of `just --dump --dump-format json` — fields we
+/// don't reference (parameters, body, modules, aliases, ...) are ignored
+/// on purpose. `attributes` is the only structured field we care about,
+/// to detect `[confirm]` (which maps to `require_confirmation: true` on
+/// the emitted `CliEntry`).
 #[derive(Deserialize)]
 struct JustDump {
     recipes: HashMap<String, JustRecipe>,
@@ -123,6 +127,31 @@ struct JustRecipe {
     doc: Option<String>,
     #[serde(default)]
     private: bool,
+    #[serde(default)]
+    attributes: Vec<JustAttribute>,
+}
+
+/// just emits attributes in two shapes depending on whether the
+/// attribute accepts a parameter. Parameterless attributes like
+/// `[private]` and `[no-cd]` come through as bare strings; attributes
+/// that can take a parameter (`[confirm]`, `[confirm("msg")]`,
+/// `[group(...)]`, ...) come through as single-key maps with the
+/// parameter value (which may be `null`). We only care about the
+/// attribute name — the value is discarded.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JustAttribute {
+    Bare(String),
+    Parameterized(HashMap<String, Option<String>>),
+}
+
+impl JustAttribute {
+    fn has_name(&self, name: &str) -> bool {
+        match self {
+            Self::Bare(n) => n == name,
+            Self::Parameterized(m) => m.contains_key(name),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,9 +235,23 @@ mod tests {
         }
 
         #[test]
-        fn surfaces_confirm_recipes_unchanged() {
+        fn marks_confirm_recipes_as_requiring_confirmation() {
             let data = gear_for("[confirm]\ndeploy:\n    echo deploy\n");
-            assert!(data.gear["just"].cli.contains_key("deploy"));
+            assert!(data.gear["just"].cli["deploy"].require_confirmation);
+        }
+
+        #[test]
+        fn marks_confirm_with_message_as_requiring_confirmation() {
+            // `[confirm("really?")]` carries a value in the attribute map
+            // — presence of the `confirm` key still flags the recipe.
+            let data = gear_for("[confirm(\"really?\")]\nnuke:\n    echo nuke\n");
+            assert!(data.gear["just"].cli["nuke"].require_confirmation);
+        }
+
+        #[test]
+        fn plain_recipes_do_not_require_confirmation() {
+            let data = gear_for("build:\n    echo build\n");
+            assert!(!data.gear["just"].cli["build"].require_confirmation);
         }
 
         #[test]
