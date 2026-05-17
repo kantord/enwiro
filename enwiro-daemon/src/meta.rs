@@ -24,6 +24,8 @@ pub struct EnvStats {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookbook: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
 }
 
 pub fn now_timestamp() -> i64 {
@@ -103,10 +105,16 @@ pub fn record_switch_per_env(env_dir: &Path, timestamp: i64) {
     }
 }
 
-/// Save cookbook and description metadata in per-env meta.json. Best-effort.
-pub fn record_cook_metadata_per_env(env_dir: &Path, cookbook: &str, description: Option<&str>) {
+/// Save cookbook, recipe, and description metadata in per-env meta.json. Best-effort.
+pub fn record_cook_metadata_per_env(
+    env_dir: &Path,
+    cookbook: &str,
+    recipe: &str,
+    description: Option<&str>,
+) {
     let mut meta = load_env_meta(env_dir);
     meta.cookbook = Some(cookbook.to_string());
+    meta.recipe = Some(recipe.to_string());
     if let Some(d) = description {
         meta.description = Some(d.to_string());
     }
@@ -151,11 +159,51 @@ mod tests {
         let env_dir = dir.path().join("my-project");
         fs::create_dir(&env_dir).unwrap();
 
-        record_cook_metadata_per_env(&env_dir, "github", Some("Fix auth bug"));
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "kantord/enwiro#325",
+            Some("Fix auth bug"),
+        );
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.cookbook, Some("github".to_string()));
+        assert_eq!(meta.recipe, Some("kantord/enwiro#325".to_string()));
         assert_eq!(meta.description, Some("Fix auth bug".to_string()));
+    }
+
+    #[test]
+    fn test_per_env_record_cook_metadata_persists_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_cook_metadata_per_env(&env_dir, "github", "owner/repo#42", None);
+
+        let raw = fs::read_to_string(env_dir.join("meta.json")).unwrap();
+        assert!(
+            raw.contains("\"recipe\":\"owner/repo#42\""),
+            "meta.json must include the recipe field: {raw}"
+        );
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.recipe, Some("owner/repo#42".to_string()));
+    }
+
+    #[test]
+    fn test_env_stats_recipe_defaults_to_none_for_old_envs() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("legacy");
+        fs::create_dir(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("meta.json"),
+            r#"{"cookbook":"github","description":"old env"}"#,
+        )
+        .unwrap();
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.recipe, None);
+        assert_eq!(meta.cookbook, Some("github".to_string()));
     }
 
     #[test]
@@ -173,11 +221,12 @@ mod tests {
 
         record_activation_per_env(&env_dir);
         record_activation_per_env(&env_dir);
-        record_cook_metadata_per_env(&env_dir, "git", Some("My project"));
+        record_cook_metadata_per_env(&env_dir, "git", "my/project", Some("My project"));
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.signals.activation_buffer.len(), 2);
         assert_eq!(meta.cookbook, Some("git".to_string()));
+        assert_eq!(meta.recipe, Some("my/project".to_string()));
         assert_eq!(meta.description, Some("My project".to_string()));
     }
 
