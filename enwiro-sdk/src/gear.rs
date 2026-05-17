@@ -112,10 +112,6 @@ pub enum Hook {
     Cook,
 }
 
-/// Safe-by-construction today (opening a URL); an additive
-/// `require_confirmation: Option<bool>` field is reserved for a future
-/// PR (no schema bump). See `CliEntry` for the same field on the
-/// CLI-entry side.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct WebEntry {
@@ -129,11 +125,6 @@ pub struct WebEntry {
 /// Assumed to be a single-instance app: re-spawning a running app is
 /// typically a no-op or raises the existing window, so callers may safely
 /// fire-and-forget without deduplicating themselves.
-///
-/// Safe-by-construction today (single-instance launch); an additive
-/// `require_confirmation: Option<bool>` field is reserved for a future
-/// PR (no schema bump). See `CliEntry` for the same field on the
-/// CLI-entry side.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct GuiEntry {
@@ -150,12 +141,8 @@ pub struct GuiEntry {
 /// automatically (in addition to the user-invoked path). Empty (default)
 /// means user-invoked only.
 ///
-/// `require_confirmation` defaults to `true`: a producer that does not
-/// know an entry is safe must leave it gated. Garnishes/cookbooks set
-/// `false` only for entries they can vouch for. Web and `linux_gui`
-/// entries do not carry this field today — they are safe-by-construction;
-/// a `require_confirmation: Option<bool>` field on those structs is
-/// reserved for a future PR (additive, no schema bump).
+/// `require_confirmation` defaults to `true`: unknown-provenance entries
+/// are gated. Producers set `false` only for entries they vouch for.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CliEntry {

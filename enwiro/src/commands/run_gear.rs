@@ -124,10 +124,9 @@ pub fn resolve_entry<'a>(
     })
 }
 
-/// Reject a `require_confirmation` entry when the user did not pass
-/// `-y`. The error message names the entry and includes a ready-to-run
-/// `enw -y :<gear> <entry>` invocation so the user (or an AI agent that
-/// just got a permission denial) can retry with one extra token.
+/// Reject a `require_confirmation` entry when `-y` was not passed.
+/// The error embeds a ready-to-run `enw -y :<gear> <entry>` so the
+/// caller can retry by appending one token.
 pub fn ensure_confirmed(
     gear_name: &str,
     entry_name: &str,
@@ -318,9 +317,6 @@ mod tests {
 
         #[test]
         fn yes_flag_after_gear_is_treated_as_passthrough() {
-            // Post-positional `--yes` must not be confused with the
-            // pre-positional gate-bypass flag — it is a passthrough arg
-            // for the gear's own command.
             let t = parse_dispatch_args(&osvec(&[":just", "deploy", "--yes"])).unwrap();
             assert!(!t.yes);
             assert_eq!(t.passthrough, osvec(&["--yes"]));

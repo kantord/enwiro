@@ -221,10 +221,7 @@ fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Pa
             if !entry.run_on.contains(&Hook::Cook) {
                 continue;
             }
-            // Autorun is non-interactive — there's no user to answer a
-            // confirmation prompt, so an entry that says it needs one
-            // can never legitimately fire here. The producer should set
-            // `require_confirmation: false` if it intended autorun.
+            // Autorun is non-interactive — no user to answer a prompt.
             if entry.require_confirmation {
                 tracing::debug!(
                     gear = gear_name,

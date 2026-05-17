@@ -41,13 +41,10 @@ fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
 }
 
 /// True iff argv looks like `enw [-y] :<gear> …`. Sniffed before clap so
-/// the `:` prefix bypasses subcommand parsing. A single optional `-y` or
-/// `--yes` may appear before `:<gear>`; the dispatcher itself consumes
-/// it via `parse_dispatch_args`.
-///
-/// Side effect: `--help` after a `:<gear> <entry>` is passed through to
-/// the spawned command instead of hitting clap (e.g. `enw :just --help`
-/// runs `just --help`). Intentional.
+/// the `:` prefix bypasses subcommand parsing; an optional pre-positional
+/// `-y`/`--yes` is allowed and consumed by the dispatcher itself.
+/// Side effect: `--help` after `:<gear> <entry>` reaches the spawned
+/// command (e.g. `enw :just --help` runs `just --help`). Intentional.
 fn is_dispatch_invocation(argv: &[OsString]) -> bool {
     let leading_arg = argv.get(1).and_then(|a| a.to_str());
     let gear_pos = if leading_arg == Some(SHORT_YES_FLAG) || leading_arg == Some(LONG_YES_FLAG) {
