@@ -44,9 +44,12 @@ pub mod test_utilities {
         }
     }
 
+    pub type RunLog = Rc<RefCell<Vec<enwiro_sdk::adapter::RunPayload>>>;
+
     pub struct EnwiroAdapterMock {
         pub current_environment: String,
         pub activated: AdapterLog,
+        pub runs: RunLog,
     }
 
     impl EnwiroAdapterTrait for EnwiroAdapterMock {
@@ -63,6 +66,11 @@ pub mod test_utilities {
             self.activated.borrow_mut().push(name.to_string());
             Ok(())
         }
+
+        fn run(&self, payload: &enwiro_sdk::adapter::RunPayload) -> anyhow::Result<()> {
+            self.runs.borrow_mut().push(payload.clone());
+            Ok(())
+        }
     }
 
     impl EnwiroAdapterMock {
@@ -70,6 +78,7 @@ pub mod test_utilities {
             Self {
                 current_environment: current_environment.to_string(),
                 activated: Rc::new(RefCell::new(vec![])),
+                runs: Rc::new(RefCell::new(vec![])),
             }
         }
     }

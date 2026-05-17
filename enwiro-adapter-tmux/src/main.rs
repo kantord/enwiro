@@ -1,16 +1,22 @@
 use clap::Parser;
+use enwiro_sdk::adapter::RunPayload;
+use enwiro_sdk::process::ENWIRO_ENV_VAR;
 use std::os::unix::process::CommandExt;
 
 #[derive(Parser)]
 enum EnwiroAdapterTmuxCli {
     GetActiveWorkspaceId,
     Activate(ActivateArgs),
+    Run(RunArgs),
 }
 
 #[derive(clap::Args)]
 pub struct ActivateArgs {
     pub name: String,
 }
+
+#[derive(clap::Args)]
+pub struct RunArgs {}
 
 fn validate_session_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
@@ -54,6 +60,35 @@ fn get_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
+fn build_new_window_args(payload: &RunPayload) -> Vec<String> {
+    let mut args = vec![
+        "new-window".to_string(),
+        "-t".to_string(),
+        format!("={}", payload.env_name),
+        "-c".to_string(),
+        payload.env_path.clone(),
+        "-e".to_string(),
+        format!("{}={}", ENWIRO_ENV_VAR, payload.env_name),
+        payload.command.clone(),
+    ];
+    args.extend(payload.args.iter().cloned());
+    args
+}
+
+fn ensure_session(name: &str) -> anyhow::Result<()> {
+    if session_exists(name) {
+        return Ok(());
+    }
+    let shell = get_shell();
+    let create_args = new_session_args(name, &shell);
+    let output = run_tmux(&create_args)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("tmux new-session failed: {}", stderr);
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-adapter-tmux.log");
     let args = EnwiroAdapterTmuxCli::parse();
@@ -76,18 +111,28 @@ fn main() -> anyhow::Result<()> {
             };
             print!("{}", parse_session_name(success, &stdout));
         }
+        EnwiroAdapterTmuxCli::Run(_) => {
+            let payload = RunPayload::read_from_stdin()?;
+            validate_session_name(&payload.env_name)?;
+            ensure_session(&payload.env_name)?;
+            let args = build_new_window_args(&payload);
+            let output = run_tmux(&args)?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("tmux new-window failed: {}", stderr);
+            }
+            let tmux_env = std::env::var("TMUX").ok();
+            if !is_in_tmux(tmux_env.as_deref()) {
+                eprintln!(
+                    "Note: not currently attached to tmux. Run `tmux attach -t ={}` to see the new window.",
+                    payload.env_name
+                );
+            }
+        }
         EnwiroAdapterTmuxCli::Activate(activate_args) => {
             let name = &activate_args.name;
             validate_session_name(name)?;
-            let shell = get_shell();
-            if !session_exists(name) {
-                let create_args = new_session_args(name, &shell);
-                let output = run_tmux(&create_args)?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    anyhow::bail!("tmux new-session failed: {}", stderr);
-                }
-            }
+            ensure_session(name)?;
             let tmux_env = std::env::var("TMUX").ok();
             if is_in_tmux(tmux_env.as_deref()) {
                 let output = run_tmux(&switch_client_args(name))?;

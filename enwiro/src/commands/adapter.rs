@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo};
+use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo, RunPayload};
 use enwiro_sdk::gear::Gear;
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 
@@ -15,6 +15,7 @@ pub trait EnwiroAdapterTrait {
         managed_envs: &[ManagedEnvInfo],
         gear: &HashMap<String, Gear>,
     ) -> anyhow::Result<()>;
+    fn run(&self, payload: &RunPayload) -> anyhow::Result<()>;
 }
 
 pub struct EnwiroAdapterExternal {
@@ -75,6 +76,37 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
             bail!("Error: {}", stderr);
         }
     }
+
+    fn run(&self, payload: &RunPayload) -> anyhow::Result<()> {
+        tracing::debug!(env = %payload.env_name, command = %payload.command, "Dispatching run via adapter");
+        let stdin_json =
+            serde_json::to_string(payload).context("Could not serialize run payload")?;
+
+        let mut child = Command::new(&self.adapter_command)
+            .arg("run")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Adapter failed to spawn run subcommand")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(stdin_json.as_bytes())
+                .context("Could not write run payload to adapter stdin")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("Adapter failed to complete run subcommand")?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("Error: {}", stderr);
+        }
+    }
 }
 
 impl EnwiroAdapterExternal {
@@ -105,6 +137,10 @@ impl EnwiroAdapterTrait for EnwiroAdapterNone {
         _gear: &HashMap<String, Gear>,
     ) -> anyhow::Result<()> {
         bail!("Could not activate workspace because no adapter is configured.")
+    }
+
+    fn run(&self, _payload: &RunPayload) -> anyhow::Result<()> {
+        bail!("Could not run command because no adapter is configured.")
     }
 }
 
