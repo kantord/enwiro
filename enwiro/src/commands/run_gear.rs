@@ -12,11 +12,13 @@ use enwiro_sdk::gear::{CliEntry, Gear, LoadedGear};
 const ACTIVE_ENV_VAR: &str = "ENWIRO_ENV";
 const NONE_PLACEHOLDER: &str = "<none>";
 
-/// Parsed `enw :<gear> <entry> [args...]` invocation (no program name).
+/// Parsed `enw :<gear> [<entry> [args...]]` invocation (no program name).
+/// `entry_name` is `None` when the user invoked `enw :<gear>` with no
+/// further args — that's a request to list available entries.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DispatchTarget {
     pub gear_name: String,
-    pub entry_name: String,
+    pub entry_name: Option<String>,
     pub passthrough: Vec<OsString>,
 }
 
@@ -33,13 +35,14 @@ pub fn parse_dispatch_args(args: &[OsString]) -> anyhow::Result<DispatchTarget> 
     if gear_name.is_empty() {
         bail!("gear name is empty (got just `:`)");
     }
-    let entry = args
+    let entry_name = args
         .get(1)
-        .ok_or_else(|| anyhow!("missing <entry> argument after `:{gear_name}`"))?;
-    let entry_name = entry
-        .to_str()
-        .ok_or_else(|| anyhow!("entry name must be valid UTF-8"))?
-        .to_owned();
+        .map(|e| {
+            e.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow!("entry name must be valid UTF-8"))
+        })
+        .transpose()?;
     Ok(DispatchTarget {
         gear_name: gear_name.to_owned(),
         entry_name,
@@ -101,7 +104,44 @@ pub fn build_argv(entry: &CliEntry, passthrough: &[OsString]) -> Vec<OsString> {
         .collect()
 }
 
-/// Parse → resolve env + gear → exec. Replaces the current process on
+/// Look up a gear by name; same not-found error shape as
+/// [`resolve_entry`] for consistency.
+fn resolve_gear<'a>(
+    gear_map: &'a HashMap<String, Gear>,
+    gear_name: &str,
+) -> anyhow::Result<&'a Gear> {
+    gear_map.get(gear_name).ok_or_else(|| {
+        anyhow!(
+            "no gear named `:{gear_name}` in this env (available: {})",
+            format_available(gear_map.keys().map(String::as_str))
+        )
+    })
+}
+
+/// Human-readable list of every cli entry on a gear; used by
+/// `enw :<gear>` (no entry) to tell the user what's available. Two-space
+/// indent + name; descriptions follow on the same line when present.
+pub fn format_entry_list(gear_name: &str, gear: &Gear) -> String {
+    use std::fmt::Write;
+    let mut out = format!(":{gear_name} — {}\n", gear.description);
+    if gear.cli.is_empty() {
+        out.push_str("  (no cli entries)\n");
+        return out;
+    }
+    let mut names: Vec<&str> = gear.cli.keys().map(String::as_str).collect();
+    names.sort();
+    for name in names {
+        let entry = &gear.cli[name];
+        match entry.description.as_deref() {
+            Some(desc) => writeln!(out, "  {name} — {desc}").unwrap(),
+            None => writeln!(out, "  {name}").unwrap(),
+        }
+    }
+    out
+}
+
+/// Parse → resolve env + gear → exec. With no entry given, lists the
+/// gear's cli entries and exits 0. Replaces the current process on
 /// child failure (exit with child's status); other errors bubble.
 pub fn dispatch(workspaces_directory: &Path, args: &[OsString]) -> anyhow::Result<()> {
     let target = parse_dispatch_args(args)?;
@@ -112,11 +152,18 @@ pub fn dispatch(workspaces_directory: &Path, args: &[OsString]) -> anyhow::Resul
     let gear_map = LoadedGear::from_env_dir(&env_dir)
         .with_context(|| format!("could not load gear for env `{env_name}`"))?
         .into_map();
-    let entry = resolve_entry(&gear_map, &target.gear_name, &target.entry_name)?;
+
+    let Some(entry_name) = target.entry_name.as_deref() else {
+        let gear = resolve_gear(&gear_map, &target.gear_name)?;
+        print!("{}", format_entry_list(&target.gear_name, gear));
+        return Ok(());
+    };
+
+    let entry = resolve_entry(&gear_map, &target.gear_name, entry_name)?;
     let argv = build_argv(entry, &target.passthrough);
     let (program, rest) = argv
         .split_first()
-        .ok_or_else(|| anyhow!("cli entry `{}` has empty command", target.entry_name))?;
+        .ok_or_else(|| anyhow!("cli entry `{entry_name}` has empty command"))?;
 
     let status = std::process::Command::new(program)
         .args(rest)
@@ -174,7 +221,7 @@ mod tests {
             let t =
                 parse_dispatch_args(&osvec(&[":just", "build", "--release", "-j", "4"])).unwrap();
             assert_eq!(t.gear_name, "just");
-            assert_eq!(t.entry_name, "build");
+            assert_eq!(t.entry_name.as_deref(), Some("build"));
             assert_eq!(t.passthrough, osvec(&["--release", "-j", "4"]));
         }
 
@@ -184,10 +231,18 @@ mod tests {
             assert!(t.passthrough.is_empty());
         }
 
+        #[test]
+        fn entry_is_none_when_only_gear_given() {
+            // `enw :just` (no entry) — dispatch turns this into a listing.
+            let t = parse_dispatch_args(&osvec(&[":just"])).unwrap();
+            assert_eq!(t.gear_name, "just");
+            assert!(t.entry_name.is_none());
+            assert!(t.passthrough.is_empty());
+        }
+
         #[rstest]
         #[case::missing_leading_colon(&["just", "build"], "must start with `:`")]
         #[case::bare_colon(&[":", "build"], "empty")]
-        #[case::missing_entry(&[":just"], "missing <entry>")]
         #[case::empty_argv(&[], "missing :<gear>")]
         fn rejects_with_helpful_message(#[case] args: &[&str], #[case] needle: &str) {
             let err = parse_dispatch_args(&osvec(args)).expect_err("must reject");
@@ -241,6 +296,61 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(msg.contains("available: <none>"), "{msg}");
+        }
+    }
+
+    mod listing {
+        use super::*;
+
+        fn just_gear(entries: &[(&str, Option<&str>)]) -> Gear {
+            let cli = entries
+                .iter()
+                .map(|(name, desc)| {
+                    (
+                        (*name).to_owned(),
+                        CliEntry {
+                            description: desc.map(str::to_owned),
+                            command: vec!["just".into(), (*name).into()],
+                        },
+                    )
+                })
+                .collect();
+            Gear {
+                description: "Tasks from the project's justfile".into(),
+                cli,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn header_uses_gear_name_and_description() {
+            let listing = format_entry_list("just", &just_gear(&[]));
+            assert!(
+                listing.starts_with(":just — Tasks from the project's justfile"),
+                "{listing}"
+            );
+        }
+
+        #[test]
+        fn lists_entries_alphabetically_with_descriptions() {
+            let listing = format_entry_list(
+                "just",
+                &just_gear(&[
+                    ("test", Some("Run tests")),
+                    ("build", Some("Build the project")),
+                    ("deploy", None),
+                ]),
+            );
+            let lines: Vec<&str> = listing.lines().collect();
+            assert_eq!(lines[1], "  build — Build the project");
+            assert_eq!(lines[2], "  deploy");
+            assert_eq!(lines[3], "  test — Run tests");
+        }
+
+        #[test]
+        fn empty_cli_map_renders_placeholder() {
+            let listing = format_entry_list("just", &just_gear(&[]));
+            assert!(listing.contains("(no cli entries)"), "{listing}");
         }
     }
 
