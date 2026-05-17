@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.32](https://github.com/kantord/enwiro/compare/enwiro-v0.3.31...enwiro-v0.3.32) - 2026-05-17
+
+### Added
+
+- add submodules garnish with autorun hooks ([#398](https://github.com/kantord/enwiro/pull/398))
+- add "just" garnish
+
+### Other
+
+- .
+
 ## [0.3.31](https://github.com/kantord/enwiro/compare/enwiro-v0.3.30...enwiro-v0.3.31) - 2026-05-13
 
 ### Other
