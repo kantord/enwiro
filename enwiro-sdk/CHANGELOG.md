@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.3.0...enwiro-sdk-v0.3.1) - 2026-05-17
+
+### Added
+
+- add command runner feature ([#406](https://github.com/kantord/enwiro/pull/406))
+
 ## [0.3.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.2.3...enwiro-sdk-v0.3.0) - 2026-05-17
 
 ### Added

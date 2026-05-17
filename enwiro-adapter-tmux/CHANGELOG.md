@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.5...enwiro-adapter-tmux-v0.1.6) - 2026-05-17
+
+### Added
+
+- add command runner feature ([#406](https://github.com/kantord/enwiro/pull/406))
+
 ## [0.1.5](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.4...enwiro-adapter-tmux-v0.1.5) - 2026-05-17
 
 ### Other

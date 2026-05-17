@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.20](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.19...enwiro-adapter-i3wm-v0.1.20) - 2026-05-17
+
+### Added
+
+- add command runner feature ([#406](https://github.com/kantord/enwiro/pull/406))
+
 ## [0.1.19](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.18...enwiro-adapter-i3wm-v0.1.19) - 2026-05-17
 
 ### Fixed
