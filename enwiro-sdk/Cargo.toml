@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-sdk"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "Shared SDK for enwiro plugin authors: logging, gear schema, plugin protocol types"
 license = "GPL-3.0-or-later"
