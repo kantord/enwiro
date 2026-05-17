@@ -19,7 +19,7 @@ home.workspace = true
 libc = "0.2"
 serde = { version = "1.0.197", features = ["derive"] }
 serde_json = "1"
-signal-hook = "0.3"
+signal-hook = "0.4"
 system-idle-time = "1.0.4"
 tracing.workspace = true
 
