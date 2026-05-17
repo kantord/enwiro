@@ -12,6 +12,7 @@ pub mod garnish;
 pub mod gear;
 pub mod logging;
 pub mod plugin;
+pub mod process;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;

@@ -7,7 +7,8 @@ use tokio_stream::StreamExt;
 
 mod rebalance;
 
-use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo};
+use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo, RunPayload};
+use enwiro_sdk::process::ProcessSpec;
 
 #[derive(clap::Args)]
 pub struct ListenArgs {
@@ -20,6 +21,7 @@ enum EnwiroAdapterI3WmCLI {
     GetActiveWorkspaceId(GetActiveWorkspaceIdArgs),
     Activate(ActivateArgs),
     Listen(ListenArgs),
+    Run(RunArgs),
 }
 
 #[derive(clap::Args)]
@@ -30,9 +32,11 @@ pub struct ActivateArgs {
     pub name: String,
 }
 
-/// Read the activate stdin payload from core. Returns a default
-/// (empty managed_envs, null gear) on any parse failure so the adapter
-/// can still complete the workspace switch.
+#[derive(clap::Args)]
+pub struct RunArgs {}
+
+/// Best-effort parse; activate falls back to defaults so a malformed
+/// payload doesn't block the workspace switch.
 fn read_activate_payload() -> ActivatePayload {
     use std::io::Read;
     let mut buf = String::new();
@@ -40,6 +44,28 @@ fn read_activate_payload() -> ActivatePayload {
         return ActivatePayload::default();
     }
     serde_json::from_str(&buf).unwrap_or_default()
+}
+
+fn build_run_shell_argv(command: &str, args: &[String]) -> String {
+    std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Child is detached intentionally — enw exits before the terminal does.
+fn spawn_run_in_terminal(payload: &RunPayload) -> anyhow::Result<()> {
+    let quoted_argv = build_run_shell_argv(&payload.command, &payload.args);
+    ProcessSpec::new("i3-sensible-terminal")
+        .arg("-e")
+        .arg("sh")
+        .arg("-c")
+        .arg(&quoted_argv)
+        .into_command_in_env(&payload.env_name, std::path::Path::new(&payload.env_path))
+        .spawn()
+        .with_context(|| format!("Failed to spawn terminal for `{}`", payload.command))?;
+    Ok(())
 }
 
 /// Default open command used to spawn one window per gear web URL.
@@ -515,6 +541,11 @@ async fn main() -> anyhow::Result<()> {
                 open_gear_urls(&payload.gear, &web_open_command, &args.name);
                 spawn_gui_commands(&payload.gear, &args.name);
             }
+        }
+        EnwiroAdapterI3WmCLI::Run(_) => {
+            let payload = RunPayload::read_from_stdin()?;
+            tracing::debug!(env = %payload.env_name, command = %payload.command, "Spawning command in new terminal");
+            spawn_run_in_terminal(&payload)?;
         }
         EnwiroAdapterI3WmCLI::Listen(listen_args) => {
             use rebalance::derive::derive;

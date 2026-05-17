@@ -8,6 +8,7 @@
 //! when the field is absent, which keeps older adapters forward-compatible
 //! with newer cores as long as additions are non-breaking.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -55,5 +56,49 @@ impl ActivatePayload {
             managed_envs,
             gear: serde_json::to_value(gear).unwrap_or(serde_json::Value::Null),
         }
+    }
+}
+
+/// Wire format version for [`RunPayload`]. Bumped when the shape changes
+/// in a backward-incompatible way.
+pub const RUN_PAYLOAD_VERSION: u32 = 1;
+
+/// Stdin payload for the adapter's `run` subcommand.
+///
+/// Core constructs this once per `enw run <cmd> [args]` call and pipes
+/// the JSON-serialized form to the adapter's stdin. The adapter is
+/// responsible for spawning `command` (with `args`) in whatever context
+/// is native to it: a new terminal window (i3wm), a new tmux window
+/// (tmux), inline `exec` (shell), etc. Adapters MUST inject
+/// `ENWIRO_ENV=env_name` and set cwd to `env_path` on the spawned child.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct RunPayload {
+    #[serde(default)]
+    pub version: u32,
+    pub env_name: String,
+    pub env_path: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl RunPayload {
+    pub fn new(env_name: String, env_path: String, command: String, args: Vec<String>) -> Self {
+        Self {
+            version: RUN_PAYLOAD_VERSION,
+            env_name,
+            env_path,
+            command,
+            args,
+        }
+    }
+
+    pub fn read_from_stdin() -> anyhow::Result<Self> {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("Could not read run payload from stdin")?;
+        serde_json::from_str(&buf).context("Could not parse run payload as JSON")
     }
 }

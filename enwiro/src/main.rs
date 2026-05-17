@@ -10,6 +10,7 @@ use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
 use commands::list_all::{ListAllArgs, list_all};
 use commands::list_environments::{ListEnvironmentsArgs, list_environments};
+use commands::run::{RunArgs, run};
 use commands::run_gear;
 use commands::show_path::{ShowPathArgs, show_path};
 use commands::wrap::{WrapArgs, wrap};
@@ -25,6 +26,7 @@ enum EnwiroCli {
     Activate(ActivateArgs),
     ListEnvironments(ListEnvironmentsArgs),
     ListAll(ListAllArgs),
+    Run(RunArgs),
     ShowPath(ShowPathArgs),
     Wrap(WrapArgs),
 }
@@ -69,6 +71,7 @@ fn main() -> anyhow::Result<()> {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
         EnwiroCli::ListAll(args) => list_all(&mut context_object, args.json),
+        EnwiroCli::Run(args) => run(&mut context_object, args),
         EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
     };

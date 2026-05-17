@@ -115,6 +115,10 @@ mod tests {
             *self.captured.borrow_mut() = managed_envs.to_vec();
             Ok(())
         }
+
+        fn run(&self, _payload: &enwiro_sdk::adapter::RunPayload) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     /// `build_managed_envs` must derive each `slot_score` from
@@ -308,6 +312,10 @@ mod tests {
         ) -> anyhow::Result<()> {
             let leaf = anyhow::anyhow!("leaf i3 IPC error: broken pipe");
             Err(leaf).map_err(|e| e.context("outer: Could not switch to workspace"))
+        }
+
+        fn run(&self, _payload: &enwiro_sdk::adapter::RunPayload) -> anyhow::Result<()> {
+            Ok(())
         }
     }
 
