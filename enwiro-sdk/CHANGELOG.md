@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.2.3...enwiro-sdk-v0.3.0) - 2026-05-17
+
+### Added
+
+- gate gear entries behind explicit -y confirmation ([#400](https://github.com/kantord/enwiro/pull/400))
+
+### Fixed
+
+- *(deps)* update strum monorepo to 0.28.0 ([#421](https://github.com/kantord/enwiro/pull/421))
+
 ## [0.2.2](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.2.1...enwiro-sdk-v0.2.2) - 2026-05-13
 
 ### Other
