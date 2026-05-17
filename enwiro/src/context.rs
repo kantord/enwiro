@@ -79,7 +79,7 @@ impl<W: Write> CommandContext<W> {
         let env_path = cookbook.cook(name)?;
         let env = self.create_environment_symlink(name, &env_path)?;
         let flat_name = name.replace('/', "-");
-        self.save_cook_metadata(&flat_name, &cookbook_name, description.as_deref());
+        self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
         self.write_garnish_gear(&env_path, &flat_name);
         Ok(env)
@@ -107,9 +107,15 @@ impl<W: Write> CommandContext<W> {
         None
     }
 
-    fn save_cook_metadata(&self, env_name: &str, cookbook: &str, description: Option<&str>) {
+    fn save_cook_metadata(
+        &self,
+        env_name: &str,
+        cookbook: &str,
+        recipe: &str,
+        description: Option<&str>,
+    ) {
         let env_dir = Path::new(&self.config.workspaces_directory).join(env_name);
-        crate::usage_stats::record_cook_metadata_per_env(&env_dir, cookbook, description);
+        crate::usage_stats::record_cook_metadata_per_env(&env_dir, cookbook, recipe, description);
     }
 
     /// Run every discovered Garnish plugin against the cooked project;
@@ -685,6 +691,35 @@ mod tests {
         let env_dir = temp_dir.path().join("my-project");
         let meta = crate::usage_stats::load_env_meta(&env_dir);
         assert_eq!(meta.cookbook.as_deref(), Some("git"));
+        assert_eq!(meta.recipe.as_deref(), Some("my-project"));
+    }
+
+    #[rstest]
+    fn test_cook_environment_saves_unflattened_recipe_name(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        let recipe_name = "owner/repo#42";
+        context_object.write_cache_entry("github", recipe_name);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "github",
+            vec![recipe_name],
+            vec![(recipe_name, cooked_dir.to_str().unwrap())],
+        ))];
+
+        context_object.cook_environment(recipe_name).unwrap();
+
+        let env_dir = temp_dir.path().join("owner-repo#42");
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(
+            meta.recipe.as_deref(),
+            Some(recipe_name),
+            "recipe must persist the unflattened id so refresh can re-run `cookbook gear <recipe>`"
+        );
     }
 
     #[rstest]
