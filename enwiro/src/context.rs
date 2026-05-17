@@ -113,7 +113,9 @@ impl<W: Write> CommandContext<W> {
     }
 
     /// Run every discovered Garnish plugin against the cooked project;
-    /// write each contribution to `gear.d/garnish-<name>.json`.
+    /// write each contribution to `gear.d/garnish-<name>.json`. After
+    /// writing, fire every cli entry referenced by an `autorun` hook
+    /// with `on == "cook"` — best-effort, spawned in `project_dir`.
     /// Per-Garnish failures are debug-logged and swallowed — same
     /// tolerance as `write_gear_if_present`.
     fn write_garnish_gear(&self, project_dir: &str, flat_name: &str) {
@@ -133,7 +135,9 @@ impl<W: Write> CommandContext<W> {
                 .and_then(|bytes| enwiro_sdk::fs::atomic_write(&path, &bytes).map_err(Into::into));
             if let Err(e) = result {
                 tracing::debug!(error = %e, garnish = garnish.name(), "garnish gear write failed, continuing");
+                continue;
             }
+            fire_autorun_on_cook(&data, project_path);
         }
     }
 
@@ -204,6 +208,49 @@ impl<W: Write> CommandContext<W> {
 
     pub fn get_all_environments(&self) -> anyhow::Result<HashMap<String, Environment>> {
         Environment::get_all(&self.config.workspaces_directory)
+    }
+}
+
+/// Spawn every cli entry referenced by an `on == "cook"` autorun hook in
+/// the given gear payload. Best-effort: hooks pointing at missing entries
+/// or failing to spawn are debug-logged and skipped. Spawned children
+/// are not waited on — the daemon never blocks on autorun.
+fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Path) {
+    for (gear_name, gear) in &data.gear {
+        for hook in &gear.autorun {
+            if hook.on != "cook" {
+                continue;
+            }
+            let Some(entry) = gear.cli.get(&hook.entry) else {
+                tracing::debug!(
+                    gear = gear_name,
+                    entry = hook.entry,
+                    "autorun hook references missing cli entry; skipping"
+                );
+                continue;
+            };
+            let Some((bin, args)) = entry.command.split_first() else {
+                tracing::debug!(
+                    gear = gear_name,
+                    entry = hook.entry,
+                    "autorun cli entry has empty command; skipping"
+                );
+                continue;
+            };
+            match std::process::Command::new(bin)
+                .args(args)
+                .current_dir(project_path)
+                .spawn()
+            {
+                Ok(_) => tracing::debug!(gear = gear_name, entry = hook.entry, "autorun fired"),
+                Err(e) => tracing::debug!(
+                    gear = gear_name,
+                    entry = hook.entry,
+                    error = %e,
+                    "autorun spawn failed; continuing"
+                ),
+            }
+        }
     }
 }
 

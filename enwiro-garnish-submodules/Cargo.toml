@@ -1,0 +1,17 @@
+[package]
+name = "enwiro-garnish-submodules"
+version = "0.1.0"
+edition = "2024"
+description = "Garnish that initialises git submodules on env cook"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.5.4", features = ["derive"] }
+enwiro-sdk.workspace = true
+git2 = "0.20.0"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
