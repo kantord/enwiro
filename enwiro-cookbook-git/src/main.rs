@@ -17,7 +17,7 @@ pub struct ConfigurationValues {
 fn short_path_hash(path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let hash = Sha256::digest(path.to_string_lossy().as_bytes());
-    format!("{:x}", hash)[..8].to_string()
+    hex::encode(hash)[..8].to_string()
 }
 
 fn default_worktree_dir() -> anyhow::Result<PathBuf> {
