@@ -11,6 +11,7 @@ members = [
     "enwiro-cookbook-obsidian",
     "enwiro-daemon",
     "enwiro-garnish-just",
+    "enwiro-garnish-submodules",
     "enwiro-sdk",
 ]
 

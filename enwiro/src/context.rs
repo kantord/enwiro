@@ -113,9 +113,10 @@ impl<W: Write> CommandContext<W> {
     }
 
     /// Run every discovered Garnish plugin against the cooked project;
-    /// write each contribution to `gear.d/garnish-<name>.json`.
-    /// Per-Garnish failures are debug-logged and swallowed — same
-    /// tolerance as `write_gear_if_present`.
+    /// write each contribution to `gear.d/garnish-<name>.json`, then
+    /// fire any cli entry whose `run_on` contains `Cook`. Best-effort
+    /// throughout — per-Garnish failures and autorun spawn failures
+    /// are debug-logged and swallowed.
     fn write_garnish_gear(&self, project_dir: &str, flat_name: &str) {
         let project_path = Path::new(project_dir);
         let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
@@ -133,7 +134,9 @@ impl<W: Write> CommandContext<W> {
                 .and_then(|bytes| enwiro_sdk::fs::atomic_write(&path, &bytes).map_err(Into::into));
             if let Err(e) = result {
                 tracing::debug!(error = %e, garnish = garnish.name(), "garnish gear write failed, continuing");
+                continue;
             }
+            fire_autorun_on_cook(&data, project_path);
         }
     }
 
@@ -204,6 +207,147 @@ impl<W: Write> CommandContext<W> {
 
     pub fn get_all_environments(&self) -> anyhow::Result<HashMap<String, Environment>> {
         Environment::get_all(&self.config.workspaces_directory)
+    }
+}
+
+/// For every cli entry in `data` whose `run_on` contains `Cook`, spawn
+/// it in `project_path`. Best-effort: empty commands and spawn failures
+/// are debug-logged and skipped. Spawned children are not waited on —
+/// the daemon never blocks on autorun.
+fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Path) {
+    use enwiro_sdk::gear::Hook;
+    for (gear_name, gear) in &data.gear {
+        for (entry_name, entry) in &gear.cli {
+            if !entry.run_on.contains(&Hook::Cook) {
+                continue;
+            }
+            let Some((bin, args)) = entry.command.split_first() else {
+                tracing::debug!(
+                    gear = gear_name,
+                    entry = entry_name,
+                    "autorun cli entry has empty command; skipping"
+                );
+                continue;
+            };
+            match std::process::Command::new(bin)
+                .args(args)
+                .current_dir(project_path)
+                .spawn()
+            {
+                Ok(_) => tracing::debug!(gear = gear_name, entry = entry_name, "autorun fired"),
+                Err(e) => tracing::debug!(
+                    gear = gear_name,
+                    entry = entry_name,
+                    error = %e,
+                    "autorun spawn failed; continuing"
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fire_autorun_tests {
+    use super::fire_autorun_on_cook;
+    use enwiro_sdk::gear::{CliEntry, Gear, GearFileData, Hook, SCHEMA_VERSION};
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    fn touch_command(path: &Path) -> Vec<String> {
+        vec!["touch".into(), path.to_str().unwrap().into()]
+    }
+
+    /// Spawn is non-blocking, so we poll for the sentinel to appear.
+    fn wait_for(path: &Path, max: Duration) -> bool {
+        let deadline = Instant::now() + max;
+        while Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        path.exists()
+    }
+
+    /// Fires Cook-tagged entries, skips entries without `run_on: [Cook]`.
+    #[test]
+    fn fires_cook_entries_and_skips_untagged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fires = tmp.path().join("fires");
+        let skipped = tmp.path().join("skipped");
+
+        let mut cli = HashMap::new();
+        cli.insert(
+            "should-fire".to_owned(),
+            CliEntry {
+                description: None,
+                command: touch_command(&fires),
+                run_on: vec![Hook::Cook],
+            },
+        );
+        cli.insert(
+            "should-skip".to_owned(),
+            CliEntry {
+                description: None,
+                command: touch_command(&skipped),
+                run_on: vec![],
+            },
+        );
+        let mut gear_map = HashMap::new();
+        gear_map.insert(
+            "g".to_owned(),
+            Gear {
+                description: "test".into(),
+                cli,
+                ..Default::default()
+            },
+        );
+        let data = GearFileData {
+            version: SCHEMA_VERSION,
+            gear: gear_map,
+        };
+
+        fire_autorun_on_cook(&data, tmp.path());
+
+        assert!(
+            wait_for(&fires, Duration::from_secs(2)),
+            "Cook-tagged entry should have fired (sentinel at {fires:?} missing)"
+        );
+        assert!(
+            !skipped.exists(),
+            "Untagged entry must not fire (unexpected sentinel at {skipped:?})"
+        );
+    }
+
+    /// Empty command must not panic or crash; the entry is just skipped.
+    #[test]
+    fn empty_command_is_skipped_silently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cli = HashMap::new();
+        cli.insert(
+            "empty".to_owned(),
+            CliEntry {
+                description: None,
+                command: vec![],
+                run_on: vec![Hook::Cook],
+            },
+        );
+        let mut gear_map = HashMap::new();
+        gear_map.insert(
+            "g".to_owned(),
+            Gear {
+                description: "test".into(),
+                cli,
+                ..Default::default()
+            },
+        );
+        let data = GearFileData {
+            version: SCHEMA_VERSION,
+            gear: gear_map,
+        };
+
+        fire_autorun_on_cook(&data, tmp.path()); // must not panic
     }
 }
 

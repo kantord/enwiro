@@ -40,7 +40,9 @@ fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
 }
 
 /// True iff argv looks like `enw :<gear> …`. Sniffed before clap so the
-/// `:` prefix bypasses subcommand parsing.
+/// `:` prefix bypasses subcommand parsing. Side effect: `--help` after a
+/// `:<gear> <entry>` is passed through to the spawned command instead of
+/// hitting clap (e.g. `enw :just --help` runs `just --help`). Intentional.
 fn is_dispatch_invocation(argv: &[OsString]) -> bool {
     argv.get(1)
         .and_then(|a| a.to_str())
