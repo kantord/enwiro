@@ -19,7 +19,7 @@ serde_json = "1"
 tokio = "1.37.0"
 tokio-i3ipc = "0.16.0"
 tokio-stream = "0.1"
-toml = "0.9"
+toml = "1.0"
 tracing.workspace = true
 which = "8"
 
