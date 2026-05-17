@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.3...enwiro-daemon-v0.0.4) - 2026-05-17
+
+### Added
+
+- retain recipe id in EnvStats ([#460](https://github.com/kantord/enwiro/pull/460))
+
 ## [0.0.3](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.2...enwiro-daemon-v0.0.3) - 2026-05-17
 
 ### Fixed

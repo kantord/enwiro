@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.34](https://github.com/kantord/enwiro/compare/enwiro-v0.3.33...enwiro-v0.3.34) - 2026-05-17
+
+### Added
+
+- retain recipe id in EnvStats ([#460](https://github.com/kantord/enwiro/pull/460))
+- add command runner feature ([#406](https://github.com/kantord/enwiro/pull/406))
+
 ## [0.3.33](https://github.com/kantord/enwiro/compare/enwiro-v0.3.32...enwiro-v0.3.33) - 2026-05-17
 
 ### Added
