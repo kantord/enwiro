@@ -113,11 +113,10 @@ impl<W: Write> CommandContext<W> {
     }
 
     /// Run every discovered Garnish plugin against the cooked project;
-    /// write each contribution to `gear.d/garnish-<name>.json`. After
-    /// writing, fire every cli entry referenced by an `autorun` hook
-    /// with `on == "cook"` — best-effort, spawned in `project_dir`.
-    /// Per-Garnish failures are debug-logged and swallowed — same
-    /// tolerance as `write_gear_if_present`.
+    /// write each contribution to `gear.d/garnish-<name>.json`, then
+    /// fire any cli entries flagged for `run_on: [Cook]`. Best-effort
+    /// throughout — per-Garnish failures and autorun spawn failures
+    /// are debug-logged and swallowed.
     fn write_garnish_gear(&self, project_dir: &str, flat_name: &str) {
         let project_path = Path::new(project_dir);
         let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
@@ -211,28 +210,21 @@ impl<W: Write> CommandContext<W> {
     }
 }
 
-/// Spawn every cli entry referenced by an `on == "cook"` autorun hook in
-/// the given gear payload. Best-effort: hooks pointing at missing entries
-/// or failing to spawn are debug-logged and skipped. Spawned children
+/// For every gear in `data` whose `run_on` contains `Cook`, spawn each
+/// of its `cli` entries in `project_path`. Best-effort: empty commands
+/// and spawn failures are debug-logged and skipped. Spawned children
 /// are not waited on — the daemon never blocks on autorun.
 fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Path) {
+    use enwiro_sdk::gear::Hook;
     for (gear_name, gear) in &data.gear {
-        for hook in &gear.autorun {
-            if hook.on != "cook" {
-                continue;
-            }
-            let Some(entry) = gear.cli.get(&hook.entry) else {
-                tracing::debug!(
-                    gear = gear_name,
-                    entry = hook.entry,
-                    "autorun hook references missing cli entry; skipping"
-                );
-                continue;
-            };
+        if !gear.run_on.contains(&Hook::Cook) {
+            continue;
+        }
+        for (entry_name, entry) in &gear.cli {
             let Some((bin, args)) = entry.command.split_first() else {
                 tracing::debug!(
                     gear = gear_name,
-                    entry = hook.entry,
+                    entry = entry_name,
                     "autorun cli entry has empty command; skipping"
                 );
                 continue;
@@ -242,10 +234,10 @@ fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Pa
                 .current_dir(project_path)
                 .spawn()
             {
-                Ok(_) => tracing::debug!(gear = gear_name, entry = hook.entry, "autorun fired"),
+                Ok(_) => tracing::debug!(gear = gear_name, entry = entry_name, "autorun fired"),
                 Err(e) => tracing::debug!(
                     gear = gear_name,
-                    entry = hook.entry,
+                    entry = entry_name,
                     error = %e,
                     "autorun spawn failed; continuing"
                 ),

@@ -99,21 +99,20 @@ pub struct Gear {
     pub linux_gui: HashMap<String, GuiEntry>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub cli: HashMap<String, CliEntry>,
+    /// Hook points on which every `cli` entry of this gear is auto-fired.
+    /// Empty (default) means user-invoked only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub autorun: Vec<Hook>,
+    pub run_on: Vec<Hook>,
 }
 
-/// A lifecycle-triggered fire of an existing cli entry. `entry` must
-/// resolve to a key in the same `Gear`'s `cli` map. `on` names the
-/// lifecycle event; currently the only supported value is `"cook"`,
-/// which fires once when the env is cooked. Unknown event names are
-/// ignored by the runner so adding new events later doesn't break
-/// older binaries reading the same gear file.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct Hook {
-    pub entry: String,
-    pub on: String,
+/// A point at which gear can be auto-fired. Unknown values in a gear
+/// file are rejected at deserialize time so producers and consumers
+/// stay in lockstep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Hook {
+    /// Fires once, immediately after the env's project has been cooked.
+    Cook,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -243,7 +242,7 @@ impl LoadedGear {
 #[cfg(test)]
 mod tests {
     mod schema {
-        use super::super::{CliEntry, Gear, GearFileData, GuiEntry, SCHEMA_VERSION, WebEntry};
+        use super::super::{CliEntry, Gear, GearFileData, GuiEntry, Hook, WebEntry};
         use rstest::rstest;
 
         /// Sample valid JSON document conforming to the gear schema.
@@ -361,17 +360,13 @@ mod tests {
             r#"{ "version": 1, "gear": { "just": { "description": "x",
                 "cli": { "build": { "command": ["just", "build"], "rogue": 1 } } } } }"#
         )]
-        #[case::hook_no_entry(
+        #[case::run_on_unknown_event(
             r#"{ "version": 1, "gear": { "g": { "description": "x",
-                "autorun": [ { "on": "cook" } ] } } }"#
+                "run-on": [ "deactivate" ] } } }"#
         )]
-        #[case::hook_no_on(
+        #[case::run_on_non_array(
             r#"{ "version": 1, "gear": { "g": { "description": "x",
-                "autorun": [ { "entry": "update" } ] } } }"#
-        )]
-        #[case::unknown_field_in_hook(
-            r#"{ "version": 1, "gear": { "g": { "description": "x",
-                "autorun": [ { "entry": "update", "on": "cook", "rogue": 1 } ] } } }"#
+                "run-on": "cook" } } }"#
         )]
         fn rejects_invalid_schema(#[case] json: &str) {
             let result: Result<GearFileData, _> = serde_json::from_str(json);
@@ -499,22 +494,22 @@ mod tests {
         }
 
         #[test]
-        fn gear_entry_without_autorun_field_succeeds_with_empty_vec() {
+        fn gear_entry_without_run_on_field_defaults_to_empty() {
             let json = r#"{
                 "version": 1,
                 "gear": {
                     "no-autorun": {
-                        "description": "A gear with no autorun hooks"
+                        "description": "A gear with no autorun"
                     }
                 }
             }"#;
             let parsed: GearFileData = serde_json::from_str(json)
-                .expect("missing `autorun` should default to empty vec, not error");
-            assert!(parsed.gear["no-autorun"].autorun.is_empty());
+                .expect("missing `run-on` should default to empty vec, not error");
+            assert!(parsed.gear["no-autorun"].run_on.is_empty());
         }
 
         #[test]
-        fn autorun_hook_roundtrips() {
+        fn run_on_cook_roundtrips() {
             let json = r#"{
                 "version": 1,
                 "gear": {
@@ -525,44 +520,29 @@ mod tests {
                                 "command": ["git", "submodule", "update", "--init", "--recursive"]
                             }
                         },
-                        "autorun": [
-                            { "entry": "update", "on": "cook" }
-                        ]
+                        "run-on": ["cook"]
                     }
                 }
             }"#;
             let parsed: GearFileData = serde_json::from_str(json).unwrap();
             let gear = &parsed.gear["init-submodules"];
-            assert_eq!(gear.autorun.len(), 1);
-            assert_eq!(gear.autorun[0].entry, "update");
-            assert_eq!(gear.autorun[0].on, "cook");
+            assert_eq!(gear.run_on, vec![Hook::Cook]);
 
             let reserialized = serde_json::to_string(&parsed).unwrap();
-            assert!(reserialized.contains(r#""entry":"update""#));
-            assert!(reserialized.contains(r#""on":"cook""#));
+            assert!(reserialized.contains(r#""run-on":["cook"]"#));
         }
 
         #[test]
-        fn empty_autorun_vec_serializes_without_the_field() {
-            use std::collections::HashMap;
+        fn empty_run_on_serializes_without_the_field() {
             let gear = Gear {
                 description: "x".into(),
                 ..Default::default()
             };
             let json = serde_json::to_string(&gear).expect("Gear must serialize");
             assert!(
-                !json.contains("autorun"),
-                "empty autorun must be omitted from JSON, got: {json}"
+                !json.contains("run-on") && !json.contains("run_on"),
+                "empty run_on must be omitted from JSON, got: {json}"
             );
-            let mut map = HashMap::new();
-            map.insert("g".to_owned(), gear);
-            let data = GearFileData {
-                version: SCHEMA_VERSION,
-                gear: map,
-            };
-            // Round-trip via JSON survives without the autorun field.
-            let s = serde_json::to_string(&data).unwrap();
-            let _: GearFileData = serde_json::from_str(&s).unwrap();
         }
     }
 
