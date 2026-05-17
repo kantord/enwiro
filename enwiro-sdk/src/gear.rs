@@ -140,6 +140,9 @@ pub struct GuiEntry {
 /// `run_on` lists hook points on which the daemon fires this entry
 /// automatically (in addition to the user-invoked path). Empty (default)
 /// means user-invoked only.
+///
+/// `require_confirmation` defaults to `true`: unknown-provenance entries
+/// are gated. Producers set `false` only for entries they vouch for.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CliEntry {
@@ -148,6 +151,16 @@ pub struct CliEntry {
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub run_on: Vec<Hook>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub require_confirmation: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 /// All gear collected for an env, merged across every `gear.d/*.json`
@@ -440,6 +453,7 @@ mod tests {
             let entry = CliEntry {
                 description: None,
                 command: vec!["just".into(), "deploy".into()],
+                require_confirmation: true,
                 ..Default::default()
             };
             let json = serde_json::to_string(&entry).expect("CliEntry must serialize");
@@ -454,12 +468,78 @@ mod tests {
             let original = CliEntry {
                 description: Some("Build the project".into()),
                 command: vec!["just".into(), "build".into()],
+                require_confirmation: true,
                 ..Default::default()
             };
             let json = serde_json::to_string(&original).unwrap();
             let parsed: CliEntry = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.description, original.description);
             assert_eq!(parsed.command, original.command);
+            assert_eq!(parsed.require_confirmation, original.require_confirmation);
+        }
+
+        #[test]
+        fn cli_entry_require_confirmation_defaults_to_true_when_absent() {
+            let json = r#"{
+                "version": 1,
+                "gear": {
+                    "just": {
+                        "description": "x",
+                        "cli": {
+                            "deploy": { "command": ["just", "deploy"] }
+                        }
+                    }
+                }
+            }"#;
+            let parsed: GearFileData = serde_json::from_str(json).unwrap();
+            assert!(parsed.gear["just"].cli["deploy"].require_confirmation);
+        }
+
+        #[test]
+        fn cli_entry_require_confirmation_false_round_trips() {
+            let json = r#"{
+                "version": 1,
+                "gear": {
+                    "just": {
+                        "description": "x",
+                        "cli": {
+                            "build": {
+                                "command": ["just", "build"],
+                                "require-confirmation": false
+                            }
+                        }
+                    }
+                }
+            }"#;
+            let parsed: GearFileData = serde_json::from_str(json).unwrap();
+            assert!(!parsed.gear["just"].cli["build"].require_confirmation);
+        }
+
+        #[test]
+        fn cli_entry_serializes_require_confirmation_only_when_non_default() {
+            let safe = CliEntry {
+                description: None,
+                command: vec!["just".into(), "build".into()],
+                require_confirmation: false,
+                ..Default::default()
+            };
+            let safe_json = serde_json::to_string(&safe).unwrap();
+            assert!(
+                safe_json.contains("require-confirmation"),
+                "non-default value must serialize, got: {safe_json}"
+            );
+
+            let unsafe_entry = CliEntry {
+                description: None,
+                command: vec!["just".into(), "deploy".into()],
+                require_confirmation: true,
+                ..Default::default()
+            };
+            let unsafe_json = serde_json::to_string(&unsafe_entry).unwrap();
+            assert!(
+                !unsafe_json.contains("require-confirmation"),
+                "default value must be elided, got: {unsafe_json}"
+            );
         }
 
         #[test]

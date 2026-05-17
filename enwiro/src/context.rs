@@ -221,6 +221,15 @@ fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Pa
             if !entry.run_on.contains(&Hook::Cook) {
                 continue;
             }
+            // Autorun is non-interactive — no user to answer a prompt.
+            if entry.require_confirmation {
+                tracing::debug!(
+                    gear = gear_name,
+                    entry = entry_name,
+                    "autorun cli entry requires confirmation; skipping"
+                );
+                continue;
+            }
             let Some((bin, args)) = entry.command.split_first() else {
                 tracing::debug!(
                     gear = gear_name,
@@ -270,6 +279,49 @@ mod fire_autorun_tests {
         path.exists()
     }
 
+    /// An entry that requires confirmation must not autorun — there's no
+    /// user present at cook time to answer the prompt.
+    #[test]
+    fn skips_entries_that_require_confirmation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sentinel = tmp.path().join("must-not-fire");
+
+        let mut cli = HashMap::new();
+        cli.insert(
+            "gated".to_owned(),
+            CliEntry {
+                description: None,
+                command: touch_command(&sentinel),
+                run_on: vec![Hook::Cook],
+                require_confirmation: true,
+                ..Default::default()
+            },
+        );
+        let mut gear_map = HashMap::new();
+        gear_map.insert(
+            "g".to_owned(),
+            Gear {
+                description: "test".into(),
+                cli,
+                ..Default::default()
+            },
+        );
+        let data = GearFileData {
+            version: SCHEMA_VERSION,
+            gear: gear_map,
+        };
+
+        fire_autorun_on_cook(&data, tmp.path());
+
+        // Wait briefly so a buggy implementation that *did* spawn has
+        // time to create the sentinel.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !sentinel.exists(),
+            "require_confirmation: true entry must NOT autorun (unexpected sentinel at {sentinel:?})"
+        );
+    }
+
     /// Fires Cook-tagged entries, skips entries without `run_on: [Cook]`.
     #[test]
     fn fires_cook_entries_and_skips_untagged() {
@@ -284,6 +336,7 @@ mod fire_autorun_tests {
                 description: None,
                 command: touch_command(&fires),
                 run_on: vec![Hook::Cook],
+                ..Default::default()
             },
         );
         cli.insert(
@@ -292,6 +345,7 @@ mod fire_autorun_tests {
                 description: None,
                 command: touch_command(&skipped),
                 run_on: vec![],
+                ..Default::default()
             },
         );
         let mut gear_map = HashMap::new();
@@ -331,6 +385,7 @@ mod fire_autorun_tests {
                 description: None,
                 command: vec![],
                 run_on: vec![Hook::Cook],
+                ..Default::default()
             },
         );
         let mut gear_map = HashMap::new();
