@@ -5,6 +5,8 @@ use i3ipc_types::reply::Workspace;
 use tokio_i3ipc::I3;
 use tokio_stream::StreamExt;
 
+mod rebalance;
+
 /// Minimum NetBenefit required to justify evicting a workspace from a single-digit slot.
 /// A swap that yields less than this gain is treated as not worth the disruption.
 /// Tune upward to make the layout more stable; downward to make it more aggressive.
@@ -3160,5 +3162,96 @@ mod tests {
                  i3 will refuse this rename at runtime"
             );
         }
+    }
+
+    // ── Simulator validation gate ─────────────────────────────────────────
+    //
+    // For each existing rebalance regression scenario, the OLD path
+    // (`build_rebalance_plan`) must produce a sequence of i3 ops that the
+    // new `I3Model` simulator accepts at every step without error. This
+    // proves the simulator's rules (`OldNotFound`, `ReservedPrefix`,
+    // `DuplicateNum`) match real i3 behaviour BEFORE we trust the simulator
+    // as the spec for the new pipeline.
+
+    use crate::rebalance::i3_model::I3Model;
+    use crate::rebalance::i3_op::I3Op;
+    use crate::rebalance::types::Handle;
+
+    fn run_old_plan_through_simulator(slots: &mut [WorkspaceSlot]) {
+        // Capture initial state — every entry in slots is a real workspace.
+        let mut model = I3Model::default();
+        for ws in slots.iter() {
+            let handle = Handle(format!("{}: {}", ws.slot, ws.name));
+            // Treat all initial workspaces as having content so the
+            // empty-workspace-reaping rule doesn't trip on this validation.
+            model.insert(handle, true);
+        }
+
+        // Run the OLD planner.
+        let plan = build_rebalance_plan(slots);
+
+        // Translate each (old, new) pair into an `I3Op::Rename` and apply.
+        for (old, new) in &plan {
+            let op = I3Op::Rename {
+                from: Handle(old.clone()),
+                to: Handle(new.clone()),
+            };
+            model
+                .apply(&op)
+                .unwrap_or_else(|e| panic!("simulator rejected old-code op {op:?}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn simulator_accepts_old_swap_scenario_for_issue_346() {
+        let mut slots: Vec<WorkspaceSlot> =
+            vec![make_slot(3, "low", 0.1), make_slot(11, "high", 0.9)];
+        for s in [1i32, 2, 4, 5, 6, 7, 8, 9] {
+            slots.push(make_slot(s, &format!("filler-{s}"), 0.9));
+        }
+        run_old_plan_through_simulator(&mut slots);
+    }
+
+    #[test]
+    fn simulator_accepts_old_plan_for_multi_hop_scenario() {
+        let mut slots: Vec<WorkspaceSlot> = vec![
+            make_slot(1, "filler-1", 0.9),
+            make_slot(2, "filler-2", 0.9),
+            make_slot(3, "low", 0.1),
+            make_slot(4, "mid", 0.5),
+            make_slot(5, "high", 0.95),
+        ];
+        run_old_plan_through_simulator(&mut slots);
+    }
+
+    #[test]
+    fn simulator_accepts_old_plan_with_unmanaged_slots() {
+        let mut slots: Vec<WorkspaceSlot> = vec![
+            make_slot(3, "low", 0.1),
+            make_slot(5, "high", 0.95),
+            WorkspaceSlot {
+                slot: 1,
+                name: String::new(),
+                score: 0.0,
+                managed: false,
+            },
+            WorkspaceSlot {
+                slot: 2,
+                name: String::new(),
+                score: 0.0,
+                managed: false,
+            },
+            WorkspaceSlot {
+                slot: 10,
+                name: String::new(),
+                score: 0.0,
+                managed: false,
+            },
+        ];
+        // Unmanaged workspaces still need to be seeded into the simulator
+        // with names that match how the old planner sees them. The old code
+        // reconstructs names as `format!("{}: {}", slot, name)` so we mirror
+        // that for the initial model insert.
+        run_old_plan_through_simulator(&mut slots);
     }
 }
