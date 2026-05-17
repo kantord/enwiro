@@ -26,7 +26,7 @@ jobs:
         with:
           toolchain: stable
       - name: Create git tags and GitHub releases
-        uses: release-plz/action@e592230ad39e3ec735402572601fc621aa24355c # v0.5
+        uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db # v0.5
         with:
           command: release
         env:
@@ -89,7 +89,7 @@ jobs:
         with:
           toolchain: stable
       - name: Run release-plz release-pr
-        uses: release-plz/action@e592230ad39e3ec735402572601fc621aa24355c # v0.5
+        uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db # v0.5
         with:
           command: release-pr
         env:
