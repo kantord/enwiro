@@ -1,9 +1,9 @@
 use super::types::*;
 use std::collections::HashMap;
 
-/// Declarative target: every managed env should end up at this slot after
-/// rebalance. The bijection (one env per slot) is an invariant `optimize`
-/// produces; `optimize` is tested for it. Other layers trust.
+/// Declarative target slot per managed env. Slot-bijection (no two envs
+/// share a slot) is a contract `optimize` produces and `derive` re-checks
+/// via `debug_assert!`; downstream layers trust.
 #[derive(Clone, Debug, Default)]
 pub struct LayoutSpec {
     pub targets: HashMap<EnvName, Slot>,

@@ -1,11 +1,12 @@
 //! Mirror of `tauler/optative/src/lib.rs` @ rev 70d71de.
 //!
-//! TODO: replace with `optative` from crates.io once published. While
-//! inline-copied, keep the surface area minimal and avoid divergence — any
-//! local change should be paired with an upstream issue/PR. The only
-//! intentional addition here is `ManagedSet::insert`, used by `rebalance::derive`
-//! to seed initial state from i3 without firing `enter` for existing
-//! workspaces; propose upstream as a peer to `reconcile`.
+//! TODO: replace with `optative` from crates.io once published. **This is a
+//! vendored copy with intentional API-surface parity**, so unused symbols
+//! (`LifecycleContext`, `wrap_*`, `iter`/`get`/etc.) are kept deliberately;
+//! a reviewer should not strip them — doing so creates divergence work
+//! when the crate eventually publishes. The only local addition is
+//! `ManagedSet::insert`, used by `rebalance::derive` to seed initial state
+//! from i3 without firing `enter`; propose upstream as a peer to `reconcile`.
 
 #![allow(dead_code, unused_imports)]
 

@@ -126,15 +126,11 @@ fn regression_empty_ws_race_spawn_lands_safely_last() {
     );
 }
 
-// ── proptest: any plan + any matching state → compile output is i3-safe ──
-
 use proptest::prelude::*;
 
-/// Generate a `Vec<Env>` of 0..=6 entries with unique names and slots, plus a
-/// disjoint `Vec<Slot>` of 0..=3 unmanaged slots. All slots are within
-/// 1..=20 — the algorithm uses `max_slot=9` so the range covers both the
-/// shortcut zone and overflow.
-fn arb_state() -> impl Strategy<Value = (Vec<Env>, Vec<Slot>)> {
+/// Single strategy yielding a fully-consistent `(existing, unmanaged, incoming)`
+/// triple: all slots disjoint, incoming's slot the lowest unused in `1..=21`.
+fn arb_scenario() -> impl Strategy<Value = (Vec<Env>, Vec<Slot>, Env)> {
     proptest::collection::vec(1i32..=20, 0..=10)
         .prop_filter("slots must be unique", |slots| {
             let mut sorted = slots.clone();
@@ -144,13 +140,11 @@ fn arb_state() -> impl Strategy<Value = (Vec<Env>, Vec<Slot>)> {
         })
         .prop_flat_map(|slots| {
             let managed_count = std::cmp::min(slots.len(), 6);
-            (Just(slots), 0usize..=managed_count)
-        })
-        .prop_flat_map(|(slots, managed_count)| {
             let scores = proptest::collection::vec(0.0f64..=1.0, managed_count);
-            (Just(slots), Just(managed_count), scores)
+            let incoming_score = 0.0f64..=1.0;
+            (Just(slots), Just(managed_count), scores, incoming_score)
         })
-        .prop_map(|(slots, managed_count, scores)| {
+        .prop_map(|(slots, managed_count, scores, incoming_score)| {
             let mut managed = Vec::new();
             let mut unmanaged = Vec::new();
             for (i, slot) in slots.into_iter().enumerate() {
@@ -164,51 +158,45 @@ fn arb_state() -> impl Strategy<Value = (Vec<Env>, Vec<Slot>)> {
                     unmanaged.push(Slot(slot));
                 }
             }
-            (managed, unmanaged)
+            let taken: std::collections::HashSet<i32> = managed
+                .iter()
+                .map(|e| e.slot.0)
+                .chain(unmanaged.iter().map(|s| s.0))
+                .collect();
+            let free_slot = (1..=21).find(|n| !taken.contains(n)).unwrap_or(21);
+            let incoming = Env {
+                name: EnvName("incoming".into()),
+                slot: Slot(free_slot),
+                score: incoming_score,
+            };
+            (managed, unmanaged, incoming)
         })
 }
 
-fn arb_incoming(existing: &[Env], unmanaged: &[Slot]) -> impl Strategy<Value = Env> + 'static {
-    let taken: std::collections::HashSet<i32> = existing
-        .iter()
-        .map(|e| e.slot.0)
-        .chain(unmanaged.iter().map(|s| s.0))
-        .collect();
-    let free_slot = (1..=21).find(|n| !taken.contains(n)).unwrap_or(21);
-    (0.0f64..=1.0).prop_map(move |score| Env {
-        name: EnvName("incoming".into()),
-        slot: Slot(free_slot),
-        score,
-    })
-}
-
 proptest! {
-    /// For any well-formed (existing, unmanaged) snapshot and any incoming
-    /// env, the full pipeline must produce an op sequence the simulator
-    /// accepts at every step. Failure points to a real i3-safety violation
-    /// (rename of non-existent OLD, reserved-prefix target, duplicate num).
+    /// For any well-formed (existing, unmanaged, incoming) snapshot, the full
+    /// pipeline must produce an op sequence the simulator accepts at every
+    /// step. Failure points to a real i3-safety violation (rename of
+    /// non-existent OLD, reserved-prefix target, duplicate num).
     #[test]
     fn pipeline_is_i3_safe_for_any_state(
-        (existing, unmanaged) in arb_state(),
+        (existing, unmanaged, incoming) in arb_scenario(),
     ) {
-        let incoming_strategy = arb_incoming(&existing, &unmanaged);
-        proptest!(|(incoming in incoming_strategy)| {
-            let mut model = seed_model(&existing, &unmanaged);
-            let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
-            let current: HashMap<EnvName, Slot> = existing
-                .iter()
-                .map(|e| (e.name.clone(), e.slot))
-                .collect();
-            let plan = derive(&current, &spec);
-            for op in compile(&plan) {
-                model.apply(&op).expect("compile must produce i3-safe ops");
-            }
-            for (env_name, target_slot) in &spec.targets {
-                prop_assert!(
-                    model.ws.contains_key(&Handle::slotted(*target_slot, env_name)),
-                    "env {:?} did not end at slot {:?}", env_name, target_slot,
-                );
-            }
-        });
+        let mut model = seed_model(&existing, &unmanaged);
+        let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
+        let current: HashMap<EnvName, Slot> = existing
+            .iter()
+            .map(|e| (e.name.clone(), e.slot))
+            .collect();
+        let plan = derive(&current, &spec);
+        for op in compile(&plan) {
+            model.apply(&op).expect("compile must produce i3-safe ops");
+        }
+        for (env_name, target_slot) in &spec.targets {
+            prop_assert!(
+                model.ws.contains_key(&Handle::slotted(*target_slot, env_name)),
+                "env {:?} did not end at slot {:?}", env_name, target_slot,
+            );
+        }
     }
 }

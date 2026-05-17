@@ -59,9 +59,8 @@ struct AdapterConfig {
     web_open_command: Option<Vec<String>>,
 }
 
-/// Load `web_open_command` from the i3 adapter's confy TOML at `config_path`,
-/// falling back to the default when the file is missing, malformed, or has
-/// no `web_open_command` field.
+/// Falls back to `default_web_open_command` when the file is missing,
+/// malformed, or has no `web_open_command` field.
 fn load_web_open_command(config_path: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(config_path)
         .ok()
@@ -162,16 +161,11 @@ fn resolve_enw_binary() -> String {
         .unwrap_or_else(|| "enw".to_string())
 }
 
-/// Builds the per-URL `i3-msg exec` payload for a single activation, given
-/// the activation-level constants (binary, env name, configured open
-/// command). One instance is constructed per `open_gear_urls` call and then
-/// queried per URL.
-///
 /// Wraps the user's `web_open_command` inside
 /// `<absolute-enw> wrap <command> <env> -- <args>` so the spawned process
 /// inherits `cwd` / `ENWIRO_ENV` from `enw wrap`, while `i3-msg exec`
 /// supplies daemonization and graphical-session env normalization. The
-/// absolute `enw` path is required - see [`resolve_enw_binary`].
+/// absolute `enw` path is required — see [`resolve_enw_binary`].
 struct WrapPayloadBuilder<'a> {
     enw_binary: String,
     env_name: &'a str,
@@ -187,11 +181,8 @@ impl<'a> WrapPayloadBuilder<'a> {
         }
     }
 
-    /// Construct the full `"exec <enw> wrap <command> <env> -- <args>"`
-    /// string for one URL, with `{url}` substituted into every argv element
-    /// and shell-unsafe components quoted. Returns `None` only if
-    /// `command_template` is empty (no binary to wrap) - callers should
-    /// have guarded already.
+    /// Substitutes `{url}` into every argv element and shell-quotes them.
+    /// `None` only when `command_template` is empty — callers guard upstream.
     fn payload_for(&self, url: &str) -> Option<String> {
         let (command_name, child_args) = self.command_template.split_first()?;
         let mut parts: Vec<String> = vec![
@@ -237,9 +228,7 @@ fn open_gear_urls(gear: &serde_json::Value, command_template: &[String], env_nam
     }
 }
 
-/// Build the `"exec <enw> wrap <argv[0]> <env> -- <argv[1..]>"` string for
-/// one linux-gui command. Returns `None` only if `argv` is empty (collectors
-/// already filter that case; this is belt-and-suspenders).
+/// `None` only when `argv` is empty (collectors already filter; belt-and-suspenders).
 fn build_gui_payload(enw_binary: &str, env_name: &str, argv: &[String]) -> Option<String> {
     let (binary, args) = argv.split_first()?;
     let mut parts: Vec<String> = vec![
@@ -352,7 +341,7 @@ fn fetch_managed_envs() -> Vec<ManagedEnvInfo> {
     }
 }
 
-async fn run_i3_command(i3: &mut I3, command: String) -> anyhow::Result<()> {
+async fn run_i3_command(i3: &mut I3, command: &str) -> anyhow::Result<()> {
     let outcomes = i3.run_command(command).await?;
     if let Some(outcome) = outcomes.first()
         && !outcome.success
@@ -360,6 +349,16 @@ async fn run_i3_command(i3: &mut I3, command: String) -> anyhow::Result<()> {
         let msg = outcome.error.as_deref().unwrap_or("unknown error");
         tracing::error!(error = %msg, "i3 command failed");
         anyhow::bail!("i3 command failed: {}", msg);
+    }
+    Ok(())
+}
+
+async fn apply_plan(i3: &mut I3, plan: &rebalance::plan::Plan) -> anyhow::Result<()> {
+    use rebalance::compile::compile;
+    use rebalance::i3_op::render;
+    for op in compile(plan) {
+        tracing::info!(op = ?op, "i3 op");
+        run_i3_command(i3, &render(&op)).await?;
     }
     Ok(())
 }
@@ -407,20 +406,14 @@ fn lowest_unused_slot(workspaces: &[Workspace]) -> rebalance::types::Slot {
     rebalance::types::Slot(n)
 }
 
-/// Current managed-env slot map for `derive`.
 fn current_slot_map(
     managed: &[rebalance::types::Env],
 ) -> std::collections::HashMap<rebalance::types::EnvName, rebalance::types::Slot> {
     managed.iter().map(|e| (e.name.clone(), e.slot)).collect()
 }
 
-/// Returns `true` when a rebalance should run, `false` when it should be skipped
-/// because one already ran within the debounce window.
-///
-/// # Parameters
-/// * `last` – when the previous rebalance completed, or `None` if none has run yet.
-/// * `debounce` – minimum time that must have elapsed before another rebalance is allowed.
-/// * `now` – the current instant (passed in for testability).
+/// Rate limit: true iff no prior rebalance has run, or `debounce` has elapsed
+/// since the last one. `now` is injected for testability.
 fn should_rebalance(
     last: Option<std::time::Instant>,
     debounce: std::time::Duration,
@@ -475,7 +468,6 @@ async fn main() -> anyhow::Result<()> {
             print!("{}", environment_name);
         }
         EnwiroAdapterI3WmCLI::Activate(args) => {
-            use rebalance::compile::compile;
             use rebalance::derive::derive;
             use rebalance::i3_op::{I3Op, render};
             use rebalance::optimize::optimize;
@@ -490,15 +482,13 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .find(|ws| extract_environment_name(ws) == args.name)
             {
-                // Switching back: gear was fired during the original
-                // first-creation activation and must not re-fire here (would
-                // yank focus on single-instance native apps and multiply
-                // chromium app-mode windows).
+                // Re-activation: gear stays silent (single-instance apps would
+                // yank focus; chromium app-mode would multiply windows).
                 tracing::info!(workspace = %existing.name, "Found existing workspace");
                 let op = I3Op::Focus {
                     ws: Handle(existing.name.clone()),
                 };
-                run_i3_command(&mut i3, render(&op)).await?;
+                run_i3_command(&mut i3, &render(&op)).await?;
             } else {
                 let (existing, unmanaged) =
                     snapshot_for_rebalance(&workspaces, &payload.managed_envs);
@@ -516,12 +506,8 @@ async fn main() -> anyhow::Result<()> {
                 };
                 tracing::info!(env = %args.name, free_num = free_num.0, "Activating new env");
                 let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
-                let current = current_slot_map(&existing);
-                let plan = derive(&current, &spec);
-                for op in compile(&plan) {
-                    tracing::info!(op = ?op, "i3 op");
-                    run_i3_command(&mut i3, render(&op)).await?;
-                }
+                let plan = derive(&current_slot_map(&existing), &spec);
+                apply_plan(&mut i3, &plan).await?;
 
                 let web_open_command = adapter_config_path()
                     .map(|p| load_web_open_command(&p))
@@ -531,59 +517,62 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         EnwiroAdapterI3WmCLI::Listen(listen_args) => {
+            use rebalance::derive::derive;
+            use rebalance::optimize::{STABILITY_THRESHOLD, optimize_single_step};
+            use rebalance::types::Slot;
+
             let debounce = std::time::Duration::from_secs(listen_args.debounce_secs);
             let mut last_rebalance: Option<std::time::Instant> = None;
             let mut i3 = I3::connect().await?;
             i3.subscribe([Subscribe::Workspace]).await?;
             let mut listener = i3.listen();
+            // Separate command-issuing socket: the listener socket can only
+            // stream events.
+            let mut i3_cmd = I3::connect().await?;
             loop {
-                if let Some(Ok(Event::Workspace(ws_event))) = listener.next().await
-                    && let Some(current) = ws_event.current
-                {
-                    let raw_name = current.name.unwrap_or_default();
-                    let env_name = extract_environment_name_from_str(&raw_name);
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs() as i64)
-                        .unwrap_or(0);
-                    println!("{}", format_workspace_switch_event(&env_name, ts));
-
-                    let now = std::time::Instant::now();
-                    if should_rebalance(last_rebalance, debounce, now) {
-                        use rebalance::compile::compile;
-                        use rebalance::derive::derive;
-                        use rebalance::i3_op::render;
-                        use rebalance::optimize::{STABILITY_THRESHOLD, optimize_single_step};
-                        use rebalance::types::Slot;
-
-                        tracing::debug!("Rebalance check triggered");
-                        let managed_envs = fetch_managed_envs();
-                        tracing::debug!(count = managed_envs.len(), "Fetched managed envs");
-                        let mut i3_rebalance = I3::connect().await?;
-                        let workspaces = i3_rebalance.get_workspaces().await?;
-                        let (existing, unmanaged) =
-                            snapshot_for_rebalance(&workspaces, &managed_envs);
-                        tracing::debug!(count = existing.len(), "Built managed env list");
-                        let spec = optimize_single_step(
-                            &existing,
-                            &unmanaged,
-                            Slot(9),
-                            STABILITY_THRESHOLD,
-                        );
-                        let current = current_slot_map(&existing);
-                        let plan = derive(&current, &spec);
-                        if plan.relocations.is_empty() && plan.spawn.is_none() {
-                            tracing::debug!("No rebalance needed");
-                        }
-                        for op in compile(&plan) {
-                            tracing::info!(op = ?op, "Rebalancing workspace");
-                            run_i3_command(&mut i3_rebalance, render(&op)).await?;
-                        }
-                        last_rebalance = Some(std::time::Instant::now());
-                    } else {
-                        tracing::debug!("Rebalance skipped (rate limited)");
+                let Some(item) = listener.next().await else {
+                    tracing::info!("i3 closed the event stream — exiting Listen loop");
+                    break;
+                };
+                let ws_event = match item {
+                    Ok(Event::Workspace(ws_event)) => ws_event,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::error!(error = %e, "i3 IPC error on listener stream — exiting Listen loop");
+                        break;
                     }
+                };
+                let Some(current) = ws_event.current else {
+                    continue;
+                };
+                let Some(raw_name) = current.name.filter(|n| !n.is_empty()) else {
+                    continue;
+                };
+                let env_name = extract_environment_name_from_str(&raw_name);
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                println!("{}", format_workspace_switch_event(&env_name, ts));
+
+                let now = std::time::Instant::now();
+                if !should_rebalance(last_rebalance, debounce, now) {
+                    tracing::debug!("Rebalance skipped (rate limited)");
+                    continue;
                 }
+                tracing::debug!("Rebalance check triggered");
+                let managed_envs = fetch_managed_envs();
+                tracing::debug!(count = managed_envs.len(), "Fetched managed envs");
+                let workspaces = i3_cmd.get_workspaces().await?;
+                let (existing, unmanaged) = snapshot_for_rebalance(&workspaces, &managed_envs);
+                let spec =
+                    optimize_single_step(&existing, &unmanaged, Slot(9), STABILITY_THRESHOLD);
+                let plan = derive(&current_slot_map(&existing), &spec);
+                if plan.relocations.is_empty() && plan.spawn.is_none() {
+                    tracing::debug!("No rebalance needed");
+                }
+                apply_plan(&mut i3_cmd, &plan).await?;
+                last_rebalance = Some(std::time::Instant::now());
             }
         }
     };

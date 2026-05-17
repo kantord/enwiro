@@ -35,7 +35,7 @@ impl Lifecycle for ManagedEnv {
     }
 
     fn enter(self, _ctx: &mut (), out: &mut Plan) -> Result<Slot, Infallible> {
-        debug_assert!(
+        assert!(
             out.spawn.is_none(),
             "more than one new env in spec — upstream invariant violated"
         );
@@ -70,6 +70,14 @@ impl Lifecycle for ManagedEnv {
 }
 
 pub fn derive(current: &HashMap<EnvName, Slot>, spec: &LayoutSpec) -> Plan {
+    debug_assert!(
+        {
+            let mut seen = std::collections::HashSet::new();
+            spec.targets.values().all(|s| seen.insert(*s))
+        },
+        "LayoutSpec.targets must be a bijection — two envs share a slot",
+    );
+
     let mut managed = ManagedSet::<ManagedEnv>::default();
     for (env, &slot) in current {
         managed.insert(env.0.clone(), slot);

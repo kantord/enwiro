@@ -30,7 +30,7 @@ fn find_best_move(
     unmanaged_slots: &[Slot],
     max_slot: Slot,
     stability_threshold: f64,
-) -> Vec<(EnvName, Slot)> {
+) -> Option<BestMove> {
     let mut all_occupied: std::collections::HashSet<Slot> =
         managed.iter().map(|e| e.slot).collect();
     all_occupied.extend(unmanaged_slots.iter().copied());
@@ -75,15 +75,18 @@ fn find_best_move(
         }
     }
 
-    match best {
-        None => Vec::new(),
-        Some(BestMove::Swap { lo_idx, hi_idx }) => {
-            let lo = &managed[lo_idx];
-            let hi = &managed[hi_idx];
-            vec![(lo.name.clone(), hi.slot), (hi.name.clone(), lo.slot)]
+    best
+}
+
+fn apply_move(managed: &mut [Env], mv: BestMove) {
+    match mv {
+        BestMove::Swap { lo_idx, hi_idx } => {
+            let lo_slot = managed[lo_idx].slot;
+            managed[lo_idx].slot = managed[hi_idx].slot;
+            managed[hi_idx].slot = lo_slot;
         }
-        Some(BestMove::Compaction { env_idx, target }) => {
-            vec![(managed[env_idx].name.clone(), target)]
+        BestMove::Compaction { env_idx, target } => {
+            managed[env_idx].slot = target;
         }
     }
 }
@@ -104,6 +107,8 @@ fn boost_incoming_score(managed: &mut [Env], env_name: &EnvName, max_slot: Slot)
         .filter(|e| e.slot <= max_slot)
         .map(|e| e.score)
         .fold(f64::INFINITY, f64::min);
+    // Skip when no managed envs occupy the shortcut zone: nothing to displace,
+    // and writing INFINITY into the score would poison later comparisons.
     if min_shortcut_score.is_finite()
         && let Some(target) = managed.iter_mut().find(|e| &e.name == env_name)
     {
@@ -124,16 +129,8 @@ pub fn optimize(
     managed.push(incoming.clone());
     boost_incoming_score(&mut managed, &incoming.name, max_slot);
 
-    loop {
-        let moves = find_best_move(&managed, unmanaged_slots, max_slot, 0.0);
-        if moves.is_empty() {
-            break;
-        }
-        for (env_name, new_slot) in moves {
-            if let Some(env) = managed.iter_mut().find(|e| e.name == env_name) {
-                env.slot = new_slot;
-            }
-        }
+    while let Some(mv) = find_best_move(&managed, unmanaged_slots, max_slot, 0.0) {
+        apply_move(&mut managed, mv);
     }
 
     let targets: HashMap<EnvName, Slot> = managed.into_iter().map(|e| (e.name, e.slot)).collect();
@@ -149,11 +146,8 @@ pub fn optimize_single_step(
     stability_threshold: f64,
 ) -> LayoutSpec {
     let mut managed: Vec<Env> = existing.to_vec();
-    let moves = find_best_move(&managed, unmanaged_slots, max_slot, stability_threshold);
-    for (env_name, new_slot) in moves {
-        if let Some(env) = managed.iter_mut().find(|e| e.name == env_name) {
-            env.slot = new_slot;
-        }
+    if let Some(mv) = find_best_move(&managed, unmanaged_slots, max_slot, stability_threshold) {
+        apply_move(&mut managed, mv);
     }
     let targets: HashMap<EnvName, Slot> = managed.into_iter().map(|e| (e.name, e.slot)).collect();
     LayoutSpec { targets }
