@@ -71,6 +71,7 @@ fn build_gear() -> GearFileData {
                 "--init".into(),
                 "--recursive".into(),
             ],
+            run_on: vec![Hook::Cook],
         },
     )]);
     let gear = HashMap::from([(
@@ -78,7 +79,6 @@ fn build_gear() -> GearFileData {
         Gear {
             description: GEAR_DESCRIPTION.into(),
             cli,
-            run_on: vec![Hook::Cook],
             ..Default::default()
         },
     )]);
@@ -248,6 +248,6 @@ mod tests {
             entry.command,
             vec!["git", "submodule", "update", "--init", "--recursive"]
         );
-        assert_eq!(gear.run_on, vec![Hook::Cook]);
+        assert_eq!(entry.run_on, vec![Hook::Cook]);
     }
 }

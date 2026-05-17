@@ -99,10 +99,6 @@ pub struct Gear {
     pub linux_gui: HashMap<String, GuiEntry>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub cli: HashMap<String, CliEntry>,
-    /// Hook points on which every `cli` entry of this gear is auto-fired.
-    /// Empty (default) means user-invoked only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub run_on: Vec<Hook>,
 }
 
 /// A point at which gear can be auto-fired. Unknown values in a gear
@@ -139,12 +135,18 @@ pub struct GuiEntry {
 /// upstream sources (justfile recipes without doc comments, etc.) may not
 /// provide one. The dispatcher (`enw :<gear> <entry>`) resolves the entry
 /// and execs `command` followed by any user-supplied passthrough args.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+///
+/// `run_on` lists hook points on which the daemon fires this entry
+/// automatically (in addition to the user-invoked path). Empty (default)
+/// means user-invoked only.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CliEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_on: Vec<Hook>,
 }
 
 /// All gear collected for an env, merged across every `gear.d/*.json`
@@ -362,11 +364,15 @@ mod tests {
         )]
         #[case::run_on_unknown_event(
             r#"{ "version": 1, "gear": { "g": { "description": "x",
-                "run-on": [ "deactivate" ] } } }"#
+                "cli": { "x": { "command": ["true"], "run-on": [ "deactivate" ] } } } } }"#
         )]
         #[case::run_on_non_array(
             r#"{ "version": 1, "gear": { "g": { "description": "x",
-                "run-on": "cook" } } }"#
+                "cli": { "x": { "command": ["true"], "run-on": "cook" } } } } }"#
+        )]
+        #[case::run_on_at_gear_level_rejected(
+            r#"{ "version": 1, "gear": { "g": { "description": "x",
+                "run-on": ["cook"] } } }"#
         )]
         fn rejects_invalid_schema(#[case] json: &str) {
             let result: Result<GearFileData, _> = serde_json::from_str(json);
@@ -433,6 +439,7 @@ mod tests {
             let entry = CliEntry {
                 description: None,
                 command: vec!["just".into(), "deploy".into()],
+                ..Default::default()
             };
             let json = serde_json::to_string(&entry).expect("CliEntry must serialize");
             assert!(
@@ -446,6 +453,7 @@ mod tests {
             let original = CliEntry {
                 description: Some("Build the project".into()),
                 command: vec!["just".into(), "build".into()],
+                ..Default::default()
             };
             let json = serde_json::to_string(&original).unwrap();
             let parsed: CliEntry = serde_json::from_str(&json).unwrap();
@@ -494,18 +502,19 @@ mod tests {
         }
 
         #[test]
-        fn gear_entry_without_run_on_field_defaults_to_empty() {
+        fn cli_entry_without_run_on_field_defaults_to_empty() {
             let json = r#"{
                 "version": 1,
                 "gear": {
-                    "no-autorun": {
-                        "description": "A gear with no autorun"
+                    "g": {
+                        "description": "x",
+                        "cli": { "build": { "command": ["just", "build"] } }
                     }
                 }
             }"#;
             let parsed: GearFileData = serde_json::from_str(json)
                 .expect("missing `run-on` should default to empty vec, not error");
-            assert!(parsed.gear["no-autorun"].run_on.is_empty());
+            assert!(parsed.gear["g"].cli["build"].run_on.is_empty());
         }
 
         #[test]
@@ -517,16 +526,16 @@ mod tests {
                         "description": "Initialise git submodules",
                         "cli": {
                             "update": {
-                                "command": ["git", "submodule", "update", "--init", "--recursive"]
+                                "command": ["git", "submodule", "update", "--init", "--recursive"],
+                                "run-on": ["cook"]
                             }
-                        },
-                        "run-on": ["cook"]
+                        }
                     }
                 }
             }"#;
             let parsed: GearFileData = serde_json::from_str(json).unwrap();
-            let gear = &parsed.gear["init-submodules"];
-            assert_eq!(gear.run_on, vec![Hook::Cook]);
+            let entry = &parsed.gear["init-submodules"].cli["update"];
+            assert_eq!(entry.run_on, vec![Hook::Cook]);
 
             let reserialized = serde_json::to_string(&parsed).unwrap();
             assert!(reserialized.contains(r#""run-on":["cook"]"#));
@@ -534,11 +543,12 @@ mod tests {
 
         #[test]
         fn empty_run_on_serializes_without_the_field() {
-            let gear = Gear {
-                description: "x".into(),
+            let entry = CliEntry {
+                description: None,
+                command: vec!["just".into(), "build".into()],
                 ..Default::default()
             };
-            let json = serde_json::to_string(&gear).expect("Gear must serialize");
+            let json = serde_json::to_string(&entry).expect("CliEntry must serialize");
             assert!(
                 !json.contains("run-on") && !json.contains("run_on"),
                 "empty run_on must be omitted from JSON, got: {json}"

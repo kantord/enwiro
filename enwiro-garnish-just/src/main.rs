@@ -89,6 +89,7 @@ fn build_gear(project_dir: &Path) -> anyhow::Result<GearFileData> {
                 CliEntry {
                     description: r.doc,
                     command: vec![JUST_BINARY.into(), name],
+                    ..Default::default()
                 },
             )
         })

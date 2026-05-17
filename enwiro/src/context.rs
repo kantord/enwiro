@@ -114,7 +114,7 @@ impl<W: Write> CommandContext<W> {
 
     /// Run every discovered Garnish plugin against the cooked project;
     /// write each contribution to `gear.d/garnish-<name>.json`, then
-    /// fire any cli entries flagged for `run_on: [Cook]`. Best-effort
+    /// fire any cli entry whose `run_on` contains `Cook`. Best-effort
     /// throughout — per-Garnish failures and autorun spawn failures
     /// are debug-logged and swallowed.
     fn write_garnish_gear(&self, project_dir: &str, flat_name: &str) {
@@ -210,17 +210,17 @@ impl<W: Write> CommandContext<W> {
     }
 }
 
-/// For every gear in `data` whose `run_on` contains `Cook`, spawn each
-/// of its `cli` entries in `project_path`. Best-effort: empty commands
-/// and spawn failures are debug-logged and skipped. Spawned children
-/// are not waited on — the daemon never blocks on autorun.
+/// For every cli entry in `data` whose `run_on` contains `Cook`, spawn
+/// it in `project_path`. Best-effort: empty commands and spawn failures
+/// are debug-logged and skipped. Spawned children are not waited on —
+/// the daemon never blocks on autorun.
 fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Path) {
     use enwiro_sdk::gear::Hook;
     for (gear_name, gear) in &data.gear {
-        if !gear.run_on.contains(&Hook::Cook) {
-            continue;
-        }
         for (entry_name, entry) in &gear.cli {
+            if !entry.run_on.contains(&Hook::Cook) {
+                continue;
+            }
             let Some((bin, args)) = entry.command.split_first() else {
                 tracing::debug!(
                     gear = gear_name,

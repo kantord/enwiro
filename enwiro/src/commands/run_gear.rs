@@ -195,6 +195,7 @@ mod tests {
         CliEntry {
             description: None,
             command: command.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
         }
     }
 
@@ -311,6 +312,7 @@ mod tests {
                         CliEntry {
                             description: desc.map(str::to_owned),
                             command: vec!["just".into(), (*name).into()],
+                            ..Default::default()
                         },
                     )
                 })
