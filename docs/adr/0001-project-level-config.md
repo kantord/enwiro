@@ -37,11 +37,16 @@ yet, so the on-disk layout can change.
   helper that non-Rust cookbooks can bypass.
 - **Plugin extensibility**: cookbooks can be any language, discovered by PATH
   prefix (`enwiro-cookbook-*`). The protocol can't assume Rust.
-- **No autorun**: enwiro must not execute commands as a side-effect of reading
-  configuration. Project-wide rule, inherited by every future config feature.
-  Autorun features may exist, but only on paths where the script is derived
-  from something the user explicitly installed or allowed (e.g. installing a
-  cookbook).
+- **No autorun via the config system**: enwiro must not execute commands as a
+  side-effect of reading project-level configuration. Project-wide rule,
+  inherited by every future config feature.
+
+  Autorun via the **gear system** (cookbook- or Garnish-emitted commands with
+  `run_on: [...]`) is permitted: installing a cookbook or Garnish *is* the
+  security gate, and the plugin author owns the security implications of what
+  they autorun. A plugin MUST NOT autorun commands derived from arbitrary
+  project state (e.g. shell snippets pulled out of a project's own files) —
+  only commands the plugin's own code constructs.
 - **Prefer mature, boring libraries** when no feature is load-bearing.
 - **Don't preclude future work**: format and protocol must not block a future
   expression layer (CEL, #206) or cookbook inheritance (#301).

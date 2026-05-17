@@ -247,6 +247,111 @@ fn fire_autorun_on_cook(data: &enwiro_sdk::gear::GearFileData, project_path: &Pa
 }
 
 #[cfg(test)]
+mod fire_autorun_tests {
+    use super::fire_autorun_on_cook;
+    use enwiro_sdk::gear::{CliEntry, Gear, GearFileData, Hook, SCHEMA_VERSION};
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    fn touch_command(path: &Path) -> Vec<String> {
+        vec!["touch".into(), path.to_str().unwrap().into()]
+    }
+
+    /// Spawn is non-blocking, so we poll for the sentinel to appear.
+    fn wait_for(path: &Path, max: Duration) -> bool {
+        let deadline = Instant::now() + max;
+        while Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        path.exists()
+    }
+
+    /// Fires Cook-tagged entries, skips entries without `run_on: [Cook]`.
+    #[test]
+    fn fires_cook_entries_and_skips_untagged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fires = tmp.path().join("fires");
+        let skipped = tmp.path().join("skipped");
+
+        let mut cli = HashMap::new();
+        cli.insert(
+            "should-fire".to_owned(),
+            CliEntry {
+                description: None,
+                command: touch_command(&fires),
+                run_on: vec![Hook::Cook],
+            },
+        );
+        cli.insert(
+            "should-skip".to_owned(),
+            CliEntry {
+                description: None,
+                command: touch_command(&skipped),
+                run_on: vec![],
+            },
+        );
+        let mut gear_map = HashMap::new();
+        gear_map.insert(
+            "g".to_owned(),
+            Gear {
+                description: "test".into(),
+                cli,
+                ..Default::default()
+            },
+        );
+        let data = GearFileData {
+            version: SCHEMA_VERSION,
+            gear: gear_map,
+        };
+
+        fire_autorun_on_cook(&data, tmp.path());
+
+        assert!(
+            wait_for(&fires, Duration::from_secs(2)),
+            "Cook-tagged entry should have fired (sentinel at {fires:?} missing)"
+        );
+        assert!(
+            !skipped.exists(),
+            "Untagged entry must not fire (unexpected sentinel at {skipped:?})"
+        );
+    }
+
+    /// Empty command must not panic or crash; the entry is just skipped.
+    #[test]
+    fn empty_command_is_skipped_silently() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cli = HashMap::new();
+        cli.insert(
+            "empty".to_owned(),
+            CliEntry {
+                description: None,
+                command: vec![],
+                run_on: vec![Hook::Cook],
+            },
+        );
+        let mut gear_map = HashMap::new();
+        gear_map.insert(
+            "g".to_owned(),
+            Gear {
+                description: "test".into(),
+                cli,
+                ..Default::default()
+            },
+        );
+        let data = GearFileData {
+            version: SCHEMA_VERSION,
+            gear: gear_map,
+        };
+
+        fire_autorun_on_cook(&data, tmp.path()); // must not panic
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use rstest::rstest;
     use std::fs;
