@@ -1,15 +1,8 @@
-//! Layer 3 → Layer 2 — diff `current` vs `LayoutSpec`, produce a `Plan`.
-//!
-//! Uses optative's `Lifecycle` + `ManagedSet::reconcile`:
-//! - Seed the managed set with current i3 state via the local
-//!   `ManagedSet::insert` extension (no `enter` calls).
-//! - Reconcile against the desired layout.
-//! - `enter` is called for envs in desired but not in current → these are
-//!   the spawn (at most one per activation, asserted).
-//! - `reconcile_self` is called for envs in both → emit `Relocation` if the
-//!   slot changed.
-//! - `exit` is called for envs in current but not in desired → never used
-//!   for rebalance (we don't deactivate envs through reconciliation).
+//! Diff current i3 state against a target `LayoutSpec`, producing a `Plan`.
+//! Uses optative's reconcile machinery: envs only in the spec become
+//! `Spawn`; envs at a different slot become `Relocation`. The "more than
+//! one new env per activation" invariant comes from upstream (the activate
+//! handler creates at most one); we `debug_assert!` it inside `enter`.
 
 use super::optative::{Lifecycle, ManagedSet, Reconcile};
 use super::plan::*;
@@ -19,7 +12,6 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 
-/// Lifecycle item: "this env should be at this slot."
 struct ManagedEnv {
     env: EnvName,
     target: Slot,
@@ -72,7 +64,7 @@ impl Lifecycle for ManagedEnv {
     }
 
     fn exit(_state: Slot, _ctx: &mut (), _out: &mut Plan) -> Result<(), Infallible> {
-        // Rebalance never deactivates envs.
+        // Rebalance never deactivates envs; managed-set drop is a no-op.
         Ok(())
     }
 }

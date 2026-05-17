@@ -1,18 +1,16 @@
-//! The only function in the rebalance pipeline that knows about i3's quirks:
-//! reserved `__` prefix, num collisions (resolved by park-then-place), and
-//! spawn-last ordering. Everything above this layer is data; this is where
-//! the i3 protocol surfaces.
+//! Plan → i3-op sequence. The only place that knows about i3's quirks
+//! (reserved `__` prefix, num collisions, empty-ws reaping).
 //!
 //! Correctness sketch:
-//! 1. Park phase: every relocated workspace is renamed to a unique
-//!    non-numbered name. After phase 1, no target num of any place is
-//!    occupied by a live workspace.
-//! 2. Place phase: each parked workspace is renamed to `N: env`. Each
-//!    succeeds — the parked workspace still exists under its unique parking
-//!    name, and the target num was vacated in phase 1.
-//! 3. Spawn (if any): `workspace "N: env"` creates + focuses. Its target
-//!    slot is either initially empty (no relocation targeted it) or vacated
-//!    in phase 1+2.
+//! 1. Park each relocated workspace under a unique non-numbered name.
+//!    After this phase no place-target num is occupied by a live workspace.
+//! 2. Place each parked workspace at its target — succeeds because the
+//!    parked workspace still exists under its unique name and the target
+//!    num was vacated in phase 1.
+//! 3. Spawn (if any) goes last: its slot is either initially empty (no
+//!    relocation targeted it) or vacated in phase 1+2. Emitted as a single
+//!    `workspace "N: env"` which creates+focuses atomically — there's no
+//!    window where an empty unfocused workspace exists for i3 to reap.
 
 use super::i3_op::I3Op;
 use super::plan::*;
@@ -47,9 +45,6 @@ mod tests {
     use super::super::i3_model::I3Model;
     use super::*;
 
-    /// Helper: build a tiny initial model where every relocation's `from`
-    /// has content (real workspace) and the env named by `spawn` does NOT
-    /// exist yet.
     fn model_for(plan: &Plan) -> I3Model {
         let mut m = I3Model::default();
         for r in &plan.relocations {
@@ -72,7 +67,7 @@ mod tests {
             }),
         };
         let ops = compile(&plan);
-        assert_eq!(ops.len(), 3); // 1 park + 1 place + 1 spawn
+        assert_eq!(ops.len(), 3);
     }
 
     #[test]
@@ -81,9 +76,6 @@ mod tests {
         assert_eq!(compile(&plan), vec![]);
     }
 
-    /// Bug class 1: rename of non-existent OLD. Cannot happen because
-    /// every `Relocation` carries an env that the model is seeded for.
-    /// This test pushes the swap-cycle scenario through compile + sim.
     #[test]
     fn compile_handles_swap_without_duplicate_num() {
         let plan = Plan {
@@ -105,7 +97,6 @@ mod tests {
         for op in compile(&plan) {
             model.apply(&op).expect("compile must produce valid ops");
         }
-        // Final state: x at 6, y at 5.
         assert!(
             model
                 .ws
@@ -118,10 +109,6 @@ mod tests {
         );
     }
 
-    /// Bug class 4: spawn before relocations would leave a focused-empty
-    /// workspace during renames, which i3 then reaps. Compile emits spawn
-    /// LAST by construction. This test exercises the swap + spawn case end
-    /// to end and asserts the final state matches.
     #[test]
     fn compile_spawn_lands_at_target_after_relocations() {
         let plan = Plan {
@@ -151,10 +138,6 @@ mod tests {
         );
     }
 
-    /// The four-workspace cycle from yesterday's bug ("avoid empty-workspace
-    /// race"). Existing path produced a 4-park sequence where the new env
-    /// (which didn't exist) was parked last and i3 had already reaped it.
-    /// The new design separates Spawn from relocations entirely.
     #[test]
     fn compile_three_way_cycle_with_spawn_succeeds() {
         let plan = Plan {

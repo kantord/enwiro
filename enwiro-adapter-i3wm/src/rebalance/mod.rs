@@ -9,3 +9,6 @@ pub mod types;
 
 #[cfg(test)]
 pub mod i3_model;
+
+#[cfg(test)]
+mod regression;

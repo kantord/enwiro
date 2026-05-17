@@ -1,14 +1,12 @@
-//! Layer 4 → 3 — score-based optimization. Given the current managed envs +
-//! their scores, the incoming env, and which slots are occupied by unmanaged
-//! workspaces, return a `LayoutSpec` of target slot assignments.
+//! Score-based optimization: given current managed envs + scores, incoming
+//! env, and unmanaged-occupied slots, produce a `LayoutSpec` of target slots.
 //!
-//! Direct port of `find_best_move` + `boost_incoming_score` + the convergence
-//! loop from `main.rs`, restated against typed `Env` / `Slot` inputs.
-//!
-//! The algorithm itself is unchanged — the simulator-validation gate proves
-//! the rename-pair sequence the OLD code produces is i3-safe, and `compile`
-//! produces the same rename pairs from any equivalent `LayoutSpec`. Porting
-//! is therefore a pure type-level refactor; the scoring logic stays.
+//! Two move kinds drive convergence:
+//! - **Score-swap** between two managed slots when a higher-score env sits at
+//!   a worse slot. NetBenefit guarded by `STABILITY_THRESHOLD` to prevent
+//!   thrash between near-equal envs.
+//! - **Compaction** into an empty slot below an env's current slot. No
+//!   threshold — filling an empty slot has no thrashing risk.
 
 use super::spec::LayoutSpec;
 use super::types::*;
@@ -16,31 +14,30 @@ use std::collections::HashMap;
 
 pub const STABILITY_THRESHOLD: f64 = 0.05;
 
-/// DCG position discount — value of occupying slot `i`.
+/// DCG position discount — the value of occupying a given slot. Lower slot →
+/// higher discount; convergence pushes high-score envs toward low slots.
 fn disc(slot: Slot) -> f64 {
     1.0_f64 / (slot.0 as f64 + 1.0).log2()
 }
 
-/// One iteration: pick the single highest-net-benefit move (swap or
-/// compaction) and return how to apply it. Empty if no profitable move.
-///
-/// Output: a `Vec<(EnvName, Slot)>` listing each env that moves and its new
-/// slot. Swap → 2 entries; compaction → 1 entry; nothing to do → 0 entries.
+enum BestMove {
+    Swap { lo_idx: usize, hi_idx: usize },
+    Compaction { env_idx: usize, target: Slot },
+}
+
 fn find_best_move(
     managed: &[Env],
     unmanaged_slots: &[Slot],
     max_slot: Slot,
     stability_threshold: f64,
 ) -> Vec<(EnvName, Slot)> {
-    // Slots physically taken (managed + unmanaged) — used to detect truly empty slots.
     let mut all_occupied: std::collections::HashSet<Slot> =
         managed.iter().map(|e| e.slot).collect();
     all_occupied.extend(unmanaged_slots.iter().copied());
 
     let mut best_nb: f64 = 0.0;
-    let mut best_move: Option<(usize, usize, bool)> = None; // (lo_idx, hi_idx, is_swap)
+    let mut best: Option<BestMove> = None;
 
-    // Score-swap: both slots managed-occupied, slot_lo < slot_hi, score_hi > score_lo.
     for i in 0..managed.len() {
         for j in (i + 1)..managed.len() {
             let (lo_idx, hi_idx) = if managed[i].slot < managed[j].slot {
@@ -55,55 +52,46 @@ fn find_best_move(
                     (score_hi - score_lo) * (disc(slot_lo) - disc(slot_hi)) - stability_threshold;
                 if nb > best_nb {
                     best_nb = nb;
-                    best_move = Some((lo_idx, hi_idx, true));
+                    best = Some(BestMove::Swap { lo_idx, hi_idx });
                 }
             }
         }
     }
 
-    // Compaction: empty slot_i in [1..=max_slot], managed env at slot_j > slot_i.
     for raw in 1..=max_slot.0 {
-        let slot_i = Slot(raw);
-        if all_occupied.contains(&slot_i) {
+        let target = Slot(raw);
+        if all_occupied.contains(&target) {
             continue;
         }
-        for (j_idx, env_j) in managed.iter().enumerate() {
-            if env_j.slot <= slot_i || env_j.score <= 0.0 {
+        for (env_idx, env_j) in managed.iter().enumerate() {
+            if env_j.slot <= target || env_j.score <= 0.0 {
                 continue;
             }
-            let nb = env_j.score * (disc(slot_i) - disc(env_j.slot));
+            let nb = env_j.score * (disc(target) - disc(env_j.slot));
             if nb > best_nb {
                 best_nb = nb;
-                // Encode compaction as (target_idx_placeholder, env_j_idx, false).
-                // We don't have a managed entry at the target slot; we use the
-                // env_j index and the raw target slot via the bool=false branch
-                // below, but we still need slot_i to emit the rename. Stash
-                // slot_i in the loop variable via a wrapping technique:
-                // simplest is to recompute on the match arm.
-                best_move = Some((slot_i.0 as usize, j_idx, false));
+                best = Some(BestMove::Compaction { env_idx, target });
             }
         }
     }
 
-    match best_move {
+    match best {
         None => Vec::new(),
-        Some((lo_idx, hi_idx, true)) => {
-            // Swap: lo_idx env → hi.slot, hi_idx env → lo.slot.
+        Some(BestMove::Swap { lo_idx, hi_idx }) => {
             let lo = &managed[lo_idx];
             let hi = &managed[hi_idx];
             vec![(lo.name.clone(), hi.slot), (hi.name.clone(), lo.slot)]
         }
-        Some((target_slot_raw, j_idx, false)) => {
-            // Compaction: env_j moves to slot encoded in lo_idx (= raw slot number).
-            vec![(managed[j_idx].name.clone(), Slot(target_slot_raw as i32))]
+        Some(BestMove::Compaction { env_idx, target }) => {
+            vec![(managed[env_idx].name.clone(), target)]
         }
     }
 }
 
-/// If `env_name` sits at a slot > `max_slot` and its current score is below
-/// the minimum score among managed shortcut envs, raise it to just above that
-/// minimum. This guarantees the env will win exactly one swap into the
-/// shortcut zone during the convergence loop.
+/// Recency boost: ensures a newly-activated env that landed outside the
+/// shortcut zone wins exactly one swap into it, even if its on-disk score
+/// is stale. Implements the "just activated" signal that hasn't been
+/// persisted yet.
 fn boost_incoming_score(managed: &mut [Env], env_name: &EnvName, max_slot: Slot) {
     let Some(incoming) = managed.iter().find(|e| &e.name == env_name) else {
         return;
@@ -123,12 +111,9 @@ fn boost_incoming_score(managed: &mut [Env], env_name: &EnvName, max_slot: Slot)
     }
 }
 
-/// Score-based optimization. Builds the desired layout for managed envs after
-/// the incoming env joins. `unmanaged_slots` are physically occupied but
-/// untouchable.
-///
-/// `incoming.slot` is the free slot we'll initially park the new env at; the
-/// algorithm may move it to a better slot in the shortcut zone.
+/// Converges the layout until no profitable move remains. `incoming.slot`
+/// is the free slot the new env temporarily occupies in the optimization
+/// model; the returned `LayoutSpec` may place it elsewhere.
 pub fn optimize(
     existing: &[Env],
     incoming: Env,
@@ -155,9 +140,8 @@ pub fn optimize(
     LayoutSpec { targets }
 }
 
-/// Single-iteration optimization for the listener path. Returns a `LayoutSpec`
-/// that differs from the current layout by at most one swap or compaction.
-/// Uses the supplied `stability_threshold` to suppress thrash.
+/// Listener-path variant: at most one swap or compaction per call,
+/// caller-supplied threshold. Pairs with rate-limited debounce upstream.
 pub fn optimize_single_step(
     existing: &[Env],
     unmanaged_slots: &[Slot],
