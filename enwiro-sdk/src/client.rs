@@ -94,10 +94,23 @@ impl CookbookClient {
 
     #[cfg(test)]
     fn with_metadata(plugin: Plugin, metadata: CookbookMetadata) -> Self {
+        Self::with_metadata_and_config(
+            plugin,
+            metadata,
+            serde_json::Value::Object(Default::default()),
+        )
+    }
+
+    #[cfg(test)]
+    fn with_metadata_and_config(
+        plugin: Plugin,
+        metadata: CookbookMetadata,
+        config: serde_json::Value,
+    ) -> Self {
         Self {
             plugin,
             metadata,
-            config: serde_json::Value::Object(Default::default()),
+            config,
         }
     }
 
@@ -386,5 +399,84 @@ echo "$payload"
         let payload: CookbookPayload =
             serde_json::from_str(&stdout).expect("cookbook saw a valid CookbookPayload on stdin");
         assert_eq!(payload.version, 1, "payload version should be 1");
+    }
+
+    /// End-to-end integration: a project-level `.enwiro.toml` is found by
+    /// the SDK loader, filtered through a cookbook's `project_overridable`
+    /// allowlist, merged on top of the user-level config, and piped into a
+    /// language-agnostic (shell-script) cookbook over stdin. This satisfies
+    /// the ADR/AC requirement of one integration test exercising a
+    /// shell-script cookbook with the full project-walker pipeline.
+    #[test]
+    fn test_shell_cookbook_receives_merged_project_layer_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let home_dir = tempdir.path().join("home");
+        let project_dir = tempdir.path().join("proj");
+        std::fs::create_dir_all(&home_dir).expect("mkdir home");
+        std::fs::create_dir_all(&project_dir).expect("mkdir project");
+
+        // User-level config for the fake cookbook (scope `cookbook-fake`).
+        let user_config_dir = home_dir.join(".config/enwiro");
+        std::fs::create_dir_all(&user_config_dir).expect("mkdir user config dir");
+        std::fs::write(
+            user_config_dir.join("cookbook-fake.toml"),
+            "repo_globs = [\"from-user\"]\n",
+        )
+        .expect("write user config");
+
+        // Project-level `.enwiro.toml` overrides `repo_globs` (allowlisted)
+        // and tries to set `not_allowed` (should be dropped).
+        std::fs::write(
+            project_dir.join(".enwiro.toml"),
+            "[cookbook-fake]\nrepo_globs = [\"from-project\"]\nnot_allowed = \"x\"\n",
+        )
+        .expect("write project config");
+
+        // Fake shell-script cookbook that echoes the payload on `cook`.
+        let script = project_dir.join("fake-cookbook");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+payload=$(cat)
+echo "$payload"
+"#,
+        )
+        .expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        // Resolve config via the SDK's loader with the project as cwd.
+        let config = crate::config::ConfigLoader::with_home(home_dir.clone())
+            .build_cookbook_config(&project_dir, "cookbook-fake", &["repo_globs"])
+            .expect("build_cookbook_config succeeds");
+
+        let metadata = CookbookMetadata {
+            default_priority: Some(99),
+            project_overridable: vec!["repo_globs".to_string()],
+        };
+        let plugin = Plugin {
+            name: "fake".to_string(),
+            kind: PluginKind::Cookbook,
+            executable: script.to_string_lossy().into_owned(),
+        };
+        let client = CookbookClient::with_metadata_and_config(plugin, metadata, config);
+
+        let stdout = client.cook("anything").expect("cook returns stdout");
+        let payload: CookbookPayload =
+            serde_json::from_str(&stdout).expect("cookbook saw a valid CookbookPayload on stdin");
+
+        assert_eq!(payload.version, 1, "payload version should be 1");
+        assert_eq!(
+            payload.config["repo_globs"],
+            serde_json::json!(["from-project"]),
+            "project layer must win over user layer for the allowlisted key"
+        );
+        assert!(
+            payload.config.get("not_allowed").is_none(),
+            "non-allowlisted key must be dropped before reaching the cookbook; got {:?}",
+            payload.config
+        );
     }
 }
