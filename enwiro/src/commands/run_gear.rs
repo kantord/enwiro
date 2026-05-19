@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow, bail};
 
 use enwiro_sdk::gear::{CliEntry, Gear, LoadedGear};
+use enwiro_sdk::process::ENWIRO_ENV_VAR;
 
-const ACTIVE_ENV_VAR: &str = "ENWIRO_ENV";
 const NONE_PLACEHOLDER: &str = "<none>";
 
 /// Short form of the pre-positional confirmation-bypass flag. The flag
@@ -87,9 +87,9 @@ pub fn env_project_dir(workspaces_directory: &Path, env_name: &str) -> PathBuf {
 }
 
 pub fn active_env_name() -> anyhow::Result<String> {
-    std::env::var(ACTIVE_ENV_VAR).with_context(|| {
+    std::env::var(ENWIRO_ENV_VAR).with_context(|| {
         format!(
-            "${ACTIVE_ENV_VAR} is unset; run `enw activate <name>` first or invoke from inside a wrapped env"
+            "${ENWIRO_ENV_VAR} is unset; run `enw activate <name>` first or invoke from inside a wrapped env"
         )
     })
 }
@@ -124,21 +124,27 @@ pub fn resolve_entry<'a>(
     })
 }
 
-/// Reject a `require_confirmation` entry when `-y` was not passed.
-/// The error embeds a ready-to-run `enw -y :<gear> <entry>` so the
-/// caller can retry by appending one token.
+/// Reject a `require_confirmation` entry when `-y` was not passed and the
+/// user declines (or can't) the interactive prompt. On a tty, an unsafe
+/// entry without `-y` triggers a y/N prompt; off-tty (CI, scripts) the
+/// helper refuses outright. Either refusal returns the same error shape,
+/// which embeds a ready-to-run `enw -y :<gear> <entry>`.
 pub fn ensure_confirmed(
     gear_name: &str,
     entry_name: &str,
     entry: &CliEntry,
     yes: bool,
 ) -> anyhow::Result<()> {
-    if entry.require_confirmation && !yes {
-        bail!(
-            "gear entry `:{gear_name} {entry_name}` requires confirmation; pass `-y` (e.g. `enw -y :{gear_name} {entry_name}`) to run it"
-        );
+    if !entry.require_confirmation || yes {
+        return Ok(());
     }
-    Ok(())
+    let prompt = format!("Run :{gear_name} {entry_name}?");
+    if crate::confirm::confirm(&prompt).unwrap_or(false) {
+        return Ok(());
+    }
+    bail!(
+        "gear entry `:{gear_name} {entry_name}` requires confirmation; pass `-y` (e.g. `enw -y :{gear_name} {entry_name}`) to run it"
+    );
 }
 
 pub fn build_argv(entry: &CliEntry, passthrough: &[OsString]) -> Vec<OsString> {
@@ -495,13 +501,13 @@ mod tests {
 
         #[test]
         fn active_env_name_errors_when_unset() {
-            let prior = std::env::var(ACTIVE_ENV_VAR).ok();
+            let prior = std::env::var(ENWIRO_ENV_VAR).ok();
             // SAFETY: serial within this file; no parallel readers of ENWIRO_ENV.
-            unsafe { std::env::remove_var(ACTIVE_ENV_VAR) };
+            unsafe { std::env::remove_var(ENWIRO_ENV_VAR) };
             let err = active_env_name().unwrap_err();
             assert!(err.to_string().contains("ENWIRO_ENV"));
             if let Some(v) = prior {
-                unsafe { std::env::set_var(ACTIVE_ENV_VAR, v) };
+                unsafe { std::env::set_var(ENWIRO_ENV_VAR, v) };
             }
         }
     }
