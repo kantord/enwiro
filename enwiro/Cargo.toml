@@ -26,7 +26,7 @@ strum_macros = "0.28.0"
 notify-rust = "4"
 tracing.workspace = true
 dirs = "6"
-dialoguer = { version = "0.11", default-features = false }
+dialoguer = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 assertables = "9.0.0"
