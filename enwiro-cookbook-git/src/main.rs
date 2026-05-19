@@ -9,6 +9,7 @@ use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ConfigurationValues {
     pub repo_globs: Vec<String>,
     pub worktree_dir: Option<String>,

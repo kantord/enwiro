@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ConfigurationValues {
     pub workspaces_directory: String,
     pub adapter: Option<String>,

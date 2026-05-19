@@ -150,7 +150,12 @@ fn filter_project_layer(path: &Path, scope: &str, allowlist: &[&str]) -> Option<
         if allowlist.contains(&k.as_str()) {
             kept.insert(k.clone(), v.clone());
         } else {
-            tracing::debug!(scope, key = %k, "Dropping non-allowlisted project config key");
+            tracing::debug!(
+                path = %path.display(),
+                scope,
+                key = %k,
+                "Dropping non-allowlisted project config key"
+            );
         }
     }
 
@@ -323,6 +328,20 @@ mod tests {
             .build_cookbook_config(env.cwd.path(), "cookbook-git", &["repo_globs"])
             .unwrap();
         assert_eq!(v, json!({ "repo_globs": ["u"] }));
+    }
+
+    #[test]
+    fn build_cookbook_config_returns_empty_when_no_files_anywhere() {
+        let env = Env::new();
+        let v = env
+            .loader()
+            .build_cookbook_config(env.cwd.path(), "missing-scope", &["x"])
+            .expect("no-files build_cookbook_config must succeed");
+        assert_eq!(
+            v,
+            json!({}),
+            "with no user file and no project file, the loader must return an empty JSON object so cookbooks with #[serde(default)] structs can deserialize to defaults"
+        );
     }
 
     #[test]

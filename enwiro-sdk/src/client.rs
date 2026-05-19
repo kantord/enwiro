@@ -401,6 +401,67 @@ echo "$payload"
         assert_eq!(payload.version, 1, "payload version should be 1");
     }
 
+    /// Regression guard for AC #1: "without `.enwiro.toml` present, behavior
+    /// is identical to today (user-level files still loaded; no regression)."
+    /// With no user-level TOML and no project-level TOML, the SDK must
+    /// produce an empty-object config so cookbook structs with
+    /// `#[serde(default)]` can deserialize to defaults instead of erroring
+    /// on missing fields. Also exercises the shell-script cookbook path
+    /// (proves the language-agnostic protocol works with no payload).
+    #[test]
+    fn test_shell_cookbook_receives_defaults_when_no_user_or_project_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let home_dir = tempdir.path().join("home");
+        let project_dir = tempdir.path().join("proj");
+        std::fs::create_dir_all(&home_dir).expect("mkdir home");
+        std::fs::create_dir_all(&project_dir).expect("mkdir project");
+
+        // Deliberately do NOT write any user or project config files.
+
+        let script = project_dir.join("fake-cookbook");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+payload=$(cat)
+echo "$payload"
+"#,
+        )
+        .expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let config = crate::config::ConfigLoader::with_home(home_dir.clone())
+            .build_cookbook_config(&project_dir, "cookbook-fake", &["repo_globs"])
+            .expect("no-files build_cookbook_config succeeds");
+
+        // The loader must give the cookbook an object (not null) so that
+        // `serde_json::from_value::<CookbookConfig>(payload.config)` against
+        // a struct with `#[serde(default)]` deserializes to defaults.
+        assert!(
+            config.is_object(),
+            "config from a no-files load must be a JSON object so #[serde(default)] structs deserialize cleanly; got {config:?}"
+        );
+
+        let plugin = Plugin {
+            name: "fake".to_string(),
+            kind: PluginKind::Cookbook,
+            executable: script.to_string_lossy().into_owned(),
+        };
+        let client =
+            CookbookClient::with_metadata_and_config(plugin, CookbookMetadata::default(), config);
+
+        let stdout = client.cook("anything").expect("cook returns stdout");
+        let payload: CookbookPayload =
+            serde_json::from_str(&stdout).expect("cookbook saw a valid CookbookPayload on stdin");
+        assert!(
+            payload.config.is_object(),
+            "cookbook must see config as an object (not null) so its #[serde(default)] struct can deserialize; got {:?}",
+            payload.config
+        );
+    }
+
     /// End-to-end integration: a project-level `.enwiro.toml` is found by
     /// the SDK loader, filtered through a cookbook's `project_overridable`
     /// allowlist, merged on top of the user-level config, and piped into a

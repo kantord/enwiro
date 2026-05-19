@@ -62,6 +62,11 @@ impl CookbookPayload {
         }
     }
 
+    /// Read the payload from stdin. Empty stdin yields a payload whose
+    /// `config` is an empty JSON object — this lets cookbooks with
+    /// `#[serde(default)]` structs deserialize to defaults rather than
+    /// erroring with `invalid type: null` when invoked directly for
+    /// debugging without the SDK piping a real payload.
     pub fn read_from_stdin() -> anyhow::Result<Self> {
         use std::io::Read;
         let mut buf = String::new();
@@ -69,7 +74,10 @@ impl CookbookPayload {
             .read_to_string(&mut buf)
             .context("Could not read cookbook payload from stdin")?;
         if buf.trim().is_empty() {
-            return Ok(Self::default());
+            return Ok(Self {
+                version: COOKBOOK_PAYLOAD_VERSION,
+                config: serde_json::Value::Object(Default::default()),
+            });
         }
         serde_json::from_str(&buf).context("Could not parse cookbook payload as JSON")
     }
