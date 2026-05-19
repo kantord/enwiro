@@ -65,8 +65,11 @@ fn is_dispatch_invocation(argv: &[OsString]) -> bool {
 fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro.log");
 
+    let cwd = std::env::current_dir().context("Could not determine current directory")?;
+    let config_json = enwiro_sdk::config::build_cookbook_config(&cwd, "enwiro", &[])
+        .context("Could not load configuration")?;
     let config: ConfigurationValues =
-        confy::load("enwiro", "enwiro").context("Could not load configuration")?;
+        serde_json::from_value(config_json).context("Could not deserialize configuration")?;
 
     let argv: Vec<OsString> = std::env::args_os().collect();
     if is_dispatch_invocation(&argv) {

@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use enwiro_sdk::{CookbookMetadata, Recipe};
+use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -1192,26 +1192,35 @@ mod tests {
     }
 }
 
+fn read_config() -> anyhow::Result<ConfigurationValues> {
+    let payload =
+        CookbookPayload::read_from_stdin().context("Could not read cookbook payload from stdin")?;
+    let config: ConfigurationValues = serde_json::from_value(payload.config)
+        .context("Could not deserialize cookbook-git configuration")?;
+    tracing::debug!(globs = config.repo_globs.len(), "Config loaded");
+    Ok(config)
+}
+
 fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-cookbook-git.log");
 
     let args = EnwiroCookbookGit::parse();
-    let config: ConfigurationValues =
-        confy::load("enwiro", "cookbook-git").context("Could not load configuration")?;
-    tracing::debug!(globs = config.repo_globs.len(), "Config loaded");
 
     match args {
         EnwiroCookbookGit::ListRecipes(_) => {
+            let config = read_config()?;
             list_recipes(&config)?;
         }
         EnwiroCookbookGit::Cook(args) => {
+            let config = read_config()?;
             cook(&config, args)?;
         }
         EnwiroCookbookGit::Metadata => {
             println!(
                 "{}",
                 CookbookMetadata {
-                    default_priority: Some(10)
+                    default_priority: Some(10),
+                    project_overridable: vec!["repo_globs".to_string()],
                 }
                 .to_json()
             );

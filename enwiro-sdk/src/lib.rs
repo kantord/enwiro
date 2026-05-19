@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod client;
+pub mod config;
 pub mod cookbook;
 pub mod fs;
 pub mod garnish;
@@ -17,5 +18,5 @@ pub mod process;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
 
-pub use cookbook::{CookbookMetadata, Recipe};
+pub use cookbook::{CookbookMetadata, CookbookPayload, Recipe};
 pub use logging::init_logging;

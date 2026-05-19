@@ -1,8 +1,9 @@
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 
-use crate::cookbook::{CookbookMetadata, Recipe};
+use crate::cookbook::{CookbookMetadata, CookbookPayload, Recipe};
 use crate::plugin::Plugin;
 
 const DEFAULT_PRIORITY: u32 = 50;
@@ -57,17 +58,47 @@ pub fn sort_cookbooks(cookbooks: &mut [Box<dyn CookbookTrait>]) {
 pub struct CookbookClient {
     plugin: Plugin,
     metadata: CookbookMetadata,
+    config: serde_json::Value,
 }
 
 impl CookbookClient {
+    /// Construct a client whose config is resolved with the project-level
+    /// walker rooted at the current working directory. Used by the `enw`
+    /// CLI: the user invokes `enw` from a project shell, so cwd identifies
+    /// the project context.
     pub fn new(plugin: Plugin) -> Self {
         let metadata = Self::fetch_metadata(&plugin.executable);
-        Self { plugin, metadata }
+        let config = resolve_config_with_walker(&plugin, &metadata);
+        Self {
+            plugin,
+            metadata,
+            config,
+        }
+    }
+
+    /// Construct a client whose config is resolved from user-level files
+    /// only — no project-layer walk. Used by the enwiro daemon: it's a
+    /// single long-running process serving many projects with no concept
+    /// of "current project," so per-project overrides can't be applied
+    /// meaningfully. The daemon's recipe cache is correspondingly
+    /// project-independent.
+    pub fn new_user_level_only(plugin: Plugin) -> Self {
+        let metadata = Self::fetch_metadata(&plugin.executable);
+        let config = resolve_user_level_only(&plugin);
+        Self {
+            plugin,
+            metadata,
+            config,
+        }
     }
 
     #[cfg(test)]
     fn with_metadata(plugin: Plugin, metadata: CookbookMetadata) -> Self {
-        Self { plugin, metadata }
+        Self {
+            plugin,
+            metadata,
+            config: serde_json::Value::Object(Default::default()),
+        }
     }
 
     fn fetch_metadata(executable: &str) -> CookbookMetadata {
@@ -91,15 +122,80 @@ impl CookbookClient {
             }
         }
     }
+
+    /// Spawn the cookbook with the given subcommand args, write the
+    /// resolved `CookbookPayload` to its stdin, and collect output.
+    /// Centralizes the stdin pipe so every subcommand carries the same
+    /// payload.
+    fn spawn_with_payload(&self, args: &[&str]) -> anyhow::Result<Output> {
+        let mut child = Command::new(&self.plugin.executable)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Failed to spawn cookbook")?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let payload = CookbookPayload::new(self.config.clone());
+            let bytes =
+                serde_json::to_vec(&payload).context("Failed to serialize cookbook payload")?;
+            stdin
+                .write_all(&bytes)
+                .context("Failed to write cookbook payload to stdin")?;
+        }
+        child.wait_with_output().context("Cookbook process failed")
+    }
+}
+
+/// Resolve a cookbook's config with the project-layer walker rooted at
+/// the current working directory, filtered through the cookbook's
+/// `project_overridable` allowlist. Falls back to an empty JSON object
+/// (with `warn` log) on error so a single misconfigured cookbook
+/// doesn't break the whole CLI.
+fn resolve_config_with_walker(plugin: &Plugin, metadata: &CookbookMetadata) -> serde_json::Value {
+    let cwd = match std::env::current_dir() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "Could not determine cwd; cookbook config defaults to empty");
+            return serde_json::Value::Object(Default::default());
+        }
+    };
+    let scope = scope_for(plugin);
+    let allowlist: Vec<&str> = metadata
+        .project_overridable
+        .iter()
+        .map(String::as_str)
+        .collect();
+    match crate::config::build_cookbook_config(&cwd, &scope, &allowlist) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(cookbook = %plugin.name, error = %e, "Failed to resolve cookbook config; using empty config");
+            serde_json::Value::Object(Default::default())
+        }
+    }
+}
+
+/// Resolve a cookbook's config from the user-level file only. Used by
+/// the daemon, which has no meaningful "current project" cwd.
+fn resolve_user_level_only(plugin: &Plugin) -> serde_json::Value {
+    let scope = scope_for(plugin);
+    match crate::config::load_user_config(&scope) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(cookbook = %plugin.name, error = %e, "Failed to load user-level cookbook config; using empty config");
+            serde_json::Value::Object(Default::default())
+        }
+    }
+}
+
+fn scope_for(plugin: &Plugin) -> String {
+    format!("cookbook-{}", plugin.name)
 }
 
 impl CookbookTrait for CookbookClient {
     fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>> {
         tracing::debug!(cookbook = %self.plugin.name, "Listing recipes from cookbook");
-        let output = Command::new(&self.plugin.executable)
-            .arg("list-recipes")
-            .output()
-            .context("Cookbook failed to list recipes")?;
+        let output = self.spawn_with_payload(&["list-recipes"])?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -122,11 +218,7 @@ impl CookbookTrait for CookbookClient {
 
     fn cook(&self, recipe: &str) -> anyhow::Result<String> {
         tracing::debug!(cookbook = %self.plugin.name, recipe = %recipe, "Cooking recipe");
-        let output = Command::new(&self.plugin.executable)
-            .arg("cook")
-            .arg(recipe)
-            .output()
-            .context("Failed to cook recipe")?;
+        let output = self.spawn_with_payload(&["cook", recipe])?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -158,11 +250,7 @@ impl CookbookTrait for CookbookClient {
     /// error, malformed JSON) so a missing or broken `gear` never blocks
     /// cooking. Best-effort by design.
     fn gear(&self, recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
-        let output = match Command::new(&self.plugin.executable)
-            .arg("gear")
-            .arg(recipe)
-            .output()
-        {
+        let output = match self.spawn_with_payload(&["gear", recipe]) {
             Ok(o) => o,
             Err(e) => {
                 tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear exec failed");
@@ -203,6 +291,7 @@ mod tests {
             mock_plugin("git"),
             CookbookMetadata {
                 default_priority: Some(10),
+                project_overridable: vec![],
             },
         );
         assert_eq!(client.priority(), 10);
@@ -281,5 +370,21 @@ exit 1
             result.is_none(),
             "old cookbooks (no gear subcommand) must surface as Ok(None); got {result:?}"
         );
+    }
+
+    /// Subcommand spawn pipes `CookbookPayload` JSON to the child's stdin
+    /// so cookbooks can read their resolved config from there.
+    #[test]
+    fn test_cook_pipes_payload_to_stdin() {
+        let (_dir, client) = cookbook_client_from_script(
+            r#"#!/bin/sh
+payload=$(cat)
+echo "$payload"
+"#,
+        );
+        let stdout = client.cook("anything").expect("cook returns stdout");
+        let payload: CookbookPayload =
+            serde_json::from_str(&stdout).expect("cookbook saw a valid CookbookPayload on stdin");
+        assert_eq!(payload.version, 1, "payload version should be 1");
     }
 }

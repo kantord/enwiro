@@ -14,7 +14,6 @@ clap = { version = "4.5.4", features = ["derive"] }
 glob = "0.3.1"
 serde = "1.0.197"
 serde_json = "1"
-confy = "2.0.0"
 serde_derive = "1.0.197"
 enwiro-sdk.workspace = true
 git2 = "0.20.0"

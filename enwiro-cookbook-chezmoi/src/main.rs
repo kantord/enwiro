@@ -66,7 +66,8 @@ fn main() -> anyhow::Result<()> {
             println!(
                 "{}",
                 CookbookMetadata {
-                    default_priority: Some(20)
+                    default_priority: Some(20),
+                    project_overridable: vec![],
                 }
                 .to_json()
             );

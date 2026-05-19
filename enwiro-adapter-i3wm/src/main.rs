@@ -76,9 +76,10 @@ fn default_web_open_command() -> Vec<String> {
     vec!["chromium".to_string(), "--app={url}".to_string()]
 }
 
-/// Schema for the i3 adapter's confy TOML. Every field is optional so missing
-/// or partially-populated configs fall through to defaults rather than
-/// failing to parse.
+/// Schema for the i3 adapter's user-level TOML at
+/// `~/.config/enwiro/adapter-i3wm.toml`. Every field is optional so
+/// missing or partially-populated configs fall through to defaults
+/// rather than failing to parse.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct AdapterConfig {
@@ -95,12 +96,11 @@ fn load_web_open_command(config_path: &std::path::Path) -> Vec<String> {
         .unwrap_or_else(default_web_open_command)
 }
 
-/// Resolve the adapter's confy config path the same way `confy::load` would,
-/// so users can drop a file at the documented location
-/// (`~/.config/enwiro/adapter-i3wm.toml` on Linux). Returns `None` if confy
-/// can't determine a config dir - caller falls back to defaults.
+/// Resolve the adapter's config path (`~/.config/enwiro/adapter-i3wm.toml`
+/// on Linux). Returns `None` if the user's home directory can't be
+/// determined - caller falls back to defaults.
 fn adapter_config_path() -> Option<std::path::PathBuf> {
-    confy::get_configuration_file_path("enwiro", "adapter-i3wm").ok()
+    enwiro_sdk::config::user_config_path("adapter-i3wm").ok()
 }
 
 /// Walk a merged gear JSON object and collect every `gear.<name>.web.<entry>.url`.
@@ -1242,7 +1242,7 @@ mod tests {
     }
 
     /// `load_web_open_command` must read `web_open_command` from the adapter's
-    /// confy TOML and return it instead of the default when the field is set.
+    /// user-level TOML and return it instead of the default when the field is set.
     #[test]
     fn test_load_web_open_command_uses_user_config() {
         let dir = tempfile::tempdir().expect("tempdir");
