@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.35](https://github.com/kantord/enwiro/compare/enwiro-v0.3.34...enwiro-v0.3.35) - 2026-05-19
+
+### Added
+
+- *(enw)* add rm command ([#464](https://github.com/kantord/enwiro/pull/464))
+
 ## [0.3.34](https://github.com/kantord/enwiro/compare/enwiro-v0.3.33...enwiro-v0.3.34) - 2026-05-17
 
 ### Added
