@@ -2,7 +2,7 @@ use anyhow::Context;
 use std::io::Write;
 use std::path::Path;
 
-use crate::context::CommandContext;
+use crate::context::{CommandContext, CookConfig};
 use enwiro_sdk::adapter::ManagedEnvInfo;
 
 #[derive(clap::Args)]
@@ -13,6 +13,10 @@ use enwiro_sdk::adapter::ManagedEnvInfo;
 )]
 pub struct ActivateArgs {
     pub name: String,
+
+    /// Skip garnish `run_on: [Cook]` autorun hooks when cooking the env.
+    #[arg(long)]
+    pub no_hooks: bool,
 }
 
 fn build_managed_envs<W: Write>(context: &CommandContext<W>) -> Vec<ManagedEnvInfo> {
@@ -46,9 +50,13 @@ pub fn activate<W: Write>(
     let flat_name = args.name.replace('/', "-");
     let env_dir = Path::new(&context.config.workspaces_directory).join(&flat_name);
 
+    let cook_cfg = CookConfig {
+        no_hooks: args.no_hooks,
+    };
+
     // Cook before adapter.activate so any gear written during cook is available
     // when the adapter switches workspace and (optionally) acts on it.
-    if let Err(e) = context.get_or_cook_environment(&Some(args.name.clone())) {
+    if let Err(e) = context.get_or_cook_environment(&Some(args.name.clone()), &cook_cfg) {
         context.notifier.notify_error(&format!(
             "Could not set up environment '{}': {:#}",
             args.name, e
@@ -167,6 +175,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "env-x".to_string(),
+                no_hooks: false,
             },
         );
         assert!(result.is_ok());
@@ -213,6 +222,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "my-project".to_string(),
+                no_hooks: false,
             },
         );
         assert!(result.is_ok());
@@ -239,6 +249,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "new-project".to_string(),
+                no_hooks: false,
             },
         );
         assert!(result.is_ok());
@@ -262,6 +273,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "unknown".to_string(),
+                no_hooks: false,
             },
         );
         assert!(result.is_ok());
@@ -284,6 +296,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "my-project".to_string(),
+                no_hooks: false,
             },
         );
 
@@ -338,6 +351,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "my-project".to_string(),
+                no_hooks: false,
             },
         );
 
@@ -371,6 +385,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "unknown".to_string(),
+                no_hooks: false,
             },
         );
 
@@ -424,6 +439,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "my-project".to_string(),
+                no_hooks: false,
             },
         );
 
@@ -466,6 +482,7 @@ mod tests {
             &mut ctx,
             ActivateArgs {
                 name: "my-project".to_string(),
+                no_hooks: false,
             },
         );
 

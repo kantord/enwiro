@@ -11,11 +11,11 @@ use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
 use commands::list_all::{ListAllArgs, list_all};
 use commands::list_environments::{ListEnvironmentsArgs, list_environments};
+use commands::prep::{PrepArgs, prep};
 use commands::rm::{RmArgs, rm};
 use commands::run::{RunArgs, run};
 use commands::run_gear;
 use commands::run_gear::{LONG_YES_FLAG, SHORT_YES_FLAG};
-use commands::show_path::{ShowPathArgs, show_path};
 use commands::wrap::{WrapArgs, wrap};
 use context::CommandContext;
 use enwiro_daemon::ConfigurationValues;
@@ -29,9 +29,9 @@ enum EnwiroCli {
     Activate(ActivateArgs),
     ListEnvironments(ListEnvironmentsArgs),
     ListAll(ListAllArgs),
+    Prep(PrepArgs),
     Rm(RmArgs),
     Run(RunArgs),
-    ShowPath(ShowPathArgs),
     Wrap(WrapArgs),
 }
 
@@ -85,9 +85,9 @@ fn main() -> anyhow::Result<()> {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
         EnwiroCli::ListEnvironments(_) => list_environments(&mut context_object),
         EnwiroCli::ListAll(args) => list_all(&mut context_object, args.json),
+        EnwiroCli::Prep(args) => prep(&mut context_object, args),
         EnwiroCli::Rm(args) => rm(&mut context_object, args),
         EnwiroCli::Run(args) => run(&mut context_object, args),
-        EnwiroCli::ShowPath(args) => show_path(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
     };
 

@@ -10,6 +10,13 @@ use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, path::PathBuf};
 
+/// Per-invocation knobs for cooking an environment.
+#[derive(Debug, Clone, Default)]
+pub struct CookConfig {
+    /// Skip firing garnish `run_on: [Cook]` cli entries. Gear files are still written.
+    pub no_hooks: bool,
+}
+
 pub struct CommandContext<W: Write> {
     pub config: ConfigurationValues,
     pub writer: W,
@@ -53,7 +60,7 @@ impl<W: Write> CommandContext<W> {
         })
     }
 
-    pub fn cook_environment(&self, name: &str) -> anyhow::Result<Environment> {
+    pub fn cook_environment(&self, name: &str, cfg: &CookConfig) -> anyhow::Result<Environment> {
         let (cookbook_name, description) = self.find_recipe_in_cache(name).ok_or_else(|| {
             tracing::error!(name = %name, "Recipe not in daemon cache");
             anyhow!(
@@ -81,7 +88,7 @@ impl<W: Write> CommandContext<W> {
         let flat_name = name.replace('/', "-");
         self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
-        self.write_garnish_gear(&env_path, &flat_name);
+        self.write_garnish_gear(&env_path, &flat_name, cfg);
         Ok(env)
     }
 
@@ -120,10 +127,10 @@ impl<W: Write> CommandContext<W> {
 
     /// Run every discovered Garnish plugin against the cooked project;
     /// write each contribution to `gear.d/garnish-<name>.json`, then
-    /// fire any cli entry whose `run_on` contains `Cook`. Best-effort
-    /// throughout — per-Garnish failures and autorun spawn failures
-    /// are debug-logged and swallowed.
-    fn write_garnish_gear(&self, project_dir: &str, flat_name: &str) {
+    /// fire any cli entry whose `run_on` contains `Cook` (unless
+    /// `cfg.no_hooks` is set). Best-effort throughout — per-Garnish
+    /// failures and autorun spawn failures are debug-logged and swallowed.
+    fn write_garnish_gear(&self, project_dir: &str, flat_name: &str, cfg: &CookConfig) {
         let project_path = Path::new(project_dir);
         let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
         let gear_dir = enwiro_sdk::gear::gear_dir(&env_dir);
@@ -142,7 +149,7 @@ impl<W: Write> CommandContext<W> {
                 tracing::debug!(error = %e, garnish = garnish.name(), "garnish gear write failed, continuing");
                 continue;
             }
-            fire_autorun_on_cook(&data, project_path);
+            fire_hooks_if_enabled(cfg, &data, project_path);
         }
     }
 
@@ -199,13 +206,17 @@ impl<W: Write> CommandContext<W> {
         }
     }
 
-    pub fn get_or_cook_environment(&self, name: &Option<String>) -> anyhow::Result<Environment> {
+    pub fn get_or_cook_environment(
+        &self,
+        name: &Option<String>,
+        cfg: &CookConfig,
+    ) -> anyhow::Result<Environment> {
         let resolved = self.resolve_environment_name(name)?;
         let flat_name = resolved.replace('/', "-");
         match Environment::get_one(&self.config.workspaces_directory, &flat_name) {
             Ok(env) => Ok(env),
             Err(_) if name.is_some() => self
-                .cook_environment(&resolved)
+                .cook_environment(&resolved, cfg)
                 .context("Could not cook environment"),
             Err(e) => Err(e),
         }
@@ -214,6 +225,21 @@ impl<W: Write> CommandContext<W> {
     pub fn get_all_environments(&self) -> anyhow::Result<HashMap<String, Environment>> {
         Environment::get_all(&self.config.workspaces_directory)
     }
+}
+
+/// Gate over `fire_autorun_on_cook` that respects `CookConfig::no_hooks`.
+/// Calling this is what every garnish-iteration site does — the gate is
+/// extracted as its own function so `--no-hooks` can be tested behaviorally
+/// without needing a real on-disk garnish.
+fn fire_hooks_if_enabled(
+    cfg: &CookConfig,
+    data: &enwiro_sdk::gear::GearFileData,
+    project_path: &Path,
+) {
+    if cfg.no_hooks {
+        return;
+    }
+    fire_autorun_on_cook(data, project_path);
 }
 
 /// For every cli entry in `data` whose `run_on` contains `Cook`, spawn
@@ -410,6 +436,69 @@ mod fire_autorun_tests {
 
         fire_autorun_on_cook(&data, tmp.path()); // must not panic
     }
+
+    fn single_cook_entry_gear(sentinel: &Path) -> GearFileData {
+        let mut cli = HashMap::new();
+        cli.insert(
+            "fires".to_owned(),
+            CliEntry {
+                description: None,
+                command: touch_command(sentinel),
+                run_on: vec![Hook::Cook],
+                ..Default::default()
+            },
+        );
+        let mut gear_map = HashMap::new();
+        gear_map.insert(
+            "g".to_owned(),
+            Gear {
+                description: "test".into(),
+                cli,
+                ..Default::default()
+            },
+        );
+        GearFileData {
+            version: SCHEMA_VERSION,
+            gear: gear_map,
+        }
+    }
+
+    /// `fire_hooks_if_enabled` with `no_hooks: false` must call through to the
+    /// spawn site — sanity check that the gate doesn't accidentally block the
+    /// default path.
+    #[test]
+    fn gate_open_fires_autorun() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sentinel = tmp.path().join("did-fire");
+        let data = single_cook_entry_gear(&sentinel);
+
+        super::fire_hooks_if_enabled(&super::CookConfig { no_hooks: false }, &data, tmp.path());
+
+        assert!(
+            wait_for(&sentinel, Duration::from_millis(500)),
+            "expected sentinel at {sentinel:?} after fire_hooks_if_enabled with no_hooks=false"
+        );
+    }
+
+    /// `fire_hooks_if_enabled` with `no_hooks: true` must NOT spawn the autorun.
+    /// This is the load-bearing behavior of the `--no-hooks` flag on `prep` and
+    /// `activate`: the flag flows through `CookConfig` to this gate.
+    #[test]
+    fn gate_closed_suppresses_autorun() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sentinel = tmp.path().join("must-not-fire");
+        let data = single_cook_entry_gear(&sentinel);
+
+        super::fire_hooks_if_enabled(&super::CookConfig { no_hooks: true }, &data, tmp.path());
+
+        // Wait briefly so a buggy implementation that *did* spawn has time
+        // to create the sentinel.
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !sentinel.exists(),
+            "no_hooks=true must suppress autorun (unexpected sentinel at {sentinel:?})"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +506,7 @@ mod tests {
     use rstest::rstest;
     use std::fs;
 
+    use super::CookConfig;
     use crate::test_utils::test_utilities::{
         AdapterLog, FailingCookbook, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
@@ -438,7 +528,9 @@ mod tests {
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        let env = context_object.cook_environment("my-project").unwrap();
+        let env = context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
         assert_eq!(env.name, "my-project");
 
         // Verify directory with inner symlink was created
@@ -465,7 +557,9 @@ mod tests {
             vec![(recipe_name, cooked_dir.to_str().unwrap())],
         ))];
 
-        let env = context_object.cook_environment(recipe_name).unwrap();
+        let env = context_object
+            .cook_environment(recipe_name, &CookConfig::default())
+            .unwrap();
         assert_eq!(env.name, "my-project@feature-my-thing");
 
         // Verify directory with inner symlink was created
@@ -494,12 +588,12 @@ mod tests {
 
         // First call creates the environment
         let env1 = context_object
-            .get_or_cook_environment(&Some(recipe_name.to_string()))
+            .get_or_cook_environment(&Some(recipe_name.to_string()), &CookConfig::default())
             .unwrap();
 
         // Second call should find the existing environment, not try to cook again
         let env2 = context_object
-            .get_or_cook_environment(&Some(recipe_name.to_string()))
+            .get_or_cook_environment(&Some(recipe_name.to_string()), &CookConfig::default())
             .unwrap();
 
         assert_eq!(env1.name, env2.name);
@@ -517,7 +611,7 @@ mod tests {
             vec![],
         ))];
 
-        let result = context_object.cook_environment("my-project");
+        let result = context_object.cook_environment("my-project", &CookConfig::default());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -559,7 +653,9 @@ mod tests {
 
         // With the cache available, cook_environment should find the recipe
         // without calling list_recipes() on the failing cookbook
-        let env = context_object.cook_environment("my-project").unwrap();
+        let env = context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
         assert_eq!(env.name, "my-project");
     }
 
@@ -579,7 +675,9 @@ mod tests {
             vec![("owner/repo#42", cooked_dir.to_str().unwrap())],
         ))];
 
-        let env = context_object.cook_environment("owner/repo#42").unwrap();
+        let env = context_object
+            .cook_environment("owner/repo#42", &CookConfig::default())
+            .unwrap();
         assert_eq!(env.name, "owner-repo#42");
     }
 
@@ -600,7 +698,7 @@ mod tests {
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        let result = context_object.cook_environment("my-project");
+        let result = context_object.cook_environment("my-project", &CookConfig::default());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -617,7 +715,7 @@ mod tests {
         context_object.create_mock_environment("my-env");
 
         let env = context_object
-            .get_or_cook_environment(&Some("my-env".to_string()))
+            .get_or_cook_environment(&Some("my-env".to_string()), &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "my-env");
     }
@@ -640,7 +738,7 @@ mod tests {
 
         // "new-project" doesn't exist as an environment, so it should be cooked
         let env = context_object
-            .get_or_cook_environment(&Some("new-project".to_string()))
+            .get_or_cook_environment(&Some("new-project".to_string()), &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "new-project");
     }
@@ -658,7 +756,7 @@ mod tests {
         })];
 
         // Name is None → resolved from adapter → should not try to cook
-        let result = context_object.get_or_cook_environment(&None);
+        let result = context_object.get_or_cook_environment(&None, &CookConfig::default());
         assert!(result.is_err());
         // Error should NOT be from FailingCookbook ("simulated failure").
         // Use Debug format to see the full anyhow error chain.
@@ -686,7 +784,9 @@ mod tests {
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        context_object.cook_environment("my-project").unwrap();
+        context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
 
         let env_dir = temp_dir.path().join("my-project");
         let meta = crate::usage_stats::load_env_meta(&env_dir);
@@ -711,7 +811,9 @@ mod tests {
             vec![(recipe_name, cooked_dir.to_str().unwrap())],
         ))];
 
-        context_object.cook_environment(recipe_name).unwrap();
+        context_object
+            .cook_environment(recipe_name, &CookConfig::default())
+            .unwrap();
 
         let env_dir = temp_dir.path().join("owner-repo#42");
         let meta = crate::usage_stats::load_env_meta(&env_dir);
@@ -738,7 +840,9 @@ mod tests {
             vec![("owner/repo#42", cooked_dir.to_str().unwrap())],
         ))];
 
-        context_object.cook_environment("owner/repo#42").unwrap();
+        context_object
+            .cook_environment("owner/repo#42", &CookConfig::default())
+            .unwrap();
 
         // Meta should be stored in the flat-named env directory
         let env_dir = temp_dir.path().join("owner-repo#42");
@@ -767,7 +871,7 @@ mod tests {
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        let result = context_object.cook_environment("my-project");
+        let result = context_object.cook_environment("my-project", &CookConfig::default());
         assert!(result.is_ok());
 
         let logs = notifications.borrow();
@@ -788,7 +892,7 @@ mod tests {
             vec![],
         ))];
 
-        let result = context_object.cook_environment("my-project");
+        let result = context_object.cook_environment("my-project", &CookConfig::default());
         assert!(result.is_err());
 
         let logs = notifications.borrow();
@@ -815,7 +919,9 @@ mod tests {
             .with_gear(gear_data.clone()),
         )];
 
-        context_object.cook_environment("my-project").unwrap();
+        context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
 
         let gear_path = temp_dir
             .path()
@@ -849,7 +955,9 @@ mod tests {
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        context_object.cook_environment("my-project").unwrap();
+        context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
 
         let gear_dir = temp_dir.path().join("my-project").join("gear.d");
         assert!(
