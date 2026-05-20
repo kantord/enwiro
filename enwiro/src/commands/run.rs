@@ -3,6 +3,7 @@ use enwiro_sdk::adapter::RunPayload;
 use std::io::Write;
 
 use crate::CommandContext;
+use crate::context::CookConfig;
 
 #[derive(clap::Args)]
 #[command(
@@ -20,7 +21,7 @@ pub struct RunArgs {
 
 pub fn run<W: Write>(context: &mut CommandContext<W>, args: RunArgs) -> anyhow::Result<()> {
     let environment = context
-        .get_or_cook_environment(&args.environment_name)
+        .get_or_cook_environment(&args.environment_name, &CookConfig::default())
         .context("Could not resolve an active environment for `enw run`")?;
 
     let payload = RunPayload::new(

@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 pub use enwiro_daemon::meta::{
-    EnvStats, load_env_meta, now_timestamp, record_activation_per_env, record_cook_metadata_per_env,
+    EnvStats, load_env_meta, now_timestamp, record_activation_per_env,
+    record_cook_metadata_per_env, record_prep_per_env,
 };
 
 /// Per-environment usage statistics.
@@ -58,20 +59,24 @@ fn record_activation_to(path: &Path, env_name: &str) {
     }
 }
 
-/// Compute exponential-decay score for an environment.
-/// λ = ln(2) / (48h) gives a 48-hour half-life.
-/// Pass the current timestamp (seconds since epoch) for deterministic results.
-pub fn frecency_score(stats: &EnvStats, now: i64) -> f64 {
+/// Compute exponential-decay frecency over a `(timestamp, weight)` buffer.
+/// λ = ln(2) / (48h) gives a 48-hour half-life. Used by both
+/// activation- and prep-signal scoring.
+fn frecency_of_buffer(buffer: &[(i64, f64)], now: i64) -> f64 {
     let lambda = std::f64::consts::LN_2 / (48.0 * 3600.0);
-    stats
-        .signals
-        .activation_buffer
+    buffer
         .iter()
         .map(|&(ts, weight)| {
             let age = (now - ts).max(0) as f64;
             weight * (-lambda * age).exp()
         })
         .sum()
+}
+
+/// Compute exponential-decay score for an environment over its activation buffer.
+/// Pass the current timestamp (seconds since epoch) for deterministic results.
+pub fn frecency_score(stats: &EnvStats, now: i64) -> f64 {
+    frecency_of_buffer(&stats.signals.activation_buffer, now)
 }
 
 /// Compute a two-component exponential-decay score from a workspace-switch buffer.
@@ -123,6 +128,32 @@ pub fn activation_percentile_scores(
         .collect()
 }
 
+/// Compute percentile ranks for all environments based on their `prep_buffer`
+/// frecency. `prep_buffer` holds at most one event, so this captures "how
+/// recently was this env prepped" relative to other envs.
+fn prep_percentile_scores(all_stats: &HashMap<String, EnvStats>, now: i64) -> HashMap<String, f64> {
+    let total = all_stats.len();
+    if total == 0 {
+        return HashMap::new();
+    }
+    let scores: HashMap<&str, f64> = all_stats
+        .iter()
+        .map(|(name, stats)| {
+            (
+                name.as_str(),
+                frecency_of_buffer(&stats.signals.prep_buffer, now),
+            )
+        })
+        .collect();
+    scores
+        .iter()
+        .map(|(&name, &score)| {
+            let count_below = scores.values().filter(|&&s| s < score).count();
+            (name.to_string(), count_below as f64 / total as f64)
+        })
+        .collect()
+}
+
 /// Compute percentile ranks for all environments based on their switch scores.
 /// Mirrors [`activation_percentile_scores`] but uses `switch_score` instead of `frecency_score`.
 fn switch_percentile_scores(
@@ -152,29 +183,38 @@ fn switch_percentile_scores(
 }
 
 /// Score function for the launcher UI (`list-all`).
-/// Blends activation and switch percentile signals: 0.8 × activation + 0.2 × switch.
+/// Blends activation, prep, and switch percentile signals:
+/// 0.8 × activation + 0.8 × prep + 0.2 × switch. Prep events feed in
+/// with the same weight as activations — pre-warming an env is a
+/// reliable signal the user also wants to observe it.
 pub fn launcher_score(all_stats: &HashMap<String, EnvStats>, now: i64) -> HashMap<String, f64> {
     let activation = activation_percentile_scores(all_stats, now);
     let switch = switch_percentile_scores(all_stats, now);
+    let prep = prep_percentile_scores(all_stats, now);
     activation
         .into_iter()
         .map(|(name, act)| {
             let sw = switch.get(&name).copied().unwrap_or(0.0);
-            (name, 0.8 * act + 0.2 * sw)
+            let pr = prep.get(&name).copied().unwrap_or(0.0);
+            (name, 0.8 * act + 0.8 * pr + 0.2 * sw)
         })
         .collect()
 }
 
 /// Score function for workspace slot assignment (`activate`).
-/// Blends activation and switch percentile signals: 0.2 × activation + 0.8 × switch.
+/// Blends activation, prep, and switch percentile signals:
+/// 0.2 × activation + 0.2 × prep + 0.8 × switch. Prep events feed in
+/// with the same weight as activations.
 pub fn slot_scores(all_stats: &HashMap<String, EnvStats>, now: i64) -> HashMap<String, f64> {
     let activation = activation_percentile_scores(all_stats, now);
     let switch = switch_percentile_scores(all_stats, now);
+    let prep = prep_percentile_scores(all_stats, now);
     activation
         .into_iter()
         .map(|(name, act)| {
             let sw = switch.get(&name).copied().unwrap_or(0.0);
-            (name, 0.2 * act + 0.8 * sw)
+            let pr = prep.get(&name).copied().unwrap_or(0.0);
+            (name, 0.2 * act + 0.2 * pr + 0.8 * sw)
         })
         .collect()
 }
@@ -607,6 +647,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![(now, 1.0)],
                     switch_buffer: vec![],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },
@@ -618,6 +659,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![],
                     switch_buffer: vec![(now, 1.0)],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },
@@ -632,6 +674,49 @@ mod tests {
              switch-only={}, activation-only={}",
             result["switch-only"],
             result["activation-only"]
+        );
+    }
+
+    /// `slot_scores` must weight the `prep_buffer` percentile equivalently to the
+    /// activation percentile (both 0.2 in the blend). In a 2-env map where
+    /// "prep-only" has a recent prep event and "activation-only" has a recent
+    /// activation, both must receive the same slot_score.
+    #[test]
+    fn test_slot_scores_weights_prep_same_as_activation() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+
+        all_stats.insert(
+            "activation-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    switch_buffer: vec![],
+                    prep_buffer: vec![],
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "prep-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![],
+                    switch_buffer: vec![],
+                    prep_buffer: vec![(now, 1.0)],
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = slot_scores(&all_stats, now);
+
+        assert!(
+            (result["activation-only"] - result["prep-only"]).abs() < 1e-10,
+            "prep_buffer and activation_buffer must contribute equally to slot_scores; \
+             activation-only={}, prep-only={}",
+            result["activation-only"],
+            result["prep-only"]
         );
     }
 
@@ -651,6 +736,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![(now, 1.0)],
                     switch_buffer: vec![],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },
@@ -662,6 +748,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![],
                     switch_buffer: vec![(now, 1.0)],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },
@@ -679,6 +766,48 @@ mod tests {
         );
     }
 
+    /// `launcher_score` must weight the `prep_buffer` percentile equivalently to the
+    /// activation percentile (both 0.8 in the blend). Prep is treated as a reliable
+    /// "user is interested in this env" signal for launcher ordering.
+    #[test]
+    fn test_launcher_score_weights_prep_same_as_activation() {
+        let now: i64 = 1_700_000_000;
+        let mut all_stats: HashMap<String, EnvStats> = HashMap::new();
+
+        all_stats.insert(
+            "activation-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now, 1.0)],
+                    switch_buffer: vec![],
+                    prep_buffer: vec![],
+                },
+                ..Default::default()
+            },
+        );
+        all_stats.insert(
+            "prep-only".to_string(),
+            EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![],
+                    switch_buffer: vec![],
+                    prep_buffer: vec![(now, 1.0)],
+                },
+                ..Default::default()
+            },
+        );
+
+        let result = launcher_score(&all_stats, now);
+
+        assert!(
+            (result["activation-only"] - result["prep-only"]).abs() < 1e-10,
+            "prep_buffer and activation_buffer must contribute equally to launcher_score; \
+             activation-only={}, prep-only={}",
+            result["activation-only"],
+            result["prep-only"]
+        );
+    }
+
     /// An env with many activations but no switch events must score higher under
     /// `launcher_score` than under `slot_scores` — because launcher_score weights
     /// activation at 0.8 while slot_scores weights it at only 0.2.
@@ -693,6 +822,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![(now, 1.0)],
                     switch_buffer: vec![],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },
@@ -703,6 +833,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![],
                     switch_buffer: vec![(now, 1.0)],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },
@@ -734,6 +865,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![(now, 1.0)],
                     switch_buffer: vec![],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },
@@ -744,6 +876,7 @@ mod tests {
                 signals: UserIntentSignals {
                     activation_buffer: vec![],
                     switch_buffer: vec![(now, 1.0)],
+                    prep_buffer: vec![],
                 },
                 ..Default::default()
             },

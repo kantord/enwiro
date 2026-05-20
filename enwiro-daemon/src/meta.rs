@@ -14,6 +14,8 @@ pub struct UserIntentSignals {
     pub activation_buffer: Vec<(i64, f64)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub switch_buffer: Vec<(i64, f64)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prep_buffer: Vec<(i64, f64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -105,6 +107,20 @@ pub fn record_switch_per_env(env_dir: &Path, timestamp: i64) {
     }
 }
 
+/// Record a `prep`-command event in per-env meta.json. Best-effort.
+/// `prep_buffer` holds only the most recent event — repeated scripted
+/// preps don't stack and can't drown out the activation signal.
+pub fn record_prep_per_env(env_dir: &Path) {
+    if !env_dir.is_dir() {
+        return;
+    }
+    let mut meta = load_env_meta(env_dir);
+    meta.signals.prep_buffer = vec![(now_timestamp(), 1.0)];
+    if let Err(e) = save_env_meta(env_dir, &meta) {
+        tracing::warn!(error = %e, "Could not save prep event");
+    }
+}
+
 /// Save cookbook, recipe, and description metadata in per-env meta.json. Best-effort.
 pub fn record_cook_metadata_per_env(
     env_dir: &Path,
@@ -151,6 +167,48 @@ mod tests {
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.signals.activation_buffer.len(), 2);
+    }
+
+    #[test]
+    fn test_per_env_record_prep_writes_distinct_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_prep_per_env(&env_dir);
+
+        let meta = load_env_meta(&env_dir);
+        assert!(
+            meta.signals.activation_buffer.is_empty(),
+            "prep must not write to activation_buffer"
+        );
+        assert_eq!(meta.signals.prep_buffer.len(), 1);
+        assert!(meta.signals.prep_buffer[0].0 > 0);
+        assert!(
+            (meta.signals.prep_buffer[0].1 - 1.0).abs() < 1e-10,
+            "prep event weight must be 1.0, got {}",
+            meta.signals.prep_buffer[0].1
+        );
+    }
+
+    /// Repeated preps must not stack — only the latest event is kept so
+    /// scripted callers can't drown out the activation signal.
+    #[test]
+    fn test_per_env_record_prep_does_not_stack() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_prep_per_env(&env_dir);
+        record_prep_per_env(&env_dir);
+        record_prep_per_env(&env_dir);
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.signals.prep_buffer.len(),
+            1,
+            "prep_buffer must hold only the latest event"
+        );
     }
 
     #[test]

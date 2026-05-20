@@ -1,6 +1,7 @@
 use anyhow::{Context, anyhow};
 
 use crate::CommandContext;
+use crate::context::CookConfig;
 
 use std::os::unix::process::CommandExt;
 use std::{env, io::Write, process::Command};
@@ -19,13 +20,14 @@ pub struct WrapArgs {
 }
 
 pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow::Result<()> {
-    let selected_environment = match context.get_or_cook_environment(&args.environment_name) {
-        Ok(env) => Some(env),
-        Err(e) => {
-            tracing::warn!(error = %e, "Could not resolve environment");
-            None
-        }
-    };
+    let selected_environment =
+        match context.get_or_cook_environment(&args.environment_name, &CookConfig::default()) {
+            Ok(env) => Some(env),
+            Err(e) => {
+                tracing::warn!(error = %e, "Could not resolve environment");
+                None
+            }
+        };
 
     let environment_path: String = match &selected_environment {
         Some(environment) => environment.path.clone(),
