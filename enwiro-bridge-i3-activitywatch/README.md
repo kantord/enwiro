@@ -44,9 +44,9 @@ Window-PID detection was tried first and turned out to be unreliable
 For each detected env, the bridge also reads metadata from
 `${ENWIRO_ENVS_DIR:-~/.enwiro_envs}/<env>/meta.json` (`description`,
 `cookbook`) and gear URLs from each `gear.d/*.json` (`gear.<name>.web.page.url`).
-That metadata is attached to the heartbeat data so aw-server reports can
-break time down by cookbook or surface gear links directly. Metadata is
-cached for 10 seconds per env.
+Gear URLs are flattened into `<source>-<gear>-url` keys (`github-issue-url`,
+`obsidian-note-url`, ...) so aw-server's query layer can filter on them
+without `json_extract` traversal. Metadata is cached for 10 seconds per env.
 
 When no workspace is focused or the workspace name does not match the
 `<num>: <env>` shape, the bridge reports `env=no-env`.
@@ -59,9 +59,14 @@ When no workspace is focused or the workspace name does not match the
   "duration": 0,
   "data": {
     "env": "chezmoi",
+    "title": "chezmoi",
     "description": "...",
     "cookbook": "...",
-    "urls": { "github-pr": "https://...", "obsidian-note": "..." }
+    "github-issue-url": "https://github.com/kantord/enwiro/issues/327"
   }
 }
 ```
+
+`title` mirrors `env` (static for a given env) so aw-server's default
+timeline view labels each row sensibly. `description` and `cookbook` come
+from `meta.json`; gear URLs are added per-source.

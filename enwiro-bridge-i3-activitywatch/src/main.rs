@@ -52,7 +52,6 @@ fn load_env_metadata(env_name: &str) -> Map<String, Value> {
         }
     }
 
-    let mut urls = Map::new();
     if let Ok(entries) = std::fs::read_dir(base.join("gear.d")) {
         let mut paths: Vec<PathBuf> = entries
             .filter_map(|e| e.ok())
@@ -70,6 +69,7 @@ fn load_env_metadata(env_name: &str) -> Map<String, Value> {
             let Some(Value::Object(gear)) = value.get("gear") else {
                 continue;
             };
+            let source = gear_source_from_stem(path.file_stem().and_then(|s| s.to_str()));
             for (gear_name, gear_def) in gear {
                 if let Some(url) = gear_def
                     .get("web")
@@ -77,15 +77,30 @@ fn load_env_metadata(env_name: &str) -> Map<String, Value> {
                     .and_then(|p| p.get("url"))
                     .and_then(|u| u.as_str())
                 {
-                    urls.insert(gear_name.clone(), Value::String(url.to_string()));
+                    let key = format!("{source}-{gear_name}-url");
+                    out.insert(key, Value::String(url.to_string()));
                 }
             }
         }
     }
-    if !urls.is_empty() {
-        out.insert("urls".to_string(), Value::Object(urls));
-    }
     out
+}
+
+/// `${ENWIRO_ENVS_DIR}/<env>/gear.d/<stem>.json` -> short source name.
+/// Strips the `cookbook-` / `garnish-` / `bridge-` plugin-kind prefix so
+/// the flattened key reads `github-issue-url`, not `cookbook-github-issue-url`.
+fn gear_source_from_stem(stem: Option<&str>) -> String {
+    let Some(stem) = stem else {
+        return "unknown".to_string();
+    };
+    for prefix in ["cookbook-", "garnish-", "bridge-"] {
+        if let Some(rest) = stem.strip_prefix(prefix)
+            && !rest.is_empty()
+        {
+            return rest.to_string();
+        }
+    }
+    stem.to_string()
 }
 
 struct MetaCache {
@@ -119,6 +134,7 @@ fn build_heartbeat_data(env_name: &str, cache: &mut MetaCache) -> Value {
     if env_name == NO_ENV {
         return Value::Object(obj);
     }
+    obj.insert("title".to_string(), Value::String(env_name.to_string()));
     for (k, v) in cache.get(env_name) {
         obj.insert(k, v);
     }
@@ -246,5 +262,26 @@ mod tests {
         let mut cache = MetaCache::new();
         let data = build_heartbeat_data(NO_ENV, &mut cache);
         assert_eq!(data, serde_json::json!({"env": "no-env"}));
+    }
+
+    #[test]
+    fn build_data_sets_title_to_env_name() {
+        let mut cache = MetaCache::new();
+        let data = build_heartbeat_data("chezmoi", &mut cache);
+        assert_eq!(data["title"], serde_json::json!("chezmoi"));
+    }
+
+    #[test]
+    fn gear_source_strips_kind_prefix() {
+        assert_eq!(gear_source_from_stem(Some("cookbook-github")), "github");
+        assert_eq!(gear_source_from_stem(Some("garnish-just")), "just");
+        assert_eq!(gear_source_from_stem(Some("bridge-rofi")), "rofi");
+    }
+
+    #[test]
+    fn gear_source_preserves_unprefixed_stem() {
+        assert_eq!(gear_source_from_stem(Some("vehicle")), "vehicle");
+        assert_eq!(gear_source_from_stem(Some("cookbook-")), "cookbook-");
+        assert_eq!(gear_source_from_stem(None), "unknown");
     }
 }
