@@ -17,4 +17,4 @@ tokio = { version = "1.37.0", features = ["macros", "rt", "time"] }
 tokio-i3ipc = "0.16.0"
 tracing.workspace = true
 tracing-subscriber.workspace = true
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
