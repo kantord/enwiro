@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-confy = "2.0.0"
 dirs = "6"
 enwiro-sdk.workspace = true
 home.workspace = true

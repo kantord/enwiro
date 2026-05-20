@@ -323,7 +323,7 @@ pub fn run(
             let plugins = get_plugins(PluginKind::Cookbook);
             let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
                 .into_iter()
-                .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
+                .map(|p| Box::new(CookbookClient::new_user_level_only(p)) as Box<dyn CookbookTrait>)
                 .collect();
 
             let recipes = collect_all_recipes(&cookbooks);

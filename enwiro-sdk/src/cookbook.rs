@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 pub struct CookbookMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_priority: Option<u32>,
+    /// Field names the cookbook accepts from project-level `.enwiro.toml`
+    /// files. Trusted core silently drops any project-layer keys not on
+    /// this list. Missing or empty ⇒ no project overrides accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_overridable: Vec<String>,
 }
 
 impl CookbookMetadata {
@@ -21,6 +26,60 @@ impl CookbookMetadata {
 
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("CookbookMetadata is always serializable")
+    }
+}
+
+/// Wire format version for [`CookbookPayload`]. Bumped when the shape
+/// changes in a backward-incompatible way.
+pub const COOKBOOK_PAYLOAD_VERSION: u32 = 1;
+
+/// Stdin payload for cookbook subcommands (`list-recipes`, `cook`, `gear`).
+///
+/// Trusted core (the `enw` CLI + daemon) resolves the cookbook's typed
+/// config from the user-level TOML plus ancestor `.enwiro.toml` project
+/// files, filters the project layer through the cookbook's
+/// `project_overridable` allowlist, and serializes the result into
+/// `config`. Cookbooks deserialize the payload from stdin and never parse
+/// TOML themselves.
+///
+/// `config` is intentionally an opaque `serde_json::Value` so the wire
+/// format doesn't bind to any cookbook's schema. Cookbooks call
+/// `serde_json::from_value(payload.config)` to recover their typed
+/// `#[derive(Deserialize, Default)]` struct.
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct CookbookPayload {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub config: serde_json::Value,
+}
+
+impl CookbookPayload {
+    pub fn new(config: serde_json::Value) -> Self {
+        Self {
+            version: COOKBOOK_PAYLOAD_VERSION,
+            config,
+        }
+    }
+
+    /// Read the payload from stdin. Empty stdin yields a payload whose
+    /// `config` is an empty JSON object — this lets cookbooks with
+    /// `#[serde(default)]` structs deserialize to defaults rather than
+    /// erroring with `invalid type: null` when invoked directly for
+    /// debugging without the SDK piping a real payload.
+    pub fn read_from_stdin() -> anyhow::Result<Self> {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("Could not read cookbook payload from stdin")?;
+        if buf.trim().is_empty() {
+            return Ok(Self {
+                version: COOKBOOK_PAYLOAD_VERSION,
+                config: serde_json::Value::Object(Default::default()),
+            });
+        }
+        serde_json::from_str(&buf).context("Could not parse cookbook payload as JSON")
     }
 }
 
@@ -91,8 +150,24 @@ mod tests {
     fn metadata_to_json_uses_camel_case() {
         let m = CookbookMetadata {
             default_priority: Some(20),
+            project_overridable: vec![],
         };
         assert_eq!(m.to_json(), r#"{"defaultPriority":20}"#);
+    }
+
+    #[test]
+    fn metadata_to_json_includes_project_overridable_when_nonempty() {
+        let m = CookbookMetadata {
+            default_priority: None,
+            project_overridable: vec!["repo_globs".to_string()],
+        };
+        assert_eq!(m.to_json(), r#"{"projectOverridable":["repo_globs"]}"#);
+    }
+
+    #[test]
+    fn metadata_from_json_parses_project_overridable() {
+        let m = CookbookMetadata::from_json(r#"{"projectOverridable":["repo_globs"]}"#).unwrap();
+        assert_eq!(m.project_overridable, vec!["repo_globs".to_string()]);
     }
 
     #[test]

@@ -251,7 +251,8 @@ fn main() -> Result<()> {
             println!(
                 "{}",
                 CookbookMetadata {
-                    default_priority: Some(DEFAULT_PRIORITY)
+                    default_priority: Some(DEFAULT_PRIORITY),
+                    project_overridable: vec![],
                 }
                 .to_json()
             );

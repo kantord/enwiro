@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::Context;
 use clap::Parser;
-use enwiro_sdk::{CookbookMetadata, Recipe};
+use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -20,7 +20,7 @@ pub struct RepoConfig {
 
 /// Minimal representation of the git cookbook's configuration.
 /// This intentionally couples to the git cookbook's config schema
-/// (confy key "cookbook-git", field "repo_globs"). If the git cookbook
+/// (config scope "cookbook-git", field "repo_globs"). If the git cookbook
 /// renames these, this struct must be updated to match.
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct GitCookbookConfig {
@@ -153,8 +153,10 @@ fn discover_github_repos_from_config(
 }
 
 fn discover_github_repos() -> anyhow::Result<Vec<RepoConfig>> {
-    let git_config: GitCookbookConfig = confy::load("enwiro", "cookbook-git")
+    let git_config_json = enwiro_sdk::config::load_user_config("cookbook-git")
         .context("Could not load git cookbook configuration")?;
+    let git_config: GitCookbookConfig = serde_json::from_value(git_config_json)
+        .context("Could not deserialize git cookbook configuration")?;
     discover_github_repos_from_config(&git_config)
 }
 
@@ -1447,29 +1449,38 @@ mod tests {
     }
 }
 
+fn read_config() -> anyhow::Result<ConfigurationValues> {
+    let payload =
+        CookbookPayload::read_from_stdin().context("Could not read cookbook payload from stdin")?;
+    let config: ConfigurationValues = serde_json::from_value(payload.config)
+        .context("Could not deserialize cookbook-github configuration")?;
+    tracing::debug!("Config loaded, repos will be auto-discovered from git cookbook");
+    Ok(config)
+}
+
 fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-cookbook-github.log");
 
     let args = EnwiroCookbookGithub::parse();
-    let config: ConfigurationValues =
-        confy::load("enwiro", "cookbook-github").context("Could not load configuration")?;
-    tracing::debug!("Config loaded, repos will be auto-discovered from git cookbook");
 
     match args {
         EnwiroCookbookGithub::ListRecipes(_) => {
             list_recipes()?;
         }
         EnwiroCookbookGithub::Cook(args) => {
+            let config = read_config()?;
             cook(&config, args)?;
         }
         EnwiroCookbookGithub::Gear(args) => {
+            let config = read_config()?;
             gear(&config, args)?;
         }
         EnwiroCookbookGithub::Metadata => {
             println!(
                 "{}",
                 CookbookMetadata {
-                    default_priority: Some(30)
+                    default_priority: Some(30),
+                    project_overridable: vec![],
                 }
                 .to_json()
             );
