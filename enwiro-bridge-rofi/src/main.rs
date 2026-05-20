@@ -27,7 +27,7 @@ fn enwiro_bin() -> anyhow::Result<PathBuf> {
     Ok(bin)
 }
 
-/// Format raw `enwiro list-all` JSON lines output into rofi script-mode entries.
+/// Format raw `enwiro ls --json` JSON lines output into rofi script-mode entries.
 /// Deduplicates by name and formats as tab-separated columns with rofi metadata.
 fn format_entries(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
@@ -51,17 +51,17 @@ fn format_entries(input: &str) -> Vec<String> {
 }
 
 fn list_entries() -> anyhow::Result<()> {
-    tracing::debug!("Listing entries via enwiro list-all");
+    tracing::debug!("Listing entries via enwiro ls");
     let output = Command::new(enwiro_bin()?)
-        .arg("list-all")
+        .arg("ls")
         .arg("--json")
         .output()
-        .context("Failed to run enwiro list-all")?;
+        .context("Failed to run enwiro ls")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::error!(%stderr, "enwiro list-all failed");
-        anyhow::bail!("enwiro list-all failed: {}", stderr);
+        tracing::error!(%stderr, "enwiro ls failed");
+        anyhow::bail!("enwiro ls failed: {}", stderr);
     }
 
     let stdout = String::from_utf8(output.stdout)?;

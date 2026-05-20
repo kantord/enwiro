@@ -314,7 +314,7 @@ fn spawn_gui_commands(gear: &serde_json::Value, env_name: &str) {
     }
 }
 
-/// Parse newline-delimited JSON from `enwiro list-all --json`.
+/// Parse newline-delimited JSON from `enwiro ls --json`.
 ///
 /// Each line is parsed independently as a `serde_json::Value`. Lines that are
 /// blank or fail to parse are silently skipped. Only entries where
@@ -336,7 +336,7 @@ fn parse_managed_envs(json_lines: &str) -> Vec<ManagedEnvInfo> {
         .collect()
 }
 
-/// Run `enwiro list-all --json`, capture stdout, and parse via `parse_managed_envs`.
+/// Run `enwiro ls --json`, capture stdout, and parse via `parse_managed_envs`.
 ///
 /// Returns an empty vec on any subprocess or parse error.
 fn fetch_managed_envs() -> Vec<ManagedEnvInfo> {
@@ -345,23 +345,23 @@ fn fetch_managed_envs() -> Vec<ManagedEnvInfo> {
         .and_then(|p| p.parent().map(|d| d.join("enw")))
         .unwrap_or_else(|| std::path::PathBuf::from("enw"));
     let output = std::process::Command::new(&enwiro_bin)
-        .args(["list-all", "--json"])
+        .args(["ls", "--json"])
         .output();
     match output {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
             if !out.status.success() {
-                tracing::warn!(status = %out.status, stderr = %stderr, "enwiro list-all failed");
+                tracing::warn!(status = %out.status, stderr = %stderr, "enwiro ls failed");
             } else if stdout.is_empty() {
-                tracing::warn!("enwiro list-all returned empty output");
+                tracing::warn!("enwiro ls returned empty output");
             } else {
-                tracing::debug!(lines = stdout.lines().count(), "enwiro list-all output");
+                tracing::debug!(lines = stdout.lines().count(), "enwiro ls output");
             }
             parse_managed_envs(&stdout)
         }
         Err(e) => {
-            tracing::warn!(error = %e, "failed to run enwiro list-all --json");
+            tracing::warn!(error = %e, "failed to run enwiro ls --json");
             vec![]
         }
     }
@@ -1290,7 +1290,7 @@ mod tests {
     // ── parse_managed_envs tests ──────────────────────────────────────────────
     //
     // `parse_managed_envs` accepts newline-delimited JSON (one entry per line)
-    // produced by `enwiro list-all --json` and returns only managed environments
+    // produced by `enwiro ls --json` and returns only managed environments
     // (cookbook == "_") that carry a `scores.slot` value.
     //
     // Each returned `ManagedEnvInfo` has:

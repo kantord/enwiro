@@ -62,7 +62,8 @@ just install-dev                                   # Reinstall all your enwiro p
 Then test with:
 
 ```bash
-enw list-all          # List environments and recipes
-enw list-environments # List only environments
+enw ls                # List environments and recipes
+enw ls --envs         # List only environments (no daemon required)
+enw ls --recipes      # List only available recipes
 enw activate <name>   # Activate an environment
 ```

@@ -16,8 +16,7 @@ cargo install enwiro
 enw activate <NAME>                         # Activate (switch to) an environment's workspace
 enw wrap <COMMAND> [-- [COMMAND_ARGS]...]   # Run a command inside an environment
 enw show-path [ENVIRONMENT_NAME]            # Show the path of an environment
-enw list-environments                       # List all existing environments
-enw list-all                                # List environments and available recipes
+enw ls [--all|--envs|--recipes] [--json]    # List environments and/or available recipes
 ```
 
 ## Configuration

@@ -1,7 +1,6 @@
 pub mod activate;
 pub mod adapter;
-pub mod list_all;
-pub mod list_environments;
+pub mod ls;
 pub mod prep;
 pub mod rm;
 pub mod run;

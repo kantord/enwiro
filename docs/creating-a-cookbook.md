@@ -240,7 +240,7 @@ if __name__ == "__main__":
 
 ## How It All Fits Together
 
-When a user runs `enw list-all`, here's what happens:
+When a user runs `enw ls`, here's what happens:
 
 1. Enwiro discovers all `enwiro-cookbook-*` binaries on `$PATH`.
 2. It calls `metadata` on each to learn their priority (falling back to 50).

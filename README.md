@@ -130,7 +130,7 @@ List of currently available bridges:
 
 ### Daemon
 
-`enw activate` and `enw list-all` need a background daemon. Some cookbooks
+`enw activate` and `enw ls` need a background daemon. Some cookbooks
 fetch recipes over the network (the GitHub cookbook, for example), so enwiro
 does that work in a daemon to keep the foreground commands fast. Both
 commands will fail if the daemon is not running.
