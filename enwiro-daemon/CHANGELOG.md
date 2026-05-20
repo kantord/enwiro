@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.4...enwiro-daemon-v0.0.5) - 2026-05-20
+
+### Added
+
+- replace show-path with prep ([#478](https://github.com/kantord/enwiro/pull/478))
+- allow project-level config overrides ([#469](https://github.com/kantord/enwiro/pull/469))
+
 ## [0.0.4](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.3...enwiro-daemon-v0.0.4) - 2026-05-17
 
 ### Added

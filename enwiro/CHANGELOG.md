@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.36](https://github.com/kantord/enwiro/compare/enwiro-v0.3.35...enwiro-v0.3.36) - 2026-05-20
+
+### Added
+
+- replace show-path with prep ([#478](https://github.com/kantord/enwiro/pull/478))
+- allow project-level config overrides ([#469](https://github.com/kantord/enwiro/pull/469))
+
+### Fixed
+
+- *(deps)* update rust crate dialoguer to 0.12 ([#465](https://github.com/kantord/enwiro/pull/465))
+
 ## [0.3.35](https://github.com/kantord/enwiro/compare/enwiro-v0.3.34...enwiro-v0.3.35) - 2026-05-19
 
 ### Added

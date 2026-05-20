@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.3.1...enwiro-sdk-v0.4.0) - 2026-05-20
+
+### Added
+
+- allow project-level config overrides ([#469](https://github.com/kantord/enwiro/pull/469))
+
+### Other
+
+- *(sdk)* replace shell-script fixtures with prebuilt fake-plugin  ([#479](https://github.com/kantord/enwiro/pull/479))
+
 ## [0.3.1](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.3.0...enwiro-sdk-v0.3.1) - 2026-05-17
 
 ### Added
