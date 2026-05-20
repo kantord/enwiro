@@ -24,3 +24,10 @@ test-helpers = []
 [dev-dependencies]
 rstest = "0.26.0"
 tempfile = "3.25.0"
+
+[[bin]]
+name = "test-fake-plugin"
+path = "tests/support/fake_plugin.rs"
+test = false
+bench = false
+doc = false
