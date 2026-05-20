@@ -48,8 +48,10 @@ Gear URLs are flattened into `<source>-<gear>-url` keys (`github-issue-url`,
 `obsidian-note-url`, ...) so aw-server's query layer can filter on them
 without `json_extract` traversal. Metadata is cached for 10 seconds per env.
 
-When no workspace is focused or the workspace name does not match the
-`<num>: <env>` shape, the bridge reports `env=no-env`.
+When no workspace is focused, or the workspace name does not match the
+`<num>: <env>` shape, the bridge **emits no heartbeat** that tick. aw-server
+shows a gap in the timeline — same as any other inactive period. There is no
+synthetic "no-env" event.
 
 ## Heartbeat shape
 

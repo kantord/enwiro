@@ -10,7 +10,6 @@ use tokio_i3ipc::I3;
 
 const CLIENT_NAME: &str = "aw-watcher-enwiro";
 const EVENT_TYPE: &str = "currentenv";
-const NO_ENV: &str = "no-env";
 const AW_BASE_URL: &str = "http://localhost:5600";
 const INTERVAL: Duration = Duration::from_secs(5);
 const PULSETIME_SECS: f64 = 15.0;
@@ -131,9 +130,6 @@ impl MetaCache {
 fn build_heartbeat_data(env_name: &str, cache: &mut MetaCache) -> Value {
     let mut obj = Map::new();
     obj.insert("env".to_string(), Value::String(env_name.to_string()));
-    if env_name == NO_ENV {
-        return Value::Object(obj);
-    }
     obj.insert("title".to_string(), Value::String(env_name.to_string()));
     for (k, v) in cache.get(env_name) {
         obj.insert(k, v);
@@ -218,17 +214,19 @@ async fn main() -> Result<()> {
     let mut cache = MetaCache::new();
 
     loop {
-        let env_name = match focused_env(&mut i3).await {
-            Ok(Some(name)) => name,
-            Ok(None) => NO_ENV.to_string(),
+        match focused_env(&mut i3).await {
+            Ok(Some(env_name)) => {
+                let data = build_heartbeat_data(&env_name, &mut cache);
+                if let Err(e) = aw.heartbeat(&bucket_id, &data, PULSETIME_SECS) {
+                    tracing::warn!(error = %e, "heartbeat failed");
+                }
+            }
+            Ok(None) => {
+                tracing::debug!("no focused env — skipping heartbeat so aw-server shows a gap");
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "i3 query failed");
-                NO_ENV.to_string()
             }
-        };
-        let data = build_heartbeat_data(&env_name, &mut cache);
-        if let Err(e) = aw.heartbeat(&bucket_id, &data, PULSETIME_SECS) {
-            tracing::warn!(error = %e, "heartbeat failed");
         }
         tokio::time::sleep(INTERVAL).await;
     }
@@ -255,13 +253,6 @@ mod tests {
         assert_eq!(extract_env_from_workspace_name("8"), None);
         assert_eq!(extract_env_from_workspace_name("8:"), None);
         assert_eq!(extract_env_from_workspace_name("8:   "), None);
-    }
-
-    #[test]
-    fn build_data_for_no_env_skips_metadata() {
-        let mut cache = MetaCache::new();
-        let data = build_heartbeat_data(NO_ENV, &mut cache);
-        assert_eq!(data, serde_json::json!({"env": "no-env"}));
     }
 
     #[test]
