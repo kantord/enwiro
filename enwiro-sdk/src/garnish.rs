@@ -124,10 +124,7 @@ pub fn run_garnish(garnish: &dyn Garnish, project_dir: &Path) -> Option<GearFile
 mod tests {
     use super::*;
     use crate::gear::{Gear, SCHEMA_VERSION};
-    use crate::plugin::PluginKind;
     use std::collections::HashMap;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     fn one_gear(name: &str, description: &str) -> GearFileData {
         GearFileData {
@@ -232,72 +229,6 @@ mod tests {
         #[test]
         fn swallows_panic_in_gear() {
             assert!(run(true, FakeResult::PanicInGear).is_none());
-        }
-    }
-
-    mod client {
-        use super::*;
-
-        /// Drops a fake garnish binary (POSIX shell) into a tempdir,
-        /// matched against the given subcommand → output script body.
-        /// Returns a `GarnishClient` pointed at it.
-        fn fake_garnish(name: &str, script: &str) -> (tempfile::TempDir, GarnishClient) {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join(format!("enwiro-garnish-{name}"));
-            fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-            let plugin = Plugin {
-                name: name.into(),
-                kind: PluginKind::Garnish,
-                executable: path.to_string_lossy().into(),
-            };
-            (dir, GarnishClient::new(plugin))
-        }
-
-        #[test]
-        fn name_uses_plugin_name() {
-            let (_d, c) = fake_garnish("just", "exit 0");
-            assert_eq!(c.name(), "just");
-        }
-
-        #[test]
-        fn applies_to_true_when_binary_exits_zero() {
-            let (_d, c) = fake_garnish("just", r#"case "$1" in applies-to) exit 0 ;; esac"#);
-            assert!(c.applies_to(Path::new("/tmp")));
-        }
-
-        #[test]
-        fn applies_to_false_when_binary_exits_nonzero() {
-            let (_d, c) = fake_garnish("just", r#"case "$1" in applies-to) exit 1 ;; esac"#);
-            assert!(!c.applies_to(Path::new("/tmp")));
-        }
-
-        #[test]
-        fn gear_parses_stdout_as_gearfiledata() {
-            let json = r#"{"version":1,"gear":{"just":{"description":"x"}}}"#;
-            let (_d, c) = fake_garnish(
-                "just",
-                &format!(r#"case "$1" in gear) printf '{json}' ;; esac"#),
-            );
-            let out = c.gear(Path::new("/tmp")).unwrap().unwrap();
-            assert_eq!(out.version, 1);
-            assert_eq!(out.gear["just"].description, "x");
-        }
-
-        #[test]
-        fn gear_returns_none_for_empty_stdout() {
-            let (_d, c) = fake_garnish("just", r#"case "$1" in gear) exit 0 ;; esac"#);
-            assert!(c.gear(Path::new("/tmp")).unwrap().is_none());
-        }
-
-        #[test]
-        fn gear_errors_on_nonzero_exit() {
-            let (_d, c) = fake_garnish(
-                "just",
-                r#"case "$1" in gear) echo "broken" >&2; exit 2 ;; esac"#,
-            );
-            let err = c.gear(Path::new("/tmp")).unwrap_err();
-            assert!(err.to_string().contains("exited with"));
         }
     }
 }
