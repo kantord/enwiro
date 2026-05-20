@@ -9,6 +9,7 @@ decision, and the trade-offs.
 | ADR                                        | Title                                  | Status   |
 | ------------------------------------------ | -------------------------------------- | -------- |
 | [0001](0001-project-level-config.md)       | Project-level config via `.enwiro.toml` | Accepted |
+| [0002](0002-daemon-ipc-architecture.md)    | Daemon IPC architecture                | Proposed |
 
 ## Status values
 
