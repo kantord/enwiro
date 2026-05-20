@@ -25,6 +25,10 @@ fn extract_env_from_workspace_name(name: &str) -> Option<String> {
     }
 }
 
+fn is_known_env(env_name: &str) -> bool {
+    enwiro_envs_dir().join(env_name).is_dir()
+}
+
 fn enwiro_envs_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("ENWIRO_ENVS_DIR") {
         return PathBuf::from(dir);
@@ -215,14 +219,20 @@ async fn main() -> Result<()> {
 
     loop {
         match focused_env(&mut i3).await {
-            Ok(Some(env_name)) => {
+            Ok(Some(env_name)) if is_known_env(&env_name) => {
                 let data = build_heartbeat_data(&env_name, &mut cache);
                 if let Err(e) = aw.heartbeat(&bucket_id, &data, PULSETIME_SECS) {
                     tracing::warn!(error = %e, "heartbeat failed");
                 }
             }
+            Ok(Some(env_name)) => {
+                tracing::debug!(
+                    %env_name,
+                    "workspace matches `<num>: <env>` but env dir missing — skipping",
+                );
+            }
             Ok(None) => {
-                tracing::debug!("no focused env — skipping heartbeat so aw-server shows a gap");
+                tracing::debug!("no focused env — skipping heartbeat");
             }
             Err(e) => {
                 tracing::warn!(error = %e, "i3 query failed");
