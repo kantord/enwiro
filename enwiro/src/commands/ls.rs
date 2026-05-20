@@ -4,26 +4,79 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::context::CommandContext;
+use crate::environments::Environment;
 use crate::usage_stats::EnvStats;
 use enwiro_sdk::client::{CachedRecipe, EnvScores};
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Scope {
+    All,
+    Envs,
+    Recipes,
+}
 
 #[derive(clap::Args)]
 #[command(
     author,
     version,
-    about = "list all existing environments as well as recipes to create environments"
+    about = "list existing environments and/or available recipes"
 )]
-pub struct ListAllArgs {
+pub struct LsArgs {
+    /// Show both environments and recipes (default)
+    #[arg(long, group = "scope")]
+    pub all: bool,
+    /// Show only existing environments (does not require the daemon)
+    #[arg(long, group = "scope")]
+    pub envs: bool,
+    /// Show only available recipes (requires the daemon cache)
+    #[arg(long, group = "scope")]
+    pub recipes: bool,
     /// Output in JSON lines format
     #[arg(long)]
     pub json: bool,
 }
 
-pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow::Result<()> {
-    // 1. Always list environments (instant — local directory listing), sorted by frecency
-    let mut envs: Vec<_> = context.get_all_environments()?.into_values().collect();
+impl LsArgs {
+    pub fn scope(&self) -> Scope {
+        if self.envs {
+            Scope::Envs
+        } else if self.recipes {
+            Scope::Recipes
+        } else {
+            Scope::All
+        }
+    }
+}
 
-    // Build per-env metadata from colocated meta.json files
+pub fn ls<W: Write>(
+    context: &mut CommandContext<W>,
+    scope: Scope,
+    json: bool,
+) -> anyhow::Result<()> {
+    let env_names = match scope {
+        Scope::All | Scope::Envs => write_envs(context, json)?,
+        Scope::Recipes => collect_env_names(context)?,
+    };
+    if scope == Scope::Envs {
+        return Ok(());
+    }
+    write_recipes(context, json, &env_names)
+}
+
+fn collect_env_names<W: Write>(context: &CommandContext<W>) -> anyhow::Result<HashSet<String>> {
+    Ok(context
+        .get_all_environments()?
+        .into_values()
+        .map(|e| e.name)
+        .collect())
+}
+
+fn write_envs<W: Write>(
+    context: &mut CommandContext<W>,
+    json: bool,
+) -> anyhow::Result<HashSet<String>> {
+    let mut envs: Vec<Environment> = context.get_all_environments()?.into_values().collect();
+
     let mut meta_map: HashMap<String, EnvStats> = HashMap::new();
     for env in &envs {
         let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
@@ -32,7 +85,6 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
             meta_map.insert(env.name.clone(), meta);
         }
     }
-    // Legacy fallback: check centralized stats for envs without per-env metadata
     let legacy_stats = crate::usage_stats::load_stats_default();
     for env in &envs {
         if !meta_map.contains_key(&env.name)
@@ -41,7 +93,6 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
             meta_map.insert(env.name.clone(), s.clone());
         }
     }
-    // Ensure every env has an entry in meta_map so activation_percentile_scores sees the full population
     for env in &envs {
         meta_map.entry(env.name.clone()).or_default();
     }
@@ -57,6 +108,7 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.name.cmp(&b.name))
     });
+
     for env in &envs {
         if json {
             let launcher = percentile_map.get(&env.name).copied().unwrap_or(0.0);
@@ -82,10 +134,14 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
         }
     }
 
-    // Collect environment names to filter out duplicate recipes
-    let env_names: HashSet<&str> = envs.iter().map(|e| e.name.as_str()).collect();
+    Ok(envs.into_iter().map(|e| e.name).collect())
+}
 
-    // 2. Resolve the daemon cache (test-injectable via cache_dir)
+fn write_recipes<W: Write>(
+    context: &mut CommandContext<W>,
+    json: bool,
+    env_names: &HashSet<String>,
+) -> anyhow::Result<()> {
     let cache = match &context.cache_dir {
         Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
         None => enwiro_daemon::DaemonCache::open()?,
@@ -101,7 +157,6 @@ pub fn list_all<W: Write>(context: &mut CommandContext<W>, json: bool) -> anyhow
             )
         })?;
 
-    // 5. Write recipes, excluding any that match an existing environment
     for line in recipes.lines() {
         if line.is_empty() {
             continue;
@@ -145,14 +200,14 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_shows_environments_and_recipes(
+    fn test_ls_shows_environments_and_recipes(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("my-env");
         context_object.write_cache_entries(&[("git", "repo-a", None), ("git", "repo-b", None)]);
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(output.contains("_: my-env"));
@@ -161,14 +216,14 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_excludes_recipes_that_match_existing_environments(
+    fn test_ls_excludes_recipes_that_match_existing_environments(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("repo-a");
         context_object.write_cache_entries(&[("git", "repo-a", None), ("git", "repo-b", None)]);
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(output.contains("_: repo-a"), "Environment should be listed");
@@ -183,7 +238,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_excludes_recipes_with_descriptions_that_match_existing_environments(
+    fn test_ls_excludes_recipes_with_descriptions_that_match_existing_environments(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
@@ -193,7 +248,7 @@ mod tests {
             ("github", "repo#99", Some("Add feature")),
         ]);
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(
@@ -207,7 +262,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_with_no_recipes_in_cache(
+    fn test_ls_with_no_recipes_in_cache(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
@@ -215,7 +270,7 @@ mod tests {
         context_object.create_mock_environment("env-b");
         context_object.write_cache_entries(&[]);
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(output.contains("_: env-a"));
@@ -224,13 +279,13 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_with_no_environments_but_has_recipes(
+    fn test_ls_with_no_environments_but_has_recipes(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.write_cache_entries(&[("git", "some-repo", None)]);
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(output.contains("git: some-repo"));
@@ -238,7 +293,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_with_multiple_cookbooks(
+    fn test_ls_with_multiple_cookbooks(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
@@ -248,7 +303,7 @@ mod tests {
             ("npm", "pkg-y", None),
         ]);
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(output.contains("git: repo-a"));
@@ -257,13 +312,12 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_reads_from_cache_when_available(
+    fn test_ls_reads_from_cache_when_available(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         let cache_dir = context_object.cache_dir.clone().unwrap();
 
-        // Pre-populate cache with JSONL (daemon format)
         std::fs::create_dir_all(&cache_dir).unwrap();
         std::fs::write(
             cache_dir.join("recipes.cache"),
@@ -271,10 +325,9 @@ mod tests {
         )
         .unwrap();
 
-        // No cookbooks — if it falls back to sync, output would be empty
         context_object.cookbooks = vec![];
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(
@@ -285,7 +338,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_sorts_environments_by_frecency(
+    fn test_ls_sorts_environments_by_frecency(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -294,7 +347,6 @@ mod tests {
         context_object.create_mock_environment("never-used");
         context_object.write_cache_entries(&[]);
 
-        // Write per-env meta.json giving "often-used" a high score and "rarely-used" a low score
         let now = crate::usage_stats::now_timestamp();
         let often_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
@@ -323,7 +375,7 @@ mod tests {
         )
         .unwrap();
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         let env_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("_: ")).collect();
@@ -332,16 +384,9 @@ mod tests {
         assert_eq!(env_lines[2], "_: never-used");
     }
 
-    /// Verify that `list-all` orders environments by percentile rank (highest first).
-    ///
-    /// Three environments are given clearly distinct activation histories so their
-    /// raw frecency scores are strictly ordered: high > mid > low.  Because
-    /// `launcher_score` returns percentile rank (monotone with raw frecency), the
-    /// expected output order is the same: high, mid, low.  The test confirms that
-    /// the sort is wired through `launcher_score` (percentile) rather than raw
-    /// decay sum, establishing the end-to-end contract.
+    /// Verify that `ls` orders environments by percentile rank (highest first).
     #[rstest]
-    fn test_list_all_orders_environments_by_launcher_percentile_score(
+    fn test_ls_orders_environments_by_launcher_percentile_score(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -352,7 +397,6 @@ mod tests {
 
         let now = crate::usage_stats::now_timestamp();
 
-        // high-activity: 5 recent activations — highest frecency → highest percentile
         let high_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now, 1.0); 5],
@@ -360,7 +404,6 @@ mod tests {
             },
             ..Default::default()
         };
-        // mid-activity: 1 activation 48 h ago — score ≈ 0.5, middle percentile
         let mid_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now - 48 * 3600, 1.0)],
@@ -368,7 +411,6 @@ mod tests {
             },
             ..Default::default()
         };
-        // low-activity: no activations at all — score 0.0, lowest percentile
 
         std::fs::write(
             temp_dir.path().join("high-activity").join("meta.json"),
@@ -381,47 +423,20 @@ mod tests {
         )
         .unwrap();
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         let env_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("_: ")).collect();
-        assert_eq!(
-            env_lines.len(),
-            3,
-            "expected 3 env lines, got: {:?}",
-            env_lines
-        );
-        assert_eq!(
-            env_lines[0], "_: high-activity",
-            "highest percentile rank must be first"
-        );
-        assert_eq!(
-            env_lines[1], "_: mid-activity",
-            "middle percentile rank must be second"
-        );
-        assert_eq!(
-            env_lines[2], "_: low-activity",
-            "lowest percentile rank (no activations) must be last"
-        );
+        assert_eq!(env_lines.len(), 3);
+        assert_eq!(env_lines[0], "_: high-activity");
+        assert_eq!(env_lines[1], "_: mid-activity");
+        assert_eq!(env_lines[2], "_: low-activity");
     }
 
-    /// Verify that `list-all` sorts environments using `launcher_score` from `usage_stats`.
-    ///
-    /// This test checks two things:
-    /// 1. `crate::usage_stats::launcher_score` is a callable public symbol (compile-time check).
-    /// 2. The ordering produced by `list_all` is consistent with what `launcher_score` returns
-    ///    for the same input data — establishing that the caller is wired to `launcher_score`
-    ///    rather than some other scoring function.
-    ///
-    /// Two environments are set up with different activation histories.  `launcher_score` is
-    /// called directly with the same metadata to derive the expected ordering.  `list_all` must
-    /// place the environment with the higher `launcher_score` first.
     #[rstest]
-    fn test_list_all_uses_launcher_score_for_ordering(
+    fn test_ls_uses_launcher_score_for_ordering(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
-        use std::collections::HashMap;
-
         let (temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("alpha");
         context_object.create_mock_environment("beta");
@@ -429,7 +444,6 @@ mod tests {
 
         let now = crate::usage_stats::now_timestamp();
 
-        // "beta" gets a recent activation; "alpha" gets none.
         let beta_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
                 activation_buffer: vec![(now, 1.0)],
@@ -445,49 +459,30 @@ mod tests {
         )
         .unwrap();
 
-        // Derive the expected order using launcher_score directly (compile-time symbol check).
         let mut meta_map: HashMap<String, crate::usage_stats::EnvStats> = HashMap::new();
-        meta_map.insert("alpha".to_string(), alpha_meta.clone());
-        meta_map.insert("beta".to_string(), beta_meta.clone());
+        meta_map.insert("alpha".to_string(), alpha_meta);
+        meta_map.insert("beta".to_string(), beta_meta);
 
         let scores = crate::usage_stats::launcher_score(&meta_map, now);
-        assert!(
-            scores["beta"] > scores["alpha"],
-            "launcher_score must rank beta higher than alpha; beta={}, alpha={}",
-            scores["beta"],
-            scores["alpha"]
-        );
+        assert!(scores["beta"] > scores["alpha"]);
 
-        // Now verify list_all produces the same ordering.
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         let env_lines: Vec<&str> = output.lines().filter(|l| l.starts_with("_: ")).collect();
-        assert_eq!(
-            env_lines.len(),
-            2,
-            "expected 2 env lines, got: {:?}",
-            env_lines
-        );
-        assert_eq!(
-            env_lines[0], "_: beta",
-            "list_all must put the environment with the higher launcher_score first"
-        );
-        assert_eq!(
-            env_lines[1], "_: alpha",
-            "list_all must put the environment with the lower launcher_score second"
-        );
+        assert_eq!(env_lines.len(), 2);
+        assert_eq!(env_lines[0], "_: beta");
+        assert_eq!(env_lines[1], "_: alpha");
     }
 
     #[rstest]
-    fn test_list_all_shows_description_for_environments(
+    fn test_ls_shows_description_for_environments(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("owner-repo#42");
         context_object.write_cache_entries(&[]);
 
-        // Write per-env meta.json with description
         let now = crate::usage_stats::now_timestamp();
         let meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
@@ -505,7 +500,7 @@ mod tests {
         )
         .unwrap();
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         assert!(
@@ -515,22 +510,18 @@ mod tests {
         );
     }
 
-    /// list_all preserves the order of recipes as they appear in the cache.
-    /// The daemon owns the ordering decision (priority, sort_order, name); list_all
-    /// just outputs cached entries in cache order.
     #[rstest]
-    fn test_list_all_preserves_cache_order(
+    fn test_ls_preserves_cache_order(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        // Cache is pre-sorted by the daemon. list_all must preserve that order.
         context_object.write_cache_entries(&[
             ("git", "my-repo", None),
             ("chezmoi", "dotfiles", None),
             ("github", "repo#1", None),
         ]);
 
-        list_all(&mut context_object, false).unwrap();
+        ls(&mut context_object, Scope::All, false).unwrap();
 
         let output = context_object.get_output();
         let recipe_lines: Vec<&str> = output.lines().filter(|l| !l.starts_with("_: ")).collect();
@@ -540,13 +531,12 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_errors_when_cache_unavailable(
+    fn test_ls_errors_when_cache_unavailable(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
-        // No cache file written: simulates the daemon not running.
 
-        let result = list_all(&mut context_object, false);
+        let result = ls(&mut context_object, Scope::All, false);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -556,14 +546,14 @@ mod tests {
     }
 
     #[rstest]
-    fn test_list_all_json_flag_outputs_jsonl(
+    fn test_ls_json_flag_outputs_jsonl(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("my-env");
         context_object.write_cache_entries(&[("git", "repo-a", None)]);
 
-        list_all(&mut context_object, true).unwrap();
+        ls(&mut context_object, Scope::All, true).unwrap();
 
         let entries = parse_json_entries(&context_object.get_output());
         assert!(
@@ -578,20 +568,17 @@ mod tests {
         );
     }
 
-    /// Existing environment entries in `list-all --json` output must include a `scores`
-    /// object with `launcher` (f64) and `slot` (f64) fields.
     #[rstest]
-    fn test_list_all_json_env_entry_has_scores_object(
+    fn test_ls_json_env_entry_has_scores_object(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.create_mock_environment("my-env");
         context_object.write_cache_entries(&[]);
 
-        list_all(&mut context_object, true).unwrap();
+        ls(&mut context_object, Scope::All, true).unwrap();
 
         let output = context_object.get_output();
-        // Parse as raw JSON values to check field presence and type
         let entries: Vec<serde_json::Value> = output
             .lines()
             .filter(|l| !l.is_empty())
@@ -607,37 +594,21 @@ mod tests {
             .get("scores")
             .expect("env entry must have a 'scores' field");
 
-        assert!(
-            scores.get("launcher").is_some(),
-            "scores must have a 'launcher' field, got: {scores}"
-        );
-        assert!(
-            scores["launcher"].is_f64() || scores["launcher"].is_number(),
-            "scores.launcher must be a number, got: {}",
-            scores["launcher"]
-        );
+        assert!(scores.get("launcher").is_some());
+        assert!(scores["launcher"].is_f64() || scores["launcher"].is_number());
 
-        assert!(
-            scores.get("slot").is_some(),
-            "scores must have a 'slot' field, got: {scores}"
-        );
-        assert!(
-            scores["slot"].is_f64() || scores["slot"].is_number(),
-            "scores.slot must be a number, got: {}",
-            scores["slot"]
-        );
+        assert!(scores.get("slot").is_some());
+        assert!(scores["slot"].is_f64() || scores["slot"].is_number());
     }
 
-    /// Recipe entries (cookbook != "_") in `list-all --json` output must NOT have a `scores`
-    /// field — scores are only meaningful for existing environments.
     #[rstest]
-    fn test_list_all_json_recipe_entry_has_no_scores_field(
+    fn test_ls_json_recipe_entry_has_no_scores_field(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
         context_object.write_cache_entries(&[("git", "repo-a", None)]);
 
-        list_all(&mut context_object, true).unwrap();
+        ls(&mut context_object, Scope::All, true).unwrap();
 
         let output = context_object.get_output();
         let entries: Vec<serde_json::Value> = output
@@ -651,16 +622,11 @@ mod tests {
             .find(|e| e["cookbook"] == "git" && e["name"] == "repo-a")
             .expect("expected a recipe entry for git: repo-a");
 
-        assert!(
-            recipe_entry.get("scores").is_none(),
-            "recipe entry must NOT have a 'scores' field, got: {recipe_entry}"
-        );
+        assert!(recipe_entry.get("scores").is_none());
     }
 
-    /// An environment with higher frecency must have higher `scores.launcher` and
-    /// `scores.slot` than a never-used environment in `list-all --json` output.
     #[rstest]
-    fn test_list_all_json_higher_frecency_env_has_higher_scores(
+    fn test_ls_json_higher_frecency_env_has_higher_scores(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -668,7 +634,6 @@ mod tests {
         context_object.create_mock_environment("never-used");
         context_object.write_cache_entries(&[]);
 
-        // Give "often-used" a high activation history
         let now = crate::usage_stats::now_timestamp();
         let often_meta = crate::usage_stats::EnvStats {
             signals: UserIntentSignals {
@@ -683,9 +648,8 @@ mod tests {
             serde_json::to_string(&often_meta).unwrap(),
         )
         .unwrap();
-        // "never-used" has no meta.json — default empty stats
 
-        list_all(&mut context_object, true).unwrap();
+        ls(&mut context_object, Scope::All, true).unwrap();
 
         let output = context_object.get_output();
         let entries: Vec<serde_json::Value> = output
@@ -703,28 +667,132 @@ mod tests {
             .find(|e| e["cookbook"] == "_" && e["name"] == "never-used")
             .expect("expected entry for never-used");
 
-        let often_launcher = often_entry["scores"]["launcher"]
-            .as_f64()
-            .expect("often-used must have scores.launcher as f64");
-        let never_launcher = never_entry["scores"]["launcher"]
-            .as_f64()
-            .expect("never-used must have scores.launcher as f64");
+        let often_launcher = often_entry["scores"]["launcher"].as_f64().unwrap();
+        let never_launcher = never_entry["scores"]["launcher"].as_f64().unwrap();
+        assert!(often_launcher > never_launcher);
 
+        let often_slot = often_entry["scores"]["slot"].as_f64().unwrap();
+        let never_slot = never_entry["scores"]["slot"].as_f64().unwrap();
+        assert!(often_slot >= never_slot);
+    }
+
+    /// `Scope::Envs` lists only environments and does not touch the daemon cache,
+    /// so it must succeed even when no cache file exists.
+    #[rstest]
+    fn test_ls_envs_does_not_require_daemon_cache(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("env-a");
+        context_object.create_mock_environment("env-b");
+
+        ls(&mut context_object, Scope::Envs, false).unwrap();
+
+        let output = context_object.get_output();
+        assert!(output.contains("_: env-a"));
+        assert!(output.contains("_: env-b"));
+        for line in output.lines().filter(|l| !l.is_empty()) {
+            assert!(
+                line.starts_with("_: "),
+                "unexpected non-env line {line:?} in {output:?}"
+            );
+        }
+    }
+
+    #[rstest]
+    fn test_ls_envs_omits_recipes(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("my-env");
+        context_object.write_cache_entries(&[("git", "repo-a", None)]);
+
+        ls(&mut context_object, Scope::Envs, false).unwrap();
+
+        let output = context_object.get_output();
+        assert!(output.contains("_: my-env"));
+        assert!(!output.contains("git: repo-a"));
+    }
+
+    #[rstest]
+    fn test_ls_envs_json_emits_env_entries_with_scores(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("my-env");
+
+        ls(&mut context_object, Scope::Envs, true).unwrap();
+
+        let output = context_object.get_output();
+        let entries: Vec<serde_json::Value> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["cookbook"], "_");
+        assert_eq!(entries[0]["name"], "my-env");
+        assert!(entries[0]["scores"].is_object());
+    }
+
+    #[rstest]
+    fn test_ls_recipes_omits_environments(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("my-env");
+        context_object.write_cache_entries(&[("git", "repo-a", None)]);
+
+        ls(&mut context_object, Scope::Recipes, false).unwrap();
+
+        let output = context_object.get_output();
+        assert!(!output.contains("_: my-env"));
+        assert!(output.contains("git: repo-a"));
+    }
+
+    #[rstest]
+    fn test_ls_recipes_still_filters_recipes_matching_existing_environments(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("repo-a");
+        context_object.write_cache_entries(&[("git", "repo-a", None), ("git", "repo-b", None)]);
+
+        ls(&mut context_object, Scope::Recipes, false).unwrap();
+
+        let output = context_object.get_output();
+        assert!(!output.contains("git: repo-a"));
+        assert!(output.contains("git: repo-b"));
+    }
+
+    #[rstest]
+    fn test_ls_recipes_json_emits_only_recipes(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("my-env");
+        context_object.write_cache_entries(&[("git", "repo-a", None)]);
+
+        ls(&mut context_object, Scope::Recipes, true).unwrap();
+
+        let entries = parse_json_entries(&context_object.get_output());
+        assert!(entries.iter().all(|e| e.cookbook != "_"));
         assert!(
-            often_launcher > never_launcher,
-            "often-used (launcher={often_launcher}) must outscore never-used (launcher={never_launcher})"
+            entries
+                .iter()
+                .any(|e| e.cookbook == "git" && e.name == "repo-a")
         );
+    }
 
-        let often_slot = often_entry["scores"]["slot"]
-            .as_f64()
-            .expect("often-used must have scores.slot as f64");
-        let never_slot = never_entry["scores"]["slot"]
-            .as_f64()
-            .expect("never-used must have scores.slot as f64");
+    #[rstest]
+    fn test_ls_recipes_errors_when_cache_unavailable(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
 
-        assert!(
-            often_slot >= never_slot,
-            "often-used (slot={often_slot}) must not score below never-used (slot={never_slot})"
-        );
+        let result = ls(&mut context_object, Scope::Recipes, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("daemon"));
     }
 }
