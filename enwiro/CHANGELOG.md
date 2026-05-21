@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.37](https://github.com/kantord/enwiro/compare/enwiro-v0.3.36...enwiro-v0.3.37) - 2026-05-21
+
+### Added
+
+- unify list commands ([#487](https://github.com/kantord/enwiro/pull/487))
+
 ## [0.3.36](https://github.com/kantord/enwiro/compare/enwiro-v0.3.35...enwiro-v0.3.36) - 2026-05-20
 
 ### Added

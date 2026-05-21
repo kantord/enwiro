@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.22](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.21...enwiro-adapter-i3wm-v0.1.22) - 2026-05-21
+
+### Added
+
+- unify list commands ([#487](https://github.com/kantord/enwiro/pull/487))
+
 ## [0.1.21](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.20...enwiro-adapter-i3wm-v0.1.21) - 2026-05-20
 
 ### Added

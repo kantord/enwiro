@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.36"
+version = "0.3.37"
 dependencies = [
  "anyhow",
  "assertables",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-i3wm"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "clap",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-i3-activitywatch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "hostname",
@@ -694,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-rofi"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "enwiro-sdk",
