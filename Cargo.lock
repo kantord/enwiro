@@ -782,6 +782,7 @@ dependencies = [
  "dirs",
  "enwiro-sdk",
  "filetime",
+ "futures-util",
  "home",
  "libc",
  "optative-process-pool",
@@ -790,6 +791,8 @@ dependencies = [
  "signal-hook",
  "system-idle-time",
  "tempfile",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -823,12 +826,17 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "config",
+ "dirs",
+ "futures-util",
  "home",
  "rstest",
  "serde",
  "serde_json",
  "strum_macros",
  "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "tracing-appender",
@@ -987,6 +995,7 @@ checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
  "futures-core",
  "futures-macro",
+ "futures-sink",
  "futures-task",
  "pin-project-lite",
  "slab",

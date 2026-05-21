@@ -32,8 +32,8 @@ Today's communication shapes:
 - **Daemon → enw** — the daemon writes `recipes.cache` to
   `$XDG_RUNTIME_DIR/enwiro/`; `enw` reads it via
   `DaemonCache::read_recipes()` (`enwiro-daemon/src/lib.rs:36`,
-  consumed at `enwiro/src/context.rs:93-96` and
-  `enwiro/src/commands/list_all.rs:89-95`). `enw` still re-implements the
+  consumed at `enwiro/src/context.rs:99-103` and
+  `enwiro/src/commands/ls.rs:144-151`). `enw` still re-implements the
   cookbook iteration / sort / filter logic on top of the cached recipes.
 - **Host → cookbook plugin** — host invokes
   `<plugin> list-recipes` / `<plugin> cook` and parses stdout JSON
@@ -365,7 +365,7 @@ should live in the daemon.
 - **Cookbook composition has a real home.** `cookbook.invoke` lets the
   github cookbook delegate to git rather than re-declaring the git
   cookbook's config schema. The duplicated `GitCookbookConfig` block at
-  `enwiro-cookbook-github/src/main.rs:21-28` (referenced in ADR-0001's
+  `enwiro-cookbook-github/src/main.rs:26-29` (referenced in ADR-0001's
   references section) is the concrete mirror that becomes
   unnecessary once `cookbook.invoke` exists. The broader #301
   motivation — composing cookbooks without out-of-band conventions —
@@ -406,8 +406,8 @@ should live in the daemon.
   JSON-RPC error if the socket isn't bindable. Mitigated by systemd unit
   posture (`Restart=always`, per #330's spirit); document the failure
   message so users can diagnose.
-- **Migration cost.** Existing `enw` code (e.g. `context.rs:93-96`,
-  `commands/list_all.rs:90-95`) needs to migrate from `DaemonCache`
+- **Migration cost.** Existing `enw` code (e.g. `context.rs:99-103`,
+  `commands/ls.rs:144-151`) needs to migrate from `DaemonCache`
   file-reads to RPC calls over time. Incremental; tracked separately.
 
 ### Risks
@@ -466,13 +466,13 @@ should live in the daemon.
 ### Subsequent follow-ups (one PR each)
 
 - `recipes.list` RPC, `enw list-recipes` wrapper, migrate
-  `enwiro/src/commands/list_all.rs` off `DaemonCache::read_recipes()`.
+  `enwiro/src/commands/ls.rs` off `DaemonCache::read_recipes()`.
 - `events.subscribe` / `events.notify` implementation, gated on first
   consumer (#297 costae flash is the leading candidate).
 - `status.get` + `status_changed` events for #302.
 - `cache.status` + `cache_refreshed` events for #357.
 - `env.current` RPC + `enw current-env` wrapper + remove last
-  `DaemonCache` direct read in `enwiro/src/context.rs:93-96`. Daemon
+  `DaemonCache` direct read in `enwiro/src/context.rs:99-103`. Daemon
   gains an in-memory `current_env` state populated by the existing
   adapter-stream callback at `enwiro-daemon/src/lib.rs:308-314`.
 
@@ -486,7 +486,7 @@ should live in the daemon.
   structs and an envelope helper.
 - `enwiro/src/main.rs` — add wrapper subcommands (`current-env`,
   `events`, etc.) under the existing `EnwiroCli` enum.
-- `enwiro-cookbook-github/src/main.rs:21-28` — site of the pilot
+- `enwiro-cookbook-github/src/main.rs:26-29` — site of the pilot
   migration; the duplicated `GitCookbookConfig` block can begin to
   collapse.
 
@@ -544,7 +544,7 @@ should live in the daemon.
   publisher channel.
 - `enwiro-daemon/src/lib.rs:36` `pub struct DaemonCache` (and
   `read_recipes` at `lib.rs:58`) plus call sites at
-  `enwiro/src/context.rs:93-96`, `enwiro/src/commands/list_all.rs:89-95`
+  `enwiro/src/context.rs:99-103`, `enwiro/src/commands/ls.rs:144-151`
   — today's `enw ↔ daemon` coupling via file reads; will migrate to RPC.
 - `enwiro-sdk/src/cookbook.rs` and `enwiro-sdk/src/client.rs`
   (`CookbookClient::list_recipes`) — cookbook protocol; gains

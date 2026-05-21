@@ -6,7 +6,7 @@ use crate::{
     notifier::{DesktopNotifier, Notifier},
 };
 use enwiro_daemon::ConfigurationValues;
-use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
+use enwiro_sdk::client::{CachedRecipe, CookbookTrait, RpcCookbookClient};
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, path::PathBuf};
 
@@ -42,7 +42,7 @@ impl<W: Write> CommandContext<W> {
         let plugins = get_plugins(PluginKind::Cookbook);
         let mut cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
             .into_iter()
-            .map(|p| Box::new(CookbookClient::new(p)) as Box<dyn CookbookTrait>)
+            .map(|p| Box::new(RpcCookbookClient::new(p)) as Box<dyn CookbookTrait>)
             .collect();
         enwiro_sdk::client::sort_cookbooks(&mut cookbooks);
 

@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod meta;
+pub mod rpc;
 pub use config::ConfigurationValues;
 
 use std::fs;
@@ -222,6 +223,41 @@ pub fn run(
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
 
+    let rpc_socket_path = dir.join(enwiro_sdk::rpc::SOCKET_FILENAME);
+    let rpc_state = Arc::new(rpc::State::default());
+    {
+        let rpc_socket_path = rpc_socket_path.clone();
+        let rpc_state = rpc_state.clone();
+        std::thread::Builder::new()
+            .name("enwiro-rpc".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!(error = %e, "rpc tokio runtime build failed");
+                        return;
+                    }
+                };
+                if let Err(e) = rt.block_on(rpc::serve(rpc_socket_path, rpc_state)) {
+                    tracing::error!(error = %e, "rpc server exited with error");
+                }
+            })
+            .context("spawn rpc thread")?;
+    }
+    // SAFETY: setenv is documented as unsafe in Rust 2024 because it can
+    // race with concurrent reads; we are still single-threaded at this
+    // point (signal handlers don't observe envp), so the modification is
+    // safe in practice.
+    unsafe {
+        std::env::set_var(
+            enwiro_sdk::rpc::SOCKET_ENV_VAR,
+            rpc_socket_path.as_os_str(),
+        );
+    }
+
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);
     let mut recipe_state: HashMap<String, CookbookEntry> = HashMap::new();
@@ -323,6 +359,7 @@ pub fn run(
             tracing::info!("Received termination signal, exiting");
             drop(pool);
             remove_pid_file(&dir);
+            let _ = std::fs::remove_file(&rpc_socket_path);
             return Ok(());
         }
         std::thread::sleep(TICK_INTERVAL);
