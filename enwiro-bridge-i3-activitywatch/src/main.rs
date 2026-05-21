@@ -159,11 +159,10 @@ impl AwClient {
             "type": EVENT_TYPE,
             "hostname": hostname,
         });
-        match ureq::post(&url).send_json(body) {
-            Ok(_) => Ok(()),
-            Err(ureq::Error::Status(304, _)) => Ok(()),
-            Err(e) => Err(anyhow::Error::new(e)),
-        }
+        ureq::post(&url)
+            .send_json(body)
+            .map_err(anyhow::Error::new)?;
+        Ok(())
     }
 
     fn heartbeat(&self, bucket_id: &str, data: &Value, pulsetime: f64) -> Result<()> {
