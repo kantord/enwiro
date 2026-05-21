@@ -121,6 +121,13 @@ async fn cookbook_invoke(
     params: CookbookInvokeParams,
     _state: &Arc<State>,
 ) -> Result<serde_json::Value, RpcError> {
+    let start = std::time::Instant::now();
+    tracing::info!(
+        cookbook = %params.cookbook,
+        op = %params.op,
+        chain = ?params.call_chain,
+        "cookbook.invoke dispatched"
+    );
     if params.call_chain.contains(&params.cookbook) {
         return Err(RpcError {
             code: RpcError::CYCLE_DETECTED,
@@ -143,6 +150,12 @@ async fn cookbook_invoke(
             message: format!("cookbook '{}' not found", params.cookbook),
             data: None,
         })?;
+    tracing::debug!(
+        cookbook = %params.cookbook,
+        executable = %plugin.executable,
+        op = %params.op,
+        "spawning cookbook subprocess"
+    );
 
     let mut extended_chain = params.call_chain.clone();
     extended_chain.push(params.cookbook.clone());
@@ -189,7 +202,15 @@ async fn cookbook_invoke(
         data: None,
     })?;
 
+    let elapsed = start.elapsed();
     if !output.status.success() {
+        tracing::warn!(
+            cookbook = %cookbook_name,
+            op = %op,
+            exit_code = ?output.status.code(),
+            elapsed_ms = elapsed.as_millis() as u64,
+            "cookbook exited with non-zero status"
+        );
         return Err(RpcError {
             code: RpcError::APPLICATION_ERROR,
             message: format!(
@@ -208,6 +229,13 @@ async fn cookbook_invoke(
         message: format!("cookbook '{}' produced invalid UTF-8: {}", cookbook_name, e),
         data: None,
     })?;
+    tracing::info!(
+        cookbook = %cookbook_name,
+        op = %op,
+        elapsed_ms = elapsed.as_millis() as u64,
+        stdout_bytes = stdout.len(),
+        "cookbook.invoke completed"
+    );
 
     let result = CookbookInvokeResult { v: 1, stdout };
     serde_json::to_value(&result).map_err(|e| RpcError {
