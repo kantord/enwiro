@@ -1,30 +1,27 @@
 //! End-to-end integration test for the JSON-RPC server.
 //!
-//! Starts an in-process server bound to a tempdir-scoped socket, drives it
-//! with the SDK `Client`, asserts roundtrip behavior. No actual cookbook
-//! spawning here (no plugins to find); a follow-up test will exercise the
-//! cookbook handler against a fixture plugin.
+//! Starts an in-process server bound to a tempdir-scoped socket, drives
+//! it with the SDK client + typed `EnwiroRpcClient` extension trait,
+//! asserts roundtrip behaviour.
 
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use enwiro_daemon::rpc;
-use enwiro_sdk::rpc::{Client, ClientError, CookbookInvokeParams, RpcError};
+use enwiro_sdk::rpc::{
+    APPLICATION_ERROR_CODE, CYCLE_DETECTED_CODE, CookbookInvokeParams, EnwiroRpcClient, connect_at,
+};
+use jsonrpsee::core::client::Error as ClientError;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
-/// Spawn the RPC server in a background tokio task. Signals readiness via
-/// a `oneshot` *after* the socket has bound, so the test never races on
-/// existence polling and bind errors surface immediately on the join
-/// handle. Returns the socket path; caller keeps the `TempDir` alive.
+/// Spawn the RPC server in a background tokio task. Signals readiness
+/// via a `oneshot` after the socket has bound, so the test never races
+/// on existence polling and bind errors surface on the join handle.
 async fn spawn_server(tempdir: &TempDir) -> std::path::PathBuf {
     let socket_path = tempdir.path().join("rpc.sock");
     let state = Arc::new(rpc::State::default());
 
-    // Bind synchronously here (the test owns the failure surface) so the
-    // oneshot fires only after the socket file exists, then move the
-    // listener into the spawned task for the accept loop. This avoids the
-    // existence-polling/swallowed-bind-error pattern.
     let _ = std::fs::remove_file(&socket_path);
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -37,7 +34,7 @@ async fn spawn_server(tempdir: &TempDir) -> std::path::PathBuf {
     let socket_path_clone = socket_path.clone();
     tokio::spawn(async move {
         let _ = ready_tx.send(());
-        rpc::serve_listener(listener, state, socket_path_clone).await;
+        let _ = rpc::serve_listener(listener, state, socket_path_clone).await;
     });
     ready_rx.await.expect("rpc server ready signal");
     socket_path
@@ -61,7 +58,7 @@ async fn cookbook_invoke_returns_application_error_when_cookbook_unknown() {
     let tempdir = TempDir::new().unwrap();
     let socket_path = spawn_server(&tempdir).await;
 
-    let mut client = Client::connect_at(&socket_path).await.unwrap();
+    let client = connect_at(&socket_path).await.unwrap();
     let err = client
         .cookbook_invoke(CookbookInvokeParams {
             cookbook: "this-cookbook-does-not-exist-anywhere".into(),
@@ -74,11 +71,11 @@ async fn cookbook_invoke_returns_application_error_when_cookbook_unknown() {
         .unwrap_err();
 
     match err {
-        ClientError::Rpc(RpcError { code, message, .. }) => {
-            assert_eq!(code, RpcError::APPLICATION_ERROR);
-            assert!(message.contains("not found"), "got: {message}");
+        ClientError::Call(e) => {
+            assert_eq!(e.code(), APPLICATION_ERROR_CODE);
+            assert!(e.message().contains("not found"), "got: {}", e.message());
         }
-        other => panic!("expected RpcError::APPLICATION_ERROR, got {other:?}"),
+        other => panic!("expected ClientError::Call (APPLICATION_ERROR), got {other:?}"),
     }
 }
 
@@ -87,7 +84,7 @@ async fn cookbook_invoke_refuses_cycle_in_call_chain() {
     let tempdir = TempDir::new().unwrap();
     let socket_path = spawn_server(&tempdir).await;
 
-    let mut client = Client::connect_at(&socket_path).await.unwrap();
+    let client = connect_at(&socket_path).await.unwrap();
     let err = client
         .cookbook_invoke(CookbookInvokeParams {
             cookbook: "git".into(),
@@ -100,9 +97,9 @@ async fn cookbook_invoke_refuses_cycle_in_call_chain() {
         .unwrap_err();
 
     match err {
-        ClientError::Rpc(RpcError { code, .. }) => {
-            assert_eq!(code, RpcError::CYCLE_DETECTED);
+        ClientError::Call(e) => {
+            assert_eq!(e.code(), CYCLE_DETECTED_CODE);
         }
-        other => panic!("expected RpcError::CYCLE_DETECTED, got {other:?}"),
+        other => panic!("expected ClientError::Call (CYCLE_DETECTED), got {other:?}"),
     }
 }

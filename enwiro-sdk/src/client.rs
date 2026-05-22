@@ -283,7 +283,8 @@ impl RpcCookbookClient {
         };
 
         self.runtime.block_on(async move {
-            let mut client = crate::rpc::Client::connect()
+            use crate::rpc::EnwiroRpcClient;
+            let client = crate::rpc::connect()
                 .await
                 .context("connect to enwiro-daemon")?;
             let result = client

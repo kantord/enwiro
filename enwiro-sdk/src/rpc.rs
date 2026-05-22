@@ -1,175 +1,56 @@
-//! JSON-RPC 2.0 over UDS for client↔daemon communication.
+//! Shared JSON-RPC contract between `enwiro-daemon` and its clients
+//! (`enw`, cookbooks, future external apps).
 //!
-//! See `docs/adr/0002-daemon-ipc-architecture.md` for the design rationale.
-//! Plugin↔host data emission stays on stdout-JSONL; this module covers only
-//! the client↔daemon channel.
+//! See `docs/adr/0002-daemon-ipc-architecture.md`. We use jsonrpsee 0.26 as
+//! the protocol layer: id correlation, envelope serialisation, error codes,
+//! batching, notifications all live in the library. We own only the typed
+//! trait below + the UDS transport plumbing in `rpc::client` (consumer side)
+//! and `enwiro-daemon::rpc` (server side).
 //!
-//! Wire format: newline-delimited JSON, one envelope per line, over a unix
-//! domain socket at `$XDG_RUNTIME_DIR/enwiro/rpc.sock`.
-//!
-//! Both sides import the same `Request` / `Response` types from this module
-//! so request shapes can't drift across server and client.
-//!
-//! See `Client` for the typed client.
+//! Plugin↔host data emission (cookbook stdout-JSONL) is unaffected — this
+//! channel is strictly for client↔daemon.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
-/// JSON-RPC 2.0 string. Always "2.0".
-pub const JSONRPC_VERSION: &str = "2.0";
-
-/// Default socket location relative to `$XDG_RUNTIME_DIR`.
-pub const SOCKET_FILENAME: &str = "rpc.sock";
-
-/// Env var name a daemon sets so child processes (cookbooks etc) discover
-/// the live socket without having to compute the path themselves.
+/// Env var the daemon publishes so child processes can discover the live
+/// socket without computing the path themselves.
 pub const SOCKET_ENV_VAR: &str = "ENWIRO_RPC_SOCKET";
 
-/// Env var name carrying the cookbook-call chain for cycle detection on
-/// `cookbook.invoke` (per ADR-0002 §4).
+/// Env var carrying the cookbook-call chain across nested `cookbook.invoke`
+/// spawns; SDK helpers forward it automatically.
 pub const CALL_CHAIN_ENV_VAR: &str = "ENWIRO_RPC_CALL_CHAIN";
 
-/// Maximum length (bytes) of a single newline-delimited JSON frame. Caps
-/// memory use against pathological peer behaviour (one frame that grows
-/// forever); larger payloads should be chunked across messages or sent
-/// via a different transport. 1 MiB comfortably accommodates the
-/// CookbookPayload + cookbook stdout in practice (today's `recipes.cache`
-/// for ~3000 recipes is well under 500 KiB).
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+/// Default socket file name under `$XDG_RUNTIME_DIR/enwiro/`.
+pub const SOCKET_FILENAME: &str = "rpc.sock";
+
+/// Implementation-defined JSON-RPC error code returned when a cookbook
+/// could not be located, exited non-zero, or produced invalid UTF-8.
+pub const APPLICATION_ERROR_CODE: i32 = -32000;
+
+/// Implementation-defined JSON-RPC error code returned when a
+/// `cookbook.invoke` would extend a chain that already contains the
+/// requested cookbook (ADR-0002 §4 cycle detection).
+pub const CYCLE_DETECTED_CODE: i32 = -32001;
 
 /// Resolve the default socket path. `$XDG_RUNTIME_DIR/enwiro/rpc.sock`.
-pub fn default_socket_path() -> anyhow::Result<PathBuf> {
+pub fn default_socket_path() -> anyhow::Result<std::path::PathBuf> {
     let base = dirs::runtime_dir()
         .or_else(|| dirs::cache_dir().map(|d| d.join("run")))
         .ok_or_else(|| anyhow::anyhow!("could not determine runtime or cache directory"))?;
     Ok(base.join("enwiro").join(SOCKET_FILENAME))
 }
 
-/// One request from a client to the daemon. Tagged so serde routes by the
-/// `method` string and deserialises `params` into the matching variant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "method", content = "params")]
-pub enum Request {
-    #[serde(rename = "cookbook.invoke")]
-    CookbookInvoke(CookbookInvokeParams),
-}
-
-/// JSON-RPC envelope wrapping a `Request`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestEnvelope {
-    pub jsonrpc: String,
-    pub id: u64,
-    #[serde(flatten)]
-    pub request: Request,
-}
-
-impl RequestEnvelope {
-    pub fn new(id: u64, request: Request) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.into(),
-            id,
-            request,
-        }
-    }
-}
-
-/// One response from the daemon back to the client. `id` is optional
-/// because parse errors on the server side have no request ID to echo
-/// back; JSON-RPC 2.0 conveys this as `id: null`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResponseEnvelope {
-    pub jsonrpc: String,
-    pub id: Option<u64>,
-    #[serde(flatten)]
-    pub body: ResponseBody,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ResponseBody {
-    Ok { result: serde_json::Value },
-    Err { error: RpcError },
-}
-
-impl ResponseEnvelope {
-    pub fn ok(id: u64, result: serde_json::Value) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.into(),
-            id: Some(id),
-            body: ResponseBody::Ok { result },
-        }
-    }
-
-    pub fn err(id: u64, error: RpcError) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.into(),
-            id: Some(id),
-            body: ResponseBody::Err { error },
-        }
-    }
-
-    /// Response with no `id` — used by the server when the request line
-    /// couldn't be parsed and no `id` is available to echo back. Carries
-    /// a `PARSE_ERROR` payload so the client can surface it cleanly.
-    pub fn parse_error(message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.into(),
-            id: None,
-            body: ResponseBody::Err {
-                error: RpcError {
-                    code: RpcError::PARSE_ERROR,
-                    message: message.into(),
-                    data: None,
-                },
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcError {
-    pub code: i32,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-}
-
-impl RpcError {
-    /// JSON-RPC 2.0 standard: requested method does not exist.
-    pub const METHOD_NOT_FOUND: i32 = -32601;
-    /// JSON-RPC 2.0 standard: invalid params for the requested method.
-    pub const INVALID_PARAMS: i32 = -32602;
-    /// JSON-RPC 2.0 standard: internal server error.
-    pub const INTERNAL_ERROR: i32 = -32603;
-    /// JSON-RPC 2.0 standard: parse error.
-    pub const PARSE_ERROR: i32 = -32700;
-    /// Implementation-defined: an application-level error from the handler.
-    pub const APPLICATION_ERROR: i32 = -32000;
-    /// Implementation-defined: cycle detected in `cookbook.invoke`.
-    pub const CYCLE_DETECTED: i32 = -32001;
-}
-
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rpc error {}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for RpcError {}
-
 /// Params for `cookbook.invoke`: delegate a cookbook operation through the
-/// daemon. The daemon resolves `cookbook` to a plugin binary, spawns it with
-/// the existing stdout-JSONL protocol, and returns the parsed result.
+/// daemon. The daemon resolves `cookbook` to a plugin binary, spawns it
+/// with the existing stdout-JSONL contract, pipes `payload` to its stdin
+/// as a `CookbookPayload`, and returns the parsed result.
 ///
-/// `payload` is the resolved cookbook configuration that gets piped to the
-/// cookbook's stdin as a `CookbookPayload` (see ADR-0001). The caller
-/// (typically `enw`, which knows the project cwd) is responsible for
-/// running the project-layer config walker before invoking; the daemon
-/// itself has no concept of "current project".
+/// `payload` is the resolved cookbook configuration (caller is responsible
+/// for running the project-layer config walker; the daemon has no cwd).
 ///
 /// `call_chain` carries the names of cookbooks already invoked in the
-/// current spawn tree for cycle detection. Clients spawned from within
-/// another cookbook should populate it from `$ENWIRO_RPC_CALL_CHAIN`.
+/// current spawn tree for cycle detection. The SDK client helper forwards
+/// `$ENWIRO_RPC_CALL_CHAIN` automatically.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CookbookInvokeParams {
     pub cookbook: String,
@@ -190,6 +71,25 @@ pub struct CookbookInvokeResult {
     pub stdout: String,
 }
 
-pub mod client;
+/// The single source of truth for the client↔daemon RPC surface.
+///
+/// `#[rpc(server, client)]` generates:
+///   * `EnwiroRpcServer` — the trait the daemon implements.
+///   * `EnwiroRpcClient` — an extension trait auto-implemented on any
+///     `T: SubscriptionClientT` (incl. `jsonrpsee::core::client::Client`).
+///     Consumers call `client.cookbook_invoke(params).await` and get a
+///     typed `CookbookInvokeResult`.
+///
+/// Refactor here, both ends fail to compile — the load-bearing property
+/// the user wanted out of this swap.
+#[jsonrpsee::proc_macros::rpc(server, client, namespace = "enwiro")]
+pub trait EnwiroRpc {
+    #[method(name = "cookbook.invoke")]
+    async fn cookbook_invoke(
+        &self,
+        params: CookbookInvokeParams,
+    ) -> Result<CookbookInvokeResult, jsonrpsee::types::ErrorObjectOwned>;
+}
 
-pub use client::{Client, ClientError};
+pub mod client;
+pub use client::{Client, ClientError, connect, connect_at};
