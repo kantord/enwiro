@@ -82,7 +82,7 @@ pub struct CookbookInvokeResult {
 ///
 /// Refactor here, both ends fail to compile — the load-bearing property
 /// the user wanted out of this swap.
-#[jsonrpsee::proc_macros::rpc(server, client, namespace = "enwiro")]
+#[jsonrpsee::proc_macros::rpc(server, client)]
 pub trait EnwiroRpc {
     #[method(name = "cookbook.invoke")]
     async fn cookbook_invoke(

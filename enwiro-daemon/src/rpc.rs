@@ -36,6 +36,16 @@ const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// today). 16 is a safe placeholder for `raw_json_request`'s buf_size.
 const SUBSCRIPTION_BUF: usize = 16;
 
+/// Per-invocation cookbook stdout cap (16 MiB). Bounds daemon memory
+/// against a cookbook that dumps an entire build log; if exceeded, we
+/// kill the cookbook and return APPLICATION_ERROR with an explicit
+/// "stdout truncated" message.
+const MAX_INVOKE_STDOUT_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Per-invocation cookbook stderr cap (1 MiB). Stderr is only surfaced
+/// in error payloads; truncate aggressively.
+const MAX_INVOKE_STDERR_BYTES: u64 = 1024 * 1024;
+
 /// Shared daemon-side state. Empty for now; ADR-0002 reserves room for
 /// `last_activated_env` (env.current Layer 2) and an event broadcaster
 /// (Layer 3). Both out of scope for this branch.
@@ -117,39 +127,45 @@ impl EnwiroRpcServer for DaemonRpc {
         let executable = plugin.executable.clone();
         let payload = enwiro_sdk::CookbookPayload::new(params.payload.clone());
 
-        let output =
-            tokio::task::spawn_blocking(move || -> std::io::Result<std::process::Output> {
-                use std::io::Write;
-                let mut child = std::process::Command::new(&executable)
-                    .arg(&op_for_spawn)
-                    .args(&positional_args)
-                    .env(CALL_CHAIN_ENV_VAR, &chain_env_value)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()?;
-                if let Some(mut stdin) = child.stdin.take() {
-                    let bytes = serde_json::to_vec(&payload)
-                        .map_err(|e| std::io::Error::other(format!("serialise payload: {}", e)))?;
-                    stdin.write_all(&bytes)?;
-                }
-                child.wait_with_output()
-            })
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned::<()>(
-                    ErrorCode::InternalError.code(),
-                    format!("spawn task join failed: {}", e),
-                    None,
-                )
-            })?
-            .map_err(|e| {
-                ErrorObjectOwned::owned::<()>(
-                    ErrorCode::InternalError.code(),
-                    format!("cookbook spawn failed: {}", e),
-                    None,
-                )
-            })?;
+        // tokio::process gives us async pipes + kill_on_drop: if the
+        // handler returns early (client disconnect, task cancellation),
+        // the cookbook child is killed automatically rather than leaked.
+        // Bounded reads on stdout / stderr cap daemon memory against a
+        // cookbook that dumps a gigabyte of build output.
+        let output = run_cookbook_subprocess(
+            &executable,
+            &op_for_spawn,
+            &positional_args,
+            &chain_env_value,
+            &payload,
+        )
+        .await
+        .map_err(|e| {
+            ErrorObjectOwned::owned::<()>(
+                ErrorCode::InternalError.code(),
+                format!("cookbook spawn failed: {}", e),
+                None,
+            )
+        })?;
+
+        if output.stdout_truncated {
+            tracing::warn!(
+                cookbook = %cookbook_name,
+                op = %params.op,
+                "cookbook stdout exceeded MAX_INVOKE_STDOUT_BYTES; killed and truncated"
+            );
+            return Err(ErrorObjectOwned::owned(
+                APPLICATION_ERROR_CODE,
+                format!(
+                    "cookbook '{}' op '{}' produced more than {} bytes of stdout (truncated and killed)",
+                    cookbook_name, params.op, MAX_INVOKE_STDOUT_BYTES
+                ),
+                Some(serde_json::json!({
+                    "max_stdout_bytes": MAX_INVOKE_STDOUT_BYTES,
+                    "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+                })),
+            ));
+        }
 
         let elapsed = start.elapsed();
         if !output.status.success() {
@@ -190,6 +206,104 @@ impl EnwiroRpcServer for DaemonRpc {
 
         Ok(CookbookInvokeResult { v: 1, stdout })
     }
+}
+
+/// Output of a single cookbook subprocess invocation; carries enough
+/// for the caller to decide between "ok", "non-zero exit", and "blew
+/// past stdout cap so we killed it".
+struct CookbookOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_truncated: bool,
+}
+
+/// Spawn a cookbook child, pipe `CookbookPayload` to its stdin, read
+/// stdout + stderr concurrently with hard caps, wait for exit.
+///
+/// `kill_on_drop(true)` on the child guarantees that if this future is
+/// cancelled (e.g. the RPC client disconnected mid-call), the cookbook
+/// process receives SIGKILL instead of leaking.
+async fn run_cookbook_subprocess(
+    executable: &str,
+    op: &str,
+    positional_args: &[String],
+    chain_env_value: &str,
+    payload: &enwiro_sdk::CookbookPayload,
+) -> std::io::Result<CookbookOutput> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut child = tokio::process::Command::new(executable)
+        .arg(op)
+        .args(positional_args)
+        .env(CALL_CHAIN_ENV_VAR, chain_env_value)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    // Write payload to stdin and close, so the cookbook sees EOF on its
+    // payload read. Done inside its own scope so `stdin` drops (closing
+    // the pipe) before we await stdout/stderr — otherwise a cookbook
+    // that blocks reading payload would deadlock us.
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("piped stdin must be present after spawn");
+        let bytes = serde_json::to_vec(payload)
+            .map_err(|e| std::io::Error::other(format!("serialise cookbook payload: {}", e)))?;
+        stdin.write_all(&bytes).await?;
+    }
+
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .expect("piped stdout must be present after spawn");
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .expect("piped stderr must be present after spawn");
+
+    // Cap stdout / stderr reads at one byte beyond their respective
+    // caps; if the resulting buffer is exactly cap+1 we know more data
+    // was waiting and the cookbook is producing too much.
+    let stdout_limit = MAX_INVOKE_STDOUT_BYTES + 1;
+    let stderr_limit = MAX_INVOKE_STDERR_BYTES + 1;
+
+    let mut stdout_buf: Vec<u8> = Vec::new();
+    let mut stderr_buf: Vec<u8> = Vec::new();
+
+    // Bind the `.take(n)` adapters to locals so they outlive the
+    // `read_to_end` borrow; otherwise the temporary returned by
+    // `.take()` drops at the end of the macro expansion.
+    let mut stdout_capped = (&mut stdout_pipe).take(stdout_limit);
+    let mut stderr_capped = (&mut stderr_pipe).take(stderr_limit);
+    let (stdout_res, stderr_res) = tokio::join!(
+        stdout_capped.read_to_end(&mut stdout_buf),
+        stderr_capped.read_to_end(&mut stderr_buf),
+    );
+    stdout_res?;
+    stderr_res?;
+
+    let stdout_truncated = stdout_buf.len() as u64 > MAX_INVOKE_STDOUT_BYTES;
+    if stdout_truncated {
+        // Cookbook is producing too much — kill it now rather than wait
+        // for it to finish writing megabytes more into a pipe we won't
+        // read.
+        let _ = child.kill().await;
+    }
+    stdout_buf.truncate(MAX_INVOKE_STDOUT_BYTES as usize);
+    stderr_buf.truncate(MAX_INVOKE_STDERR_BYTES as usize);
+
+    let status = child.wait().await?;
+    Ok(CookbookOutput {
+        status,
+        stdout: stdout_buf,
+        stderr: stderr_buf,
+        stdout_truncated,
+    })
 }
 
 fn positional_args_from_value(args: &serde_json::Value) -> Vec<String> {

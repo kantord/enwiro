@@ -139,6 +139,41 @@ pub(crate) fn is_daemon_running(runtime_dir: &Path) -> bool {
     }
 }
 
+/// Acquire an exclusive non-blocking lock on `<runtime_dir>/daemon.lock`.
+/// Returns the lock file handle — the lock is held for as long as the
+/// returned file is alive (kernel releases it on `close(2)`). If another
+/// daemon already holds the lock, returns an error before we touch the
+/// socket file, preventing two instances from racing over `bind`.
+pub(crate) fn acquire_daemon_lock(runtime_dir: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+
+    fs::create_dir_all(runtime_dir).context("Could not create runtime directory for lock")?;
+    let lock_path = runtime_dir.join("daemon.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open daemon lock at {}", lock_path.display()))?;
+
+    // flock(LOCK_EX | LOCK_NB): exclusive, non-blocking. Fails fast with
+    // EWOULDBLOCK if another daemon holds the lock.
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let errno = std::io::Error::last_os_error();
+        anyhow::bail!(
+            "another enwiro-daemon instance is already running (could not acquire \
+             exclusive lock on {}: {}). Stop it with `systemctl --user stop \
+             enwiro-daemon.service` (or the equivalent) before starting another.",
+            lock_path.display(),
+            errno
+        );
+    }
+    Ok(file)
+}
+
 /// A cached recipe with its cookbook's priority, used for global sorting.
 struct SortableCachedRecipe {
     cached: CachedRecipe,
@@ -215,6 +250,12 @@ pub fn run(
 
     let dir = runtime_dir()?;
     fs::create_dir_all(&dir)?;
+
+    // Kernel-mutex against double-start. Held for the lifetime of `run()`
+    // via this binding; closing the file (drop) releases the lock. Must
+    // happen BEFORE write_pid_file / socket bind so the loser exits with
+    // a clear message instead of silently fighting over the same paths.
+    let _daemon_lock = acquire_daemon_lock(&dir)?;
 
     write_pid_file(&dir)?;
 
