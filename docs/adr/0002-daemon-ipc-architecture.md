@@ -27,31 +27,28 @@ ecosystem talk to each other:
 Today's communication shapes:
 
 - **Adapter → daemon** — the daemon `Command::spawn`s the adapter's
-  `listen` subcommand and reads stdout as JSONL workspace-switch events
-  (`enwiro-daemon/src/lib.rs:263-319` + `enwiro-adapter-i3wm/src/main.rs:550-587`).
+  `listen` subcommand and reads stdout as JSONL workspace-switch events.
 - **Daemon → enw** — the daemon writes `recipes.cache` to
   `$XDG_RUNTIME_DIR/enwiro/`; `enw` reads it via
-  `DaemonCache::read_recipes()` (`enwiro-daemon/src/lib.rs:37`,
-  consumed at `enwiro/src/context.rs:99-103` and
-  `enwiro/src/commands/ls.rs:146-151`). `enw` still re-implements the
-  cookbook iteration / sort / filter logic on top of the cached recipes.
+  `DaemonCache::read_recipes` in `enwiro-daemon`, consumed by `enw`'s
+  context setup and `ls` command. `enw` still re-implements the cookbook
+  iteration / sort / filter logic on top of the cached recipes.
 - **Host → cookbook plugin** — host invokes
   `<plugin> list-recipes` / `<plugin> cook` and parses stdout JSON
-  (`enwiro-sdk/src/client.rs`, `CookbookClient::list_recipes`).
-- **External listeners** — none. costae derives env state indirectly from
-  i3 workspace events (`costae-i3/src/main.rs`) and
-  `/proc/<pid>/environ` lookups (`costae-notify/src/server.rs:81`,
-  `read_enwiro_env`); there is no direct enwiro IPC channel for any external
+  (`CookbookClient::list_recipes` in `enwiro-sdk`).
+- **External listeners** — none. External consumers derive env state
+  indirectly from window-manager events and `/proc/<pid>/environ`
+  lookups; there is no direct enwiro IPC channel for any external
   consumer.
 
 The plugin contract that already exists (cookbook stdout JSON, adapter
-listen stdout JSONL) maps directly onto tauler's `useJSONStream(bin)`
-pattern at `/home/kantord/repos/tauler/src/jsx.rs:45`, which is used in
-production by the user's chezmoi scripts (e.g.
-`~/.local/share/chezmoi/dot_local/bin/executable_tauler-devcontainers` —
-plain bash emitting JSON to stdout when state changes). The design goal
-that *"a bash script could be an enwiro cookbook or garnish or adapter"*
-hinges on keeping that interface trivial.
+listen stdout JSONL) maps directly onto the `useJSONStream(bin)` consumer
+pattern used by external React-on-the-CLI panel tools (spawn a binary,
+parse its stdout as JSON, re-render on each line), and onto plain bash
+scripts that emit JSON to stdout on state change. Plugin interfaces must
+remain trivially implementable in any language with `printf` and a JSON
+encoder; boilerplate belongs on the host side, not in plugin authors'
+code.
 
 What is missing today is a single, coherent IPC story for **clients of the
 daemon**: `enw`, future external apps, and (per the refined [#301](https://github.com/kantord/enwiro/issues/301) framing)
@@ -69,16 +66,20 @@ should live in the daemon.
 - **Plugin interfaces must stay trivially simple.** A bash script with a
   `printf` of JSON to stdout should remain a viable plugin. Boilerplate
   belongs on the host side, not in plugin authors' code.
-- **`enw` is a client, not a state owner.** Daemon owns business logic and
-  state; `enw` calls into it. Daemon is the single source of truth and
-  logic.
-- **Shell-discoverable wire format.** The dominant positioning frame for
-  enwiro is *"so modular that it's basically almost a glorified wire
-  format"*. The chosen protocol must remain debuggable with `socat`/`nc` +
-  `jq`, with no extra tooling required.
-- **`useJSONStream` compatibility.** tauler panels (and similar lightweight
-  consumers) spawn a binary and parse its stdout as JSON. The IPC story
-  must preserve a path for these consumers.
+- **`enw` is a client, not a state owner.** The target state is that the
+  daemon owns business logic and state and `enw` is a thin client. Today
+  this is partial: cookbook invocations route through the daemon via
+  `RpcCookbookClient`, but project-layer config resolution still runs in
+  the client process and the legacy `CookbookClient` (direct subprocess
+  spawn from the host) remains in the SDK. Migration is incremental and
+  tracked separately.
+- **Shell-discoverable wire format.** The chosen protocol must remain
+  debuggable with `socat`/`nc` + `jq`, with no extra tooling required.
+  This makes plugin authors' debug loop a one-liner and keeps
+  language-agnostic clients first-class.
+- **`useJSONStream` compatibility.** Lightweight panel consumers spawn a
+  binary and parse its stdout as JSON; the IPC story must preserve a
+  path for these consumers (via wrapper subcommands on `enw`).
 - **Forward-compatibility without bumping protocol versions for every
   field.** Unknown fields and unknown event kinds must be ignored, not
   errored on.
@@ -202,17 +203,13 @@ should live in the daemon.
    composition of RPC calls.
 
 3. **Shell-wrapper subcommands on `enw`.** `enw current-env`,
-   `enw events tail`, `enw list-recipes` each make one RPC call and print
-   JSON to stdout, preserving `useJSONStream` and shell-pipeline
+   `enw events tail`, `enw list-recipes` each make one RPC call and
+   print JSON to stdout, preserving `useJSONStream` and shell-pipeline
    compatibility for consumers that don't link an RPC client library.
-   Wrappers MUST emit only the **inner result/event payload**, not the
-   JSON-RPC envelope. Concretely: `enw current-env` prints
-   `{"v":1,"env":"...","recipe_id":"...","ts":"..."}` (one line);
-   `enw events tail` prints one inner event per line as the daemon emits
-   them (`{"v":1,"kind":"env_activated","ts":"...","env":"...",...}`),
-   stripping the surrounding `{"jsonrpc":"2.0","method":"events.notify","params":{"subscription_id":...,"event":...}}`
-   envelope. `useJSONStream("enw current-env")` and
-   `useJSONStream("enw events tail")` both work without unwrapping.
+   Wrappers MUST emit only the **inner result/event payload** (one
+   per line for streaming wrappers), not the JSON-RPC envelope —
+   `useJSONStream("enw events tail")` slots into panel consumers
+   without unwrapping.
 
 4. **Cookbook-as-client.** Any cookbook process running on the system,
    spawned by the daemon **or by a developer at the shell**, gets
@@ -243,6 +240,13 @@ should live in the daemon.
    the SDK helper risk losing cycle protection — documented and
    accepted; the SDK is the supported path.
 
+   **Cookbook name constraint**: cookbook names MUST NOT contain `:` so
+   the colon-separated chain encoding is unambiguous. The PATH-walking
+   discovery (`enwiro-cookbook-*` executables) already enforces this in
+   practice (filesystem path semantics make `:` in a basename
+   unusable). Encoding could move to `\x1f` if a name ever needed `:`,
+   but `:` reads cleanly in logs and was chosen for that reason.
+
 5. **`cookbook.invoke` is the pilot.** The first concrete RPC method to
    implement (after the bare minimum server skeleton) is
    `cookbook.invoke`. It exercises every layer this ADR commits to
@@ -258,7 +262,7 @@ should live in the daemon.
      ```
    - Response (success):
      ```json
-     {"jsonrpc":"2.0","id":N,"result":{"v":1,...}}
+     {"jsonrpc":"2.0","id":N,"result":{...}}
      ```
    - Response (error):
      ```json
@@ -266,7 +270,7 @@ should live in the daemon.
      ```
    - Server-initiated notification (for events):
      ```json
-     {"jsonrpc":"2.0","method":"events.notify","params":{"subscription_id":"...","event":{"v":1,"kind":"...","ts":"...",...}}}
+     {"jsonrpc":"2.0","method":"events.notify","params":{"subscription_id":"...","event":{"kind":"...","ts":"...",...}}}
      ```
    - Framing: one JSON object per line (newline-delimited). Newlines inside
      JSON string values are escaped per RFC 8259; no embedded literal
@@ -280,54 +284,68 @@ should live in the daemon.
    - `env.current` — returns the active env. Daemon serves this from an
      in-memory "last activated env" state that it populates from the
      adapter's `workspace_switch` event stream (the same callback site
-     today: `on_workspace_switch` at `enwiro-daemon/src/lib.rs:355-360`).
+     today: the `on_workspace_switch` callback in `enwiro-daemon`).
      If the daemon has not yet seen a switch event since start, returns
      an explicit "unknown" result rather than guessing from
      `/proc/<pid>/environ`.
    - `recipes.list` — list cached recipes (optionally filtered by cookbook).
    - `cookbook.invoke` — delegate to another cookbook (pilot method).
-   - `status.get` — live env status, when [#302](https://github.com/kantord/enwiro/issues/302) lands.
-   - `cache.status` — per-cookbook freshness, when [#357](https://github.com/kantord/enwiro/issues/357) lands.
+   - `status.get` — reserved for live env status (see [#302](https://github.com/kantord/enwiro/issues/302)).
+   - `cache.status` — reserved for per-cookbook freshness (see [#357](https://github.com/kantord/enwiro/issues/357)).
    - `health` — daemon liveness and protocol-version probe. Single noun;
      deliberately unnamespaced because it predates any namespace.
    - `events.subscribe` / `events.notify` / `events.unsubscribe` —
      designed; implementation deferred to the first event consumer.
 
-8. **Event taxonomy (designed; ship `env_activated` first).** Reserved
-   kinds with `kind`-discriminated payloads:
+8. **Event taxonomy.** The pilot event is `env_activated`, emitted on env
+   swap; payload includes `env`, `recipe_id`, `prev_env`,
+   `worktree_path`, `source`, `ts`. Additional event kinds will be
+   specified when a consumer drives them; the JSON-RPC notification
+   envelope is stable and adding kinds is non-breaking, so the taxonomy
+   stays open. Candidates flagged by related issues — `env_cooked`,
+   `env_destroyed` ([#337](https://github.com/kantord/enwiro/issues/337)/[#431](https://github.com/kantord/enwiro/issues/431)),
+   `hook_fired` ([#427](https://github.com/kantord/enwiro/issues/427)/[#428](https://github.com/kantord/enwiro/issues/428)),
+   `status_changed` ([#302](https://github.com/kantord/enwiro/issues/302)),
+   `cache_refreshed` ([#357](https://github.com/kantord/enwiro/issues/357)) — get specified in the
+   ADRs (or issue threads) that ship them.
 
-   - `env_activated` — emitted on env swap; payload includes `env`,
-     `recipe_id`, `prev_env`, `worktree_path`, `source`, `ts`.
-   - `env_cooked` — emitted after a cook completes.
-   - `env_destroyed` — emitted by `enw rm` ([#337](https://github.com/kantord/enwiro/issues/337)) once [#431](https://github.com/kantord/enwiro/issues/431)
-     (`Hook::Destroy`) lands.
-   - `hook_fired` — covers built-in (`Cook`, `Destroy`) and user-defined
-     hooks ([#427](https://github.com/kantord/enwiro/issues/427)/[#428](https://github.com/kantord/enwiro/issues/428)). Payload: `{ "env": "...", "hook": "<name>",
-     "source": "auto|manual" }`.
-   - `status_changed` — Active / Inactive / Evergreen per [#302](https://github.com/kantord/enwiro/issues/302).
-   - `cache_refreshed` — per-cookbook cache refresh, per [#357](https://github.com/kantord/enwiro/issues/357).
+9. **Versioning and compatibility.** Compatibility is primarily handled by
+   the **unknown-field-ignored** and **unknown-method-errored** (JSON-RPC
+   `-32601 Method not found`) rules: adding fields to a result shape and
+   adding methods to the surface are both non-breaking. Event consumers
+   MUST ignore unknown `kind` values silently.
 
-9. **Versioning and compatibility.** Every result payload and every event
-   body carries a `v` field (start at `1`). **Scope of `v` is per-shape,
-   not daemon-global**: each method's result shape and each event `kind`
-   has its own independent `v` counter. The daemon advertises its own
-   build version separately via `health` (this is *not* the same as
-   payload `v`; clients SHOULD NOT use the daemon build version for
-   compatibility decisions).
+   For *breaking* changes within an existing result shape or event body
+   (removing a field, changing semantics), the convention is **method-
+   name versioning** — introduce `cookbook.invoke.v2` rather than
+   mutating `cookbook.invoke`. Clients negotiate by choosing which
+   method to call; servers can keep the old method live during a
+   deprecation window. An additional per-shape `v` field is reserved
+   for cases where wire-level breaking changes need to coexist on the
+   same method name; payloads carry `v` only when they need to express
+   such a transition.
 
-   Adding new fields to an existing shape does not bump that shape's
-   `v`. Bumping `v` is reserved for *breaking* changes within a single
-   payload shape (e.g. removing a field, changing semantics). Adding
-   new methods is non-breaking by definition. The protocol is
-   **unknown-field-ignored** and **unknown-method-errored** (JSON-RPC
-   standard `-32601 Method not found`); event consumers MUST ignore
-   unknown `kind` values silently.
+   The daemon advertises its own build version separately via `health`.
+   This is *not* a protocol-compatibility version; clients SHOULD NOT
+   use the daemon build version for compatibility decisions.
 
 10. **No authentication at the IPC layer.** Single-user assumption holds;
     the socket lives at perms `0600` in `$XDG_RUNTIME_DIR` (mode `0700`).
-    The hook-execution safety story from [#428](https://github.com/kantord/enwiro/issues/428) (untrusted cookbook envs
-    must not trigger user automations) lives at the hook-execution layer,
-    not here.
+    Security notes:
+    - When `$XDG_RUNTIME_DIR` is unset (rare; typically only outside an
+      active login session) the daemon falls back to `$XDG_CACHE_HOME/enwiro/run`.
+      The daemon MUST `chmod 0700` the parent dir on this path before
+      binding the socket — `$XDG_CACHE_HOME` does not carry the same
+      systemd-enforced perm guarantee that `$XDG_RUNTIME_DIR` does.
+    - Bind-mounting `$XDG_RUNTIME_DIR/enwiro` into a container
+      (devcontainer / podman `--userns=keep-id` etc.) collapses the
+      `0600` story: any process inside the container running as the
+      mapped UID can speak to the daemon. Containers SHOULD NOT bind-
+      mount the enwiro runtime dir unless the container is treated as
+      part of the same trust boundary as the host user.
+    - The hook-execution safety story from [#428](https://github.com/kantord/enwiro/issues/428)
+      (untrusted cookbook envs must not trigger user automations) lives
+      at the hook-execution layer, not here.
 
 11. **No public socket contract beyond this ADR.** Cookbooks see
     `ENWIRO_RPC_SOCKET` and the JSON-RPC envelope; that's the contract.
@@ -353,9 +371,11 @@ should live in the daemon.
 
 ### Positive
 
-- **Single source of truth and logic in the daemon.** `enw`, costae,
-  tauler, and future clients all consult one place. Drift between
-  re-implementations becomes impossible by construction.
+- **Path to a single source of truth in the daemon.** As clients migrate
+  off direct file-reads and direct subprocess spawns, `enw` and external
+  consumers converge on one place. Drift between re-implementations
+  becomes impossible *for migrated surfaces*; the migration is
+  incremental.
 - **`enw` thinning is unlocked.** Each `enw` subcommand can migrate to a
   small RPC composition in a self-contained PR. The work happens
   incrementally without a flag-day rewrite.
@@ -364,10 +384,10 @@ should live in the daemon.
   TUIs ([#436](https://github.com/kantord/enwiro/issues/436)) all connect via the same protocol.
 - **Cookbook composition has a real home.** `cookbook.invoke` lets the
   github cookbook delegate to git rather than re-declaring the git
-  cookbook's config schema. The duplicated `GitCookbookConfig` block at
-  `enwiro-cookbook-github/src/main.rs:26-29` (referenced in ADR-0001's
-  references section) is the concrete mirror that becomes
-  unnecessary once `cookbook.invoke` exists. The broader [#301](https://github.com/kantord/enwiro/issues/301)
+  cookbook's config schema. The duplicated `GitCookbookConfig` struct
+  in `enwiro-cookbook-github` (referenced in ADR-0001) is the concrete
+  mirror that becomes unnecessary once `cookbook.invoke` exists. The
+  broader [#301](https://github.com/kantord/enwiro/issues/301)
   motivation — composing cookbooks without out-of-band conventions —
   follows from the same primitive.
 - **Shell-discoverable wire format.** `socat - UNIX-CONNECT:... | jq`
@@ -406,9 +426,9 @@ should live in the daemon.
   JSON-RPC error if the socket isn't bindable. Mitigated by systemd unit
   posture (`Restart=always`, per [#330](https://github.com/kantord/enwiro/issues/330)'s spirit); document the failure
   message so users can diagnose.
-- **Migration cost.** Existing `enw` code (e.g. `context.rs:99-103`,
-  `commands/ls.rs:146-151`) needs to migrate from `DaemonCache`
-  file-reads to RPC calls over time. Incremental; tracked separately.
+- **Migration cost.** Existing `enw` code (the `context` setup and `ls`
+  command call sites) needs to migrate from `DaemonCache` file-reads to
+  RPC calls over time. Incremental; tracked separately.
 
 ### Risks
 
@@ -438,59 +458,7 @@ should live in the daemon.
   any future network transport is a separate ADR; until then, the
   socket-perms story stands.
 
-## Implementation notes
-
-### Scope of *this* branch
-
-- This ADR only. No code lands here. The decisions above are
-  prerequisites for follow-up branches.
-
-### First follow-up branch (the pilot)
-
-- Add a tokio-based JSON-RPC 2.0 server to `enwiro-daemon`. Use an
-  existing crate (`jsonrpc-core`, `jsonrpsee`, or a small in-house
-  newline-delimited dispatcher). LOC estimate: ~300 including tests.
-- Add the `enwiro-sdk::rpc` module with shared request/response types.
-  Initial methods: `health`, `env.current`, `cookbook.invoke`. The SDK
-  helper for `cookbook.invoke` reads `ENWIRO_RPC_CALL_CHAIN` from env
-  and forwards it in `params.call_chain` automatically.
-- Implement `cookbook.invoke` end-to-end. Daemon resolves
-  `cookbook` → plugin path, spawns it with the existing stdout-JSONL
-  protocol, returns the typed result.
-- Set `ENWIRO_RPC_SOCKET` in the cookbook child env when the daemon
-  spawns one. Document the convention in the cookbook protocol docs.
-- Migrate one cookbook (likely `enwiro-cookbook-github`) to call
-  `cookbook.invoke({"cookbook": "git", ...})` instead of duplicating
-  git logic, demonstrating the pattern.
-
-### Subsequent follow-ups (one PR each)
-
-- `recipes.list` RPC, `enw list-recipes` wrapper, migrate
-  `enwiro/src/commands/ls.rs` off `DaemonCache::read_recipes()`.
-- `events.subscribe` / `events.notify` implementation, gated on first
-  consumer ([#297](https://github.com/kantord/enwiro/issues/297) costae flash is the leading candidate).
-- `status.get` + `status_changed` events for [#302](https://github.com/kantord/enwiro/issues/302).
-- `cache.status` + `cache_refreshed` events for [#357](https://github.com/kantord/enwiro/issues/357).
-- `env.current` RPC + `enw current-env` wrapper + remove last
-  `DaemonCache` direct read in `enwiro/src/context.rs:99-103`. Daemon
-  gains an in-memory `current_env` state populated by the existing
-  adapter-stream callback at `enwiro-daemon/src/lib.rs:355-360`.
-
-### Touchpoints
-
-- `enwiro-daemon/src/main.rs` — add `serve_rpc()` alongside the existing
-  `enwiro_daemon::run(...)` call.
-- `enwiro-daemon/src/lib.rs:31` — `DaemonCache` shrinks over time as
-  callers migrate to RPC; eventually removable.
-- `enwiro-sdk/src/lib.rs` — add `pub mod rpc;` with request/response
-  structs and an envelope helper.
-- `enwiro/src/main.rs` — add wrapper subcommands (`current-env`,
-  `events`, etc.) under the existing `EnwiroCli` enum.
-- `enwiro-cookbook-github/src/main.rs:26-29` — site of the pilot
-  migration; the duplicated `GitCookbookConfig` block can begin to
-  collapse.
-
-### Gotchas
+## Gotchas
 
 - **`$XDG_RUNTIME_DIR` wiped on logout.** Daemon must `mkdir -p` the
   enwiro subdirectory on startup and `unlink` any stale socket file
@@ -539,26 +507,14 @@ should live in the daemon.
 
 ## References
 
-- `enwiro-daemon/src/lib.rs:263-319` and `enwiro-adapter-i3wm/src/main.rs:550-587`
-  — existing adapter→daemon JSONL-on-stdout pattern. Kept as the
-  publisher channel.
-- `enwiro-daemon/src/lib.rs:37` `pub struct DaemonCache` (and
-  `read_recipes` at `lib.rs:59`) plus call sites at
-  `enwiro/src/context.rs:99-103`, `enwiro/src/commands/ls.rs:146-151`
-  — today's `enw ↔ daemon` coupling via file reads; will migrate to RPC.
-- `enwiro-sdk/src/cookbook.rs` and `enwiro-sdk/src/client.rs`
-  (`CookbookClient::list_recipes`) — cookbook protocol; gains
-  `ENWIRO_RPC_SOCKET` + optional `cookbook.invoke` outbound capability.
-- `costae-i3/src/main.rs`, `costae-notify/src/server.rs:81`
-  (`read_enwiro_env`) — costae's current indirect env-state derivation
-  via i3 events + `/proc/<pid>/environ`. The first listener interface
-  for [#297](https://github.com/kantord/enwiro/issues/297) will replace these for the swap-flash use case.
-- `/home/kantord/repos/tauler/src/jsx.rs:45` —
-  `globalThis.useJSONStream = (bin, script) => ...`. The consumer
-  pattern that `enw events tail` preserves.
-- `~/.local/share/chezmoi/dot_local/bin/executable_tauler-devcontainers`
-  and siblings — bash scripts emitting JSON to stdout. Proof that the
-  publisher contract works with zero framework.
+- `enwiro-daemon` and `enwiro-adapter-i3wm` — existing adapter→daemon
+  JSONL-on-stdout pattern, kept as the publisher channel.
+- `enwiro-daemon::DaemonCache` (`read_recipes`) and its call sites in
+  `enwiro` — today's `enw ↔ daemon` coupling via file reads; will
+  migrate to RPC.
+- `enwiro-sdk::client::CookbookClient::list_recipes` — cookbook
+  protocol; gains `ENWIRO_RPC_SOCKET` + optional `cookbook.invoke`
+  outbound capability.
 - JSON-RPC 2.0 specification — https://www.jsonrpc.org/specification.
 - Docker daemon/client split — `dockerd` vs `docker`.
 - Nix daemon/client split — `nix-daemon` vs `nix`.
