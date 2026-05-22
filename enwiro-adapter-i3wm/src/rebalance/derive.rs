@@ -4,23 +4,16 @@
 //! one new env per activation" invariant comes from upstream (the activate
 //! handler creates at most one); we `debug_assert!` it inside `enter`.
 
-use super::optative::{Lifecycle, ManagedSet, Reconcile};
 use super::plan::*;
 use super::spec::LayoutSpec;
 use super::types::*;
+use optative::{Lifecycle, OptativeSet, Reconcile};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fmt;
 
 struct ManagedEnv {
     env: EnvName,
     target: Slot,
-}
-
-impl fmt::Display for ManagedEnv {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.env.0)
-    }
 }
 
 impl Lifecycle for ManagedEnv {
@@ -31,6 +24,10 @@ impl Lifecycle for ManagedEnv {
     type Error = Infallible;
 
     fn key(&self) -> String {
+        self.env.0.clone()
+    }
+
+    fn display_name(&self) -> String {
         self.env.0.clone()
     }
 
@@ -78,10 +75,9 @@ pub fn derive(current: &HashMap<EnvName, Slot>, spec: &LayoutSpec) -> Plan {
         "LayoutSpec.targets must be a bijection — two envs share a slot",
     );
 
-    let mut managed = ManagedSet::<ManagedEnv>::default();
-    for (env, &slot) in current {
-        managed.insert(env.0.clone(), slot);
-    }
+    let mut managed = OptativeSet::<ManagedEnv>::with_initial_state(
+        current.iter().map(|(env, &slot)| (env.0.clone(), slot)),
+    );
 
     let desired: Vec<ManagedEnv> = spec
         .targets

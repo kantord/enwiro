@@ -652,6 +652,7 @@ dependencies = [
  "clap",
  "enwiro-sdk",
  "i3ipc-types",
+ "optative",
  "proptest",
  "rstest",
  "serde",
@@ -1573,6 +1574,16 @@ dependencies = [
  "libc",
  "pkg-config",
  "vcpkg",
+]
+
+[[package]]
+name = "optative"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fb53743e23c7620cbbbf36e1c21945ea1d5f63bf67471aa5664b21cefacb731"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
