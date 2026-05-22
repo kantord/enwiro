@@ -257,30 +257,11 @@ impl RpcCookbookClient {
     /// Run one `cookbook.invoke` RPC and return the cookbook's raw stdout.
     /// Connects fresh on every call — cheap for our usage pattern (one or
     /// two cooks per `enw` invocation), and avoids long-held connections.
-    fn invoke(&self, op: &str, positional_args: Vec<String>) -> anyhow::Result<String> {
+    fn invoke(&self, op: &str, args: Vec<String>) -> anyhow::Result<String> {
         let cookbook = self.plugin.name.clone();
         let op = op.to_string();
         let payload = self.config.clone();
-        let chain = std::env::var(crate::rpc::CALL_CHAIN_ENV_VAR)
-            .ok()
-            .map(|s| {
-                s.split(':')
-                    .filter(|p| !p.is_empty())
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let args = if positional_args.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::Array(
-                positional_args
-                    .into_iter()
-                    .map(serde_json::Value::String)
-                    .collect(),
-            )
-        };
+        let call_chain = current_call_chain();
 
         self.runtime.block_on(async move {
             use crate::rpc::EnwiroRpcClient;
@@ -293,7 +274,7 @@ impl RpcCookbookClient {
                     op,
                     args,
                     payload,
-                    call_chain: chain,
+                    call_chain,
                 })
                 .await
                 .context("rpc cookbook.invoke")?;
@@ -302,22 +283,32 @@ impl RpcCookbookClient {
     }
 }
 
+/// Parse `$ENWIRO_RPC_CALL_CHAIN` (colon-separated cookbook names, set by
+/// the daemon when one cookbook invokes another) into an ordered list.
+/// Empty / unset env var yields an empty chain.
+fn current_call_chain() -> Vec<String> {
+    std::env::var(crate::rpc::CALL_CHAIN_ENV_VAR)
+        .unwrap_or_default()
+        .split(':')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 impl CookbookTrait for RpcCookbookClient {
     fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>> {
-        tracing::debug!(cookbook = %self.plugin.name, "Listing recipes via daemon RPC");
-        let cookbook_name = self.plugin.name.clone();
-        let stdout = self.invoke("list-recipes", vec![]).with_context(|| {
-            format!("cookbook '{}' failed during 'list-recipes'", cookbook_name)
-        })?;
+        let cookbook = self.plugin.name.as_str();
+        tracing::debug!(%cookbook, "Listing recipes via daemon RPC");
+        let stdout = self
+            .invoke("list-recipes", vec![])
+            .with_context(|| format!("cookbook '{cookbook}' failed during 'list-recipes'"))?;
         Ok(stdout
             .lines()
             .filter(|line| !line.is_empty())
             .map(|line| {
                 serde_json::from_str::<Recipe>(line).unwrap_or_else(|e| {
                     tracing::warn!(
-                        cookbook = %cookbook_name,
-                        error = %e,
-                        line = %line,
+                        %cookbook, error = %e, %line,
                         "cookbook list-recipes produced non-Recipe-JSON line; treating as a bare name"
                     );
                     Recipe::new(line)
@@ -327,15 +318,11 @@ impl CookbookTrait for RpcCookbookClient {
     }
 
     fn cook(&self, recipe: &str) -> anyhow::Result<String> {
-        tracing::debug!(cookbook = %self.plugin.name, recipe = %recipe, "Cooking recipe via daemon RPC");
+        let cookbook = self.plugin.name.as_str();
+        tracing::debug!(%cookbook, %recipe, "Cooking recipe via daemon RPC");
         let stdout = self
             .invoke("cook", vec![recipe.to_string()])
-            .with_context(|| {
-                format!(
-                    "cookbook '{}' failed during 'cook {}'",
-                    self.plugin.name, recipe
-                )
-            })?;
+            .with_context(|| format!("cookbook '{cookbook}' failed during 'cook {recipe}'"))?;
         Ok(stdout.trim().to_string())
     }
 

@@ -56,7 +56,7 @@ pub struct CookbookInvokeParams {
     pub cookbook: String,
     pub op: String,
     #[serde(default)]
-    pub args: serde_json::Value,
+    pub args: Vec<String>,
     #[serde(default)]
     pub payload: serde_json::Value,
     #[serde(default)]
@@ -67,21 +67,10 @@ pub struct CookbookInvokeParams {
 /// verbatim as a string; the caller parses domain-specific JSON from it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CookbookInvokeResult {
-    pub v: u32,
     pub stdout: String,
 }
 
-/// The single source of truth for the client↔daemon RPC surface.
-///
-/// `#[rpc(server, client)]` generates:
-///   * `EnwiroRpcServer` — the trait the daemon implements.
-///   * `EnwiroRpcClient` — an extension trait auto-implemented on any
-///     `T: SubscriptionClientT` (incl. `jsonrpsee::core::client::Client`).
-///     Consumers call `client.cookbook_invoke(params).await` and get a
-///     typed `CookbookInvokeResult`.
-///
-/// Refactor here, both ends fail to compile — the load-bearing property
-/// the user wanted out of this swap.
+/// Single source of truth for the client↔daemon RPC surface.
 #[jsonrpsee::proc_macros::rpc(server, client)]
 pub trait EnwiroRpc {
     #[method(name = "cookbook.invoke")]
@@ -92,4 +81,4 @@ pub trait EnwiroRpc {
 }
 
 pub mod client;
-pub use client::{Client, ClientError, connect, connect_at};
+pub use client::{connect, connect_at};

@@ -174,6 +174,34 @@ pub(crate) fn acquire_daemon_lock(runtime_dir: &Path) -> anyhow::Result<std::fs:
     Ok(file)
 }
 
+/// Spawn the JSON-RPC server on its own OS thread with a dedicated
+/// current-thread tokio runtime so the rest of `run()` stays sync (per
+/// ADR-0002 §2 the daemon is server-only; the RPC layer lives in its own
+/// module). Runtime construction failure inside the thread is logged
+/// rather than propagated, since by that point the daemon's main loop is
+/// the recovery surface.
+fn spawn_rpc_thread(socket_path: PathBuf) -> anyhow::Result<()> {
+    std::thread::Builder::new()
+        .name("enwiro-rpc".into())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!(error = %e, "rpc tokio runtime build failed");
+                    return;
+                }
+            };
+            if let Err(e) = rt.block_on(rpc::serve(socket_path)) {
+                tracing::error!(error = %e, "rpc server exited with error");
+            }
+        })
+        .context("spawn rpc thread")?;
+    Ok(())
+}
+
 /// A cached recipe with its cookbook's priority, used for global sorting.
 struct SortableCachedRecipe {
     cached: CachedRecipe,
@@ -270,29 +298,8 @@ pub fn run(
     unsafe {
         std::env::set_var(enwiro_sdk::rpc::SOCKET_ENV_VAR, rpc_socket_path.as_os_str());
     }
-    let rpc_state = Arc::new(rpc::State::default());
-    {
-        let rpc_socket_path = rpc_socket_path.clone();
-        let rpc_state = rpc_state.clone();
-        std::thread::Builder::new()
-            .name("enwiro-rpc".into())
-            .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!(error = %e, "rpc tokio runtime build failed");
-                        return;
-                    }
-                };
-                if let Err(e) = rt.block_on(rpc::serve(rpc_socket_path, rpc_state)) {
-                    tracing::error!(error = %e, "rpc server exited with error");
-                }
-            })
-            .context("spawn rpc thread")?;
-    }
+
+    spawn_rpc_thread(rpc_socket_path.clone())?;
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);

@@ -15,21 +15,19 @@
 use std::path::{Path, PathBuf};
 
 use futures_util::{SinkExt, StreamExt};
-use jsonrpsee::core::client::{
-    Error as JsonRpcClientError, ReceivedMessage, TransportReceiverT, TransportSenderT,
-};
+use jsonrpsee::core::client::{ReceivedMessage, TransportReceiverT, TransportSenderT};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, FramedWrite, LinesCodec};
 
 use crate::rpc::{SOCKET_ENV_VAR, default_socket_path};
 
-/// Newline-delimited JSON frame limit (1 MiB). Caps memory against
-/// pathological peer behaviour; today's payloads are well under 200 KiB.
+/// Client-side framing limit. Bounds memory against pathological peer
+/// behaviour. Matches the daemon's limit by convention but is not part
+/// of the wire contract — each side caps its own input.
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-pub type Client = jsonrpsee::core::client::Client;
-pub type ClientError = JsonRpcClientError;
+type Client = jsonrpsee::core::client::Client;
 
 /// Connect to the daemon at the well-known path: `$ENWIRO_RPC_SOCKET`
 /// if set (the daemon publishes it for its children), otherwise the

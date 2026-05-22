@@ -13,8 +13,7 @@
 //! Per-connection state is currently none (no subscriptions yet); ADR
 //! Layer 3 will add a connection-scoped notification channel later.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -28,13 +27,10 @@ use jsonrpsee::types::{ErrorObjectOwned, error::ErrorCode};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
-/// Newline-delimited JSON frame limit (1 MiB). Mirrors the client-side
-/// cap; bounds memory against pathological peer behaviour.
+/// Server-side framing limit. Bounds memory against pathological peer
+/// behaviour. Matches the client's limit by convention but is not part
+/// of the wire contract — each side caps its own input.
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
-
-/// Subscription buffer per connection (deferred — no subscriptions
-/// today). 16 is a safe placeholder for `raw_json_request`'s buf_size.
-const SUBSCRIPTION_BUF: usize = 16;
 
 /// Per-invocation cookbook stdout cap (16 MiB). Bounds daemon memory
 /// against a cookbook that dumps an entire build log; if exceeded, we
@@ -46,33 +42,32 @@ const MAX_INVOKE_STDOUT_BYTES: u64 = 16 * 1024 * 1024;
 /// in error payloads; truncate aggressively.
 const MAX_INVOKE_STDERR_BYTES: u64 = 1024 * 1024;
 
-/// Shared daemon-side state. Empty for now; ADR-0002 reserves room for
-/// `last_activated_env` (env.current Layer 2) and an event broadcaster
-/// (Layer 3). Both out of scope for this branch.
-#[derive(Default)]
-pub struct State {}
+/// The struct that implements the RPC trait. Unit struct today — when
+/// Layer 2 (`env.current`) or Layer 3 (events) land, this gains a
+/// shared-state field.
+#[derive(Clone, Default)]
+struct DaemonRpc;
 
-/// The struct that implements the RPC trait. Holds an `Arc<State>` so
-/// handlers can read shared state without per-request allocations.
-#[derive(Clone)]
-struct DaemonRpc {
-    #[allow(dead_code)]
-    state: Arc<State>,
+/// `APPLICATION_ERROR_CODE` constructor — every "cookbook X failed at Y"
+/// error in this module funnels through here so the wire shape stays
+/// consistent.
+fn app_err(message: impl Into<String>) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned::<()>(APPLICATION_ERROR_CODE, message.into(), None)
+}
+
+fn app_err_with_data(message: impl Into<String>, data: serde_json::Value) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(APPLICATION_ERROR_CODE, message.into(), Some(data))
 }
 
 #[async_trait]
 impl EnwiroRpcServer for DaemonRpc {
+    #[tracing::instrument(skip(self, params), fields(cookbook = %params.cookbook, op = %params.op))]
     async fn cookbook_invoke(
         &self,
         params: CookbookInvokeParams,
     ) -> Result<CookbookInvokeResult, ErrorObjectOwned> {
         let start = std::time::Instant::now();
-        tracing::info!(
-            cookbook = %params.cookbook,
-            op = %params.op,
-            chain = ?params.call_chain,
-            "cookbook.invoke dispatched"
-        );
+        tracing::info!(chain = ?params.call_chain, "cookbook.invoke dispatched");
 
         // Cycle detection — the call_chain conventionally arrives via
         // the SDK helper, which forwards `$ENWIRO_RPC_CALL_CHAIN` from
@@ -96,25 +91,9 @@ impl EnwiroRpcServer for DaemonRpc {
         let plugin = enwiro_sdk::plugin::get_plugins(enwiro_sdk::plugin::PluginKind::Cookbook)
             .into_iter()
             .find(|p| p.name == params.cookbook)
-            .ok_or_else(|| {
-                ErrorObjectOwned::owned::<()>(
-                    APPLICATION_ERROR_CODE,
-                    format!("cookbook '{}' not found", params.cookbook),
-                    None,
-                )
-            })?;
+            .ok_or_else(|| app_err(format!("cookbook '{}' not found", params.cookbook)))?;
 
-        tracing::debug!(
-            cookbook = %params.cookbook,
-            executable = %plugin.executable,
-            op = %params.op,
-            "spawning cookbook subprocess"
-        );
-
-        // Args: positional strings (today's cookbook protocol is `cook <recipe>`
-        // / `list-recipes` / `gear <recipe>`). Structured params are a future
-        // extension of the cookbook contract, not the RPC.
-        let positional_args = positional_args_from_value(&params.args);
+        tracing::debug!(executable = %plugin.executable, "spawning cookbook subprocess");
 
         // Chain forwarded into the spawned child so transitive
         // cookbook.invoke calls see the lineage.
@@ -122,9 +101,6 @@ impl EnwiroRpcServer for DaemonRpc {
         extended_chain.push(params.cookbook.clone());
         let chain_env_value = extended_chain.join(":");
 
-        let cookbook_name = params.cookbook.clone();
-        let op_for_spawn = params.op.clone();
-        let executable = plugin.executable.clone();
         let payload = enwiro_sdk::CookbookPayload::new(params.payload.clone());
 
         // tokio::process gives us async pipes + kill_on_drop: if the
@@ -133,9 +109,9 @@ impl EnwiroRpcServer for DaemonRpc {
         // Bounded reads on stdout / stderr cap daemon memory against a
         // cookbook that dumps a gigabyte of build output.
         let output = run_cookbook_subprocess(
-            &executable,
-            &op_for_spawn,
-            &positional_args,
+            &plugin.executable,
+            &params.op,
+            &params.args,
             &chain_env_value,
             &payload,
         )
@@ -143,68 +119,62 @@ impl EnwiroRpcServer for DaemonRpc {
         .map_err(|e| {
             ErrorObjectOwned::owned::<()>(
                 ErrorCode::InternalError.code(),
-                format!("cookbook spawn failed: {}", e),
+                format!("cookbook spawn failed: {e}"),
                 None,
             )
         })?;
 
+        let stderr_text = String::from_utf8_lossy(&output.stderr).into_owned();
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
         if output.stdout_truncated {
             tracing::warn!(
-                cookbook = %cookbook_name,
-                op = %params.op,
                 "cookbook stdout exceeded MAX_INVOKE_STDOUT_BYTES; killed and truncated"
             );
-            return Err(ErrorObjectOwned::owned(
-                APPLICATION_ERROR_CODE,
+            return Err(app_err_with_data(
                 format!(
                     "cookbook '{}' op '{}' produced more than {} bytes of stdout (truncated and killed)",
-                    cookbook_name, params.op, MAX_INVOKE_STDOUT_BYTES
+                    params.cookbook, params.op, MAX_INVOKE_STDOUT_BYTES
                 ),
-                Some(serde_json::json!({
+                serde_json::json!({
                     "max_stdout_bytes": MAX_INVOKE_STDOUT_BYTES,
-                    "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
-                })),
+                    "stderr": stderr_text,
+                }),
             ));
         }
 
-        let elapsed = start.elapsed();
         if !output.status.success() {
             tracing::warn!(
-                cookbook = %cookbook_name,
-                op = %params.op,
                 exit_code = ?output.status.code(),
-                elapsed_ms = elapsed.as_millis() as u64,
+                elapsed_ms,
+                stderr = %stderr_text,
                 "cookbook exited with non-zero status"
             );
-            return Err(ErrorObjectOwned::owned(
-                APPLICATION_ERROR_CODE,
+            return Err(app_err_with_data(
                 format!(
                     "cookbook '{}' op '{}' exited with non-zero status",
-                    cookbook_name, params.op
+                    params.cookbook, params.op
                 ),
-                Some(serde_json::json!({
-                    "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+                serde_json::json!({
+                    "stderr": stderr_text,
                     "exit_code": output.status.code(),
-                })),
+                }),
             ));
         }
 
         let stdout = String::from_utf8(output.stdout).map_err(|e| {
-            ErrorObjectOwned::owned::<()>(
-                APPLICATION_ERROR_CODE,
-                format!("cookbook '{}' produced invalid UTF-8: {}", cookbook_name, e),
-                None,
-            )
+            app_err(format!(
+                "cookbook '{}' produced invalid UTF-8: {e}",
+                params.cookbook
+            ))
         })?;
         tracing::info!(
-            cookbook = %cookbook_name,
-            op = %params.op,
-            elapsed_ms = elapsed.as_millis() as u64,
+            elapsed_ms,
             stdout_bytes = stdout.len(),
             "cookbook.invoke completed"
         );
 
-        Ok(CookbookInvokeResult { v: 1, stdout })
+        Ok(CookbookInvokeResult { stdout })
     }
 }
 
@@ -306,18 +276,8 @@ async fn run_cookbook_subprocess(
     })
 }
 
-fn positional_args_from_value(args: &serde_json::Value) -> Vec<String> {
-    match args {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 /// Bind the unix socket, set perms to 0600, and run the accept loop.
-pub async fn serve(socket_path: PathBuf, state: Arc<State>) -> anyhow::Result<()> {
+pub async fn serve(socket_path: PathBuf) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create runtime dir {}", parent.display()))?;
@@ -331,18 +291,14 @@ pub async fn serve(socket_path: PathBuf, state: Arc<State>) -> anyhow::Result<()
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", socket_path.display()))?;
     }
-    serve_listener(listener, state, socket_path).await
+    serve_listener(listener, socket_path).await
 }
 
 /// Run the accept loop against a pre-bound listener. Exposed so tests
 /// can own bind themselves (and surface bind errors directly) before
 /// signalling readiness.
-pub async fn serve_listener(
-    listener: UnixListener,
-    state: Arc<State>,
-    socket_path: PathBuf,
-) -> anyhow::Result<()> {
-    let methods: Methods = DaemonRpc { state }.into_rpc().into();
+pub async fn serve_listener(listener: UnixListener, socket_path: PathBuf) -> anyhow::Result<()> {
+    let methods: Methods = DaemonRpc.into_rpc().into();
     tracing::info!(path = %socket_path.display(), "rpc server listening");
 
     loop {
@@ -375,14 +331,19 @@ async fn handle_conn(stream: UnixStream, methods: Methods) -> anyhow::Result<()>
             }
         };
         // jsonrpsee owns the protocol: parse, dispatch, build response.
-        let response_str = match methods.raw_json_request(&line, SUBSCRIPTION_BUF).await {
+        // The `16` is `raw_json_request`'s buf_size param for subscription
+        // notifications; we have none yet, so any positive value works.
+        let response_str = match methods.raw_json_request(&line, 16).await {
             Ok((response, _subscription_rx)) => response.get().to_owned(),
-            Err(e) => {
-                // Only triggers on `serde_json::from_str` failure for the
-                // outer envelope shape. Surface as a JSON-RPC parse error
-                // with id: null.
-                build_parse_error_line(&e)
-            }
+            Err(e) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": serde_json::Value::Null,
+                "error": {
+                    "code": ErrorCode::ParseError.code(),
+                    "message": format!("parse error: {}", e),
+                },
+            })
+            .to_string(),
         };
         if let Err(e) = framed.send(response_str).await {
             tracing::debug!(error = %e, "rpc response write failed; closing connection");
@@ -390,29 +351,4 @@ async fn handle_conn(stream: UnixStream, methods: Methods) -> anyhow::Result<()>
         }
     }
     Ok(())
-}
-
-/// Build a JSON-RPC parse-error response with `id: null`. Matches the
-/// JSON-RPC 2.0 spec: when the request can't be parsed at all, the
-/// server replies with `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,...}}`.
-fn build_parse_error_line(e: &serde_json::Error) -> String {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": serde_json::Value::Null,
-        "error": {
-            "code": ErrorCode::ParseError.code(),
-            "message": format!("parse error: {}", e),
-        },
-    })
-    .to_string()
-}
-
-/// Default socket path under `$XDG_RUNTIME_DIR/enwiro/`.
-pub fn default_socket_path() -> anyhow::Result<PathBuf> {
-    enwiro_sdk::rpc::default_socket_path()
-}
-
-/// Return the path the daemon should advertise in `ENWIRO_RPC_SOCKET`.
-pub fn socket_env_value(socket_path: &Path) -> String {
-    socket_path.to_string_lossy().into_owned()
 }
