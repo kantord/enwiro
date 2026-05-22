@@ -13,11 +13,10 @@ pub use config::ConfigurationValues;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
+use tokio::signal::unix::{SignalKind, signal};
 
 use std::collections::HashMap;
 
@@ -32,6 +31,15 @@ use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamI
 struct CookbookEntry {
     priority: u32,
     recipes: Vec<Recipe>,
+}
+
+/// Caller-provided startup configuration for `run`. Distinct from
+/// `config::ConfigurationValues`, which carries project-level cookbook
+/// config; this struct only carries what the daemon needs to start.
+pub struct DaemonConfig {
+    /// Root directory under which env worktrees live; switch events name
+    /// envs by basename, resolved as `workspaces_directory/<env_name>`.
+    pub workspaces_directory: PathBuf,
 }
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
@@ -174,34 +182,6 @@ pub(crate) fn acquire_daemon_lock(runtime_dir: &Path) -> anyhow::Result<std::fs:
     Ok(file)
 }
 
-/// Spawn the JSON-RPC server on its own OS thread with a dedicated
-/// current-thread tokio runtime so the rest of `run()` stays sync (per
-/// ADR-0002 §2 the daemon is server-only; the RPC layer lives in its own
-/// module). Runtime construction failure inside the thread is logged
-/// rather than propagated, since by that point the daemon's main loop is
-/// the recovery surface.
-fn spawn_rpc_thread(socket_path: PathBuf) -> anyhow::Result<()> {
-    std::thread::Builder::new()
-        .name("enwiro-rpc".into())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!(error = %e, "rpc tokio runtime build failed");
-                    return;
-                }
-            };
-            if let Err(e) = rt.block_on(rpc::serve(socket_path)) {
-                tracing::error!(error = %e, "rpc server exited with error");
-            }
-        })
-        .context("spawn rpc thread")?;
-    Ok(())
-}
-
 /// A cached recipe with its cookbook's priority, used for global sorting.
 struct SortableCachedRecipe {
     cached: CachedRecipe,
@@ -262,15 +242,20 @@ pub(crate) fn parse_switch_event(line: &str) -> Option<(String, i64)> {
 /// and drain the cookbook/adapter stdout channel.
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Run the daemon. Blocks until SIGTERM/SIGINT/SIGHUP.
+/// Run the daemon. Awaits until SIGTERM/SIGINT/SIGHUP.
 ///
-/// `workspaces_directory` is the root under which enwiro environments live;
-/// switch events emitted by the adapter `listen` subprocess are resolved as
-/// `<workspaces_directory>/<env_name>` and passed to `on_workspace_switch`.
-pub fn run(
-    workspaces_directory: PathBuf,
+/// `config.workspaces_directory` is the root under which enwiro environments
+/// live; switch events emitted by the adapter `listen` subprocess are
+/// resolved as `<workspaces_directory>/<env_name>` and passed to
+/// `on_workspace_switch`.
+pub async fn run(
+    config: DaemonConfig,
     on_workspace_switch: impl Fn(&Path, i64) + Send + 'static,
 ) -> anyhow::Result<()> {
+    let DaemonConfig {
+        workspaces_directory,
+    } = config;
+
     let setsid_result = unsafe { libc::setsid() };
     if setsid_result == -1 {
         tracing::warn!("setsid() failed, continuing anyway");
@@ -280,26 +265,19 @@ pub fn run(
     fs::create_dir_all(&dir)?;
 
     // Kernel-mutex against double-start. Held for the lifetime of `run()`
-    // via this binding; closing the file (drop) releases the lock. Must
-    // happen BEFORE write_pid_file / socket bind so the loser exits with
-    // a clear message instead of silently fighting over the same paths.
+    // via this binding; closing the file (drop) releases the lock.
     let _daemon_lock = acquire_daemon_lock(&dir)?;
 
     write_pid_file(&dir)?;
 
-    let term = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))?;
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
-    signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
-
     let rpc_socket_path = dir.join(enwiro_sdk::rpc::SOCKET_FILENAME);
     // SAFETY (Rust 2024): set_var can race with concurrent env reads.
-    // Done before any thread or child spawn, so the mutation is sound.
+    // Done before any tokio task or child spawn, so the mutation is sound.
     unsafe {
         std::env::set_var(enwiro_sdk::rpc::SOCKET_ENV_VAR, rpc_socket_path.as_os_str());
     }
 
-    spawn_rpc_thread(rpc_socket_path.clone())?;
+    tokio::spawn(rpc::serve(rpc_socket_path.clone()));
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);
@@ -352,19 +330,23 @@ pub fn run(
         tracing::warn!(key = ?key, error = ?err, "Could not spawn listen subprocess");
     }
 
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sighup = signal(SignalKind::hangup())?;
+    let mut tick = tokio::time::interval(TICK_INTERVAL);
+
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
-        // Reconcile each tick so the upstream pool can restart any
-        // listen subprocess that exited since the previous iteration
-        // (via `Lifecycle::reconcile_self`, which checks `try_wait`).
-        for (key, err) in pool.reconcile(desired.clone()) {
-            tracing::warn!(key = ?key, error = ?err, "Could not respawn listen subprocess");
-        }
-
-        loop {
-            match stream_rx.try_recv() {
-                Ok(item) => {
+        tokio::select! {
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
+            _ = sighup.recv() => break,
+            _ = tick.tick() => {
+                for (key, err) in pool.reconcile(desired.clone()) {
+                    tracing::warn!(key = ?key, error = ?err, "Could not respawn listen subprocess");
+                }
+                while let Ok(item) = stream_rx.try_recv() {
                     if item.stream != StreamKind::Stdout {
                         continue;
                     }
@@ -372,8 +354,7 @@ pub fn run(
                         if let Some((env_name, timestamp)) = parse_switch_event(&item.line)
                             && !env_name.is_empty()
                         {
-                            let env_dir = workspaces_directory.join(&env_name);
-                            on_workspace_switch(&env_dir, timestamp);
+                            on_workspace_switch(&workspaces_directory.join(&env_name), timestamp);
                         }
                     } else if let Some(entry) = recipe_state.get_mut(&item.key.key) {
                         match serde_json::from_str::<RecipeUpdate>(&item.line) {
@@ -393,20 +374,15 @@ pub fn run(
                         }
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             }
         }
-
-        if term.load(Ordering::Relaxed) {
-            tracing::info!("Received termination signal, exiting");
-            drop(pool);
-            remove_pid_file(&dir);
-            let _ = std::fs::remove_file(&rpc_socket_path);
-            return Ok(());
-        }
-        std::thread::sleep(TICK_INTERVAL);
     }
+
+    tracing::info!("Received termination signal, exiting");
+    drop(pool);
+    remove_pid_file(&dir);
+    let _ = std::fs::remove_file(&rpc_socket_path);
+    Ok(())
 }
 
 #[cfg(test)]
