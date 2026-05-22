@@ -9,19 +9,19 @@ Proposed
 Multiple open issues demand a coherent story for how processes in the enwiro
 ecosystem talk to each other:
 
-- **#432** asks the daemon to expose env-activation events to external
+- **[#432](https://github.com/kantord/enwiro/issues/432)** asks the daemon to expose env-activation events to external
   listeners (costae, AI surfaces, generic).
-- **#278** ("rely on unix sockets to connect to daemon instead of files") is
-  the umbrella IPC issue, currently `Ready`. #432 is one of its
-  consumer-facing surfaces; #357 (`Depends on #278`) is another.
-- **#297** (costae flash on swap), **#298** (context recap), **#302** (live
-  status tracking), **#348/#386** (AI surfaces), **#395** (agent
-  coordination), **#436** (plugin discovery TUI) all want some flavour of
+- **[#278](https://github.com/kantord/enwiro/issues/278)** ("rely on unix sockets to connect to daemon instead of files") is
+  the umbrella IPC issue, currently `Ready`. [#432](https://github.com/kantord/enwiro/issues/432) is one of its
+  consumer-facing surfaces; [#357](https://github.com/kantord/enwiro/issues/357) (`Depends on [#278](https://github.com/kantord/enwiro/issues/278)`) is another.
+- **[#297](https://github.com/kantord/enwiro/issues/297)** (costae flash on swap), **[#298](https://github.com/kantord/enwiro/issues/298)** (context recap), **[#302](https://github.com/kantord/enwiro/issues/302)** (live
+  status tracking), **[#348](https://github.com/kantord/enwiro/issues/348)/[#386](https://github.com/kantord/enwiro/issues/386)** (AI surfaces), **[#395](https://github.com/kantord/enwiro/issues/395)** (agent
+  coordination), **[#436](https://github.com/kantord/enwiro/issues/436)** (plugin discovery TUI) all want some flavour of
   pushed events or queried state from the daemon.
-- **#301** ("formalize extension/composition rules for recipes/cookbooks")
+- **[#301](https://github.com/kantord/enwiro/issues/301)** ("formalize extension/composition rules for recipes/cookbooks")
   wants cookbook composition; the user has since refined the framing toward
   cookbook-as-client of the daemon rather than `enw`-orchestrated chaining.
-- **#427/#428/#431** add new lifecycle hooks (user-defined, Cook, Destroy)
+- **[#427](https://github.com/kantord/enwiro/issues/427)/[#428](https://github.com/kantord/enwiro/issues/428)/[#431](https://github.com/kantord/enwiro/issues/431)** add new lifecycle hooks (user-defined, Cook, Destroy)
   whose firings need to be observable.
 
 Today's communication shapes:
@@ -54,7 +54,7 @@ that *"a bash script could be an enwiro cookbook or garnish or adapter"*
 hinges on keeping that interface trivial.
 
 What is missing today is a single, coherent IPC story for **clients of the
-daemon**: `enw`, future external apps, and (per the refined #301 framing)
+daemon**: `enw`, future external apps, and (per the refined [#301](https://github.com/kantord/enwiro/issues/301) framing)
 cookbook binaries themselves. Today's file-based cache + ad-hoc fork
 patterns work but force every client to re-implement business logic that
 should live in the daemon.
@@ -85,7 +85,7 @@ should live in the daemon.
 - **Multi-client without `enw` as a bottleneck.** Other apps (costae,
   tauler, future tooling) should be able to connect to the daemon directly,
   not only through `enw`.
-- **Cookbook delegation matters.** Refined #301 framing: cookbook A asks
+- **Cookbook delegation matters.** Refined [#301](https://github.com/kantord/enwiro/issues/301) framing: cookbook A asks
   the daemon to invoke cookbook B and add layered logic on top. Whatever
   RPC mechanism the clients use must also accept calls from cookbook child
   processes.
@@ -153,7 +153,7 @@ should live in the daemon.
   PostgreSQL-style split clients are justified by broad surface; enwiro's
   surface is narrow.
 
-### Cookbook composition (refined #301)
+### Cookbook composition (refined [#301](https://github.com/kantord/enwiro/issues/301))
 
 - ✓ **Chosen — Cookbooks call the daemon over RPC** to delegate to other
   cookbooks ("cookbook A asks daemon to ask cookbook B to cook recipe R,
@@ -164,7 +164,7 @@ should live in the daemon.
 - ✗ **Rejected — Direct cookbook → cookbook calls.** Would push OOP-style
   inheritance/dispatch into the cookbook protocol; daemon would have no
   visibility for cycle detection, audit, or future policy.
-- ✗ **Rejected — Pure host-orchestrated chaining (the strict #301
+- ✗ **Rejected — Pure host-orchestrated chaining (the strict [#301](https://github.com/kantord/enwiro/issues/301)
   framing).** `enw` runs recipes in order with no cookbook-side
   participation. Workable but inflexible; cookbook A can't depend on
   cookbook B's *output* (e.g. worktree path) without an out-of-band
@@ -174,7 +174,7 @@ should live in the daemon.
 
 - ✓ **Chosen — Design now, implement when first consumer ships.** Add
   `events.subscribe` / `events.notify` to the JSON-RPC surface in this
-  ADR. Do not write the daemon-side broadcast plumbing until #297 (costae
+  ADR. Do not write the daemon-side broadcast plumbing until [#297](https://github.com/kantord/enwiro/issues/297) (costae
   flash) or another confirmed consumer needs it.
 - ✗ **Rejected — Implement now anyway.** Speculative; no built consumer.
 - ✗ **Rejected — Defer the design too.** Forces the next ADR to invent the
@@ -248,7 +248,7 @@ should live in the daemon.
    `cookbook.invoke`. It exercises every layer this ADR commits to
    (socket bind, JSON-RPC framing, method dispatch, cookbook subprocess
    spawn from inside an RPC handler, typed result) and resolves the
-   refined #301 use case with a real consumer.
+   refined [#301](https://github.com/kantord/enwiro/issues/301) use case with a real consumer.
 
 6. **RPC envelope.**
 
@@ -286,8 +286,8 @@ should live in the daemon.
      `/proc/<pid>/environ`.
    - `recipes.list` — list cached recipes (optionally filtered by cookbook).
    - `cookbook.invoke` — delegate to another cookbook (pilot method).
-   - `status.get` — live env status, when #302 lands.
-   - `cache.status` — per-cookbook freshness, when #357 lands.
+   - `status.get` — live env status, when [#302](https://github.com/kantord/enwiro/issues/302) lands.
+   - `cache.status` — per-cookbook freshness, when [#357](https://github.com/kantord/enwiro/issues/357) lands.
    - `health` — daemon liveness and protocol-version probe. Single noun;
      deliberately unnamespaced because it predates any namespace.
    - `events.subscribe` / `events.notify` / `events.unsubscribe` —
@@ -299,13 +299,13 @@ should live in the daemon.
    - `env_activated` — emitted on env swap; payload includes `env`,
      `recipe_id`, `prev_env`, `worktree_path`, `source`, `ts`.
    - `env_cooked` — emitted after a cook completes.
-   - `env_destroyed` — emitted by `enw rm` (#337) once #431
+   - `env_destroyed` — emitted by `enw rm` ([#337](https://github.com/kantord/enwiro/issues/337)) once [#431](https://github.com/kantord/enwiro/issues/431)
      (`Hook::Destroy`) lands.
    - `hook_fired` — covers built-in (`Cook`, `Destroy`) and user-defined
-     hooks (#427/#428). Payload: `{ "env": "...", "hook": "<name>",
+     hooks ([#427](https://github.com/kantord/enwiro/issues/427)/[#428](https://github.com/kantord/enwiro/issues/428)). Payload: `{ "env": "...", "hook": "<name>",
      "source": "auto|manual" }`.
-   - `status_changed` — Active / Inactive / Evergreen per #302.
-   - `cache_refreshed` — per-cookbook cache refresh, per #357.
+   - `status_changed` — Active / Inactive / Evergreen per [#302](https://github.com/kantord/enwiro/issues/302).
+   - `cache_refreshed` — per-cookbook cache refresh, per [#357](https://github.com/kantord/enwiro/issues/357).
 
 9. **Versioning and compatibility.** Every result payload and every event
    body carries a `v` field (start at `1`). **Scope of `v` is per-shape,
@@ -325,7 +325,7 @@ should live in the daemon.
 
 10. **No authentication at the IPC layer.** Single-user assumption holds;
     the socket lives at perms `0600` in `$XDG_RUNTIME_DIR` (mode `0700`).
-    The hook-execution safety story from #428 (untrusted cookbook envs
+    The hook-execution safety story from [#428](https://github.com/kantord/enwiro/issues/428) (untrusted cookbook envs
     must not trigger user automations) lives at the hook-execution layer,
     not here.
 
@@ -335,18 +335,18 @@ should live in the daemon.
     runtime, add a thread pool) do not need a new ADR as long as the
     wire shape and method set remain compatible.
 
-12. **Resolves #278; designs #432 (impl tracked separately).** This ADR
-    is the resolution of #278: the unix socket connecting clients to the
-    daemon is the JSON-RPC surface described above. #432 ("expose
+12. **Resolves [#278](https://github.com/kantord/enwiro/issues/278); designs [#432](https://github.com/kantord/enwiro/issues/432) (impl tracked separately).** This ADR
+    is the resolution of [#278](https://github.com/kantord/enwiro/issues/278): the unix socket connecting clients to the
+    daemon is the JSON-RPC surface described above. [#432](https://github.com/kantord/enwiro/issues/432) ("expose
     env-activation events to external listeners") is *designed* here
     via `events.subscribe` + `events.notify` + the `enw events tail`
     wrapper, but is **not** implemented in this branch and SHOULD NOT
-    be closed on ADR merge. #432 closes when the first event consumer
-    (likely #297) ships against this interface.
+    be closed on ADR merge. [#432](https://github.com/kantord/enwiro/issues/432) closes when the first event consumer
+    (likely [#297](https://github.com/kantord/enwiro/issues/297)) ships against this interface.
 
-13. **Refines #301.** Cookbook composition is no longer pure
+13. **Refines [#301](https://github.com/kantord/enwiro/issues/301).** Cookbook composition is no longer pure
     host-orchestrated chaining; it's daemon-mediated delegation via
-    `cookbook.invoke`. #301 should be updated (or superseded by a
+    `cookbook.invoke`. [#301](https://github.com/kantord/enwiro/issues/301) should be updated (or superseded by a
     follow-up issue) to reflect this.
 
 ## Consequences
@@ -359,15 +359,15 @@ should live in the daemon.
 - **`enw` thinning is unlocked.** Each `enw` subcommand can migrate to a
   small RPC composition in a self-contained PR. The work happens
   incrementally without a flag-day rewrite.
-- **Non-`enw` clients become first-class.** costae's flash (#297), AI
-  surfaces (#348/#386), tauler panels (`useJSONStream("enw events tail")`),
-  TUIs (#436) all connect via the same protocol.
+- **Non-`enw` clients become first-class.** costae's flash ([#297](https://github.com/kantord/enwiro/issues/297)), AI
+  surfaces ([#348](https://github.com/kantord/enwiro/issues/348)/[#386](https://github.com/kantord/enwiro/issues/386)), tauler panels (`useJSONStream("enw events tail")`),
+  TUIs ([#436](https://github.com/kantord/enwiro/issues/436)) all connect via the same protocol.
 - **Cookbook composition has a real home.** `cookbook.invoke` lets the
   github cookbook delegate to git rather than re-declaring the git
   cookbook's config schema. The duplicated `GitCookbookConfig` block at
   `enwiro-cookbook-github/src/main.rs:26-29` (referenced in ADR-0001's
   references section) is the concrete mirror that becomes
-  unnecessary once `cookbook.invoke` exists. The broader #301
+  unnecessary once `cookbook.invoke` exists. The broader [#301](https://github.com/kantord/enwiro/issues/301)
   motivation — composing cookbooks without out-of-band conventions —
   follows from the same primitive.
 - **Shell-discoverable wire format.** `socat - UNIX-CONNECT:... | jq`
@@ -381,10 +381,10 @@ should live in the daemon.
 - **Schema evolution is cheap.** Additive fields don't bump `v`; unknown
   kinds are silently dropped by consumers. Forward and backward compat
   fall out of the convention.
-- **#357 is unblocked.** Per-source freshness becomes a normal
+- **[#357](https://github.com/kantord/enwiro/issues/357) is unblocked.** Per-source freshness becomes a normal
   daemon-internal feature plus a `cache.status` RPC, with no protocol
   redesign needed.
-- **Layer 3 events are designed but not implemented.** Builders of #297
+- **Layer 3 events are designed but not implemented.** Builders of [#297](https://github.com/kantord/enwiro/issues/297)
   and similar have a contract to target without paying implementation
   cost up front.
 
@@ -393,7 +393,7 @@ should live in the daemon.
 - **One more piece of infrastructure to keep alive.** The JSON-RPC server
   inside the daemon must be robust (panic-safe, backpressure-handled,
   socket cleanup on restart). Mitigated by JSON-RPC's small surface and
-  the existing daemon-as-required posture (#330).
+  the existing daemon-as-required posture ([#330](https://github.com/kantord/enwiro/issues/330)).
 - **Two protocols to maintain.** Stdout-JSONL upstream and JSON-RPC
   downstream are distinct. Acceptable: they're aligned semantically
   (`kind`-discriminated payloads, `v`-versioned, unknown-tolerant) and
@@ -404,7 +404,7 @@ should live in the daemon.
   than its typing benefit at our current scale.
 - **Daemon-down failure mode becomes user-visible.** `enw` exits with a
   JSON-RPC error if the socket isn't bindable. Mitigated by systemd unit
-  posture (`Restart=always`, per #330's spirit); document the failure
+  posture (`Restart=always`, per [#330](https://github.com/kantord/enwiro/issues/330)'s spirit); document the failure
   message so users can diagnose.
 - **Migration cost.** Existing `enw` code (e.g. `context.rs:99-103`,
   `commands/ls.rs:146-151`) needs to migrate from `DaemonCache`
@@ -434,7 +434,7 @@ should live in the daemon.
   every method shape. New methods land with their request/response
   structs in one PR.
 - **Authz becomes relevant later.** Today's "local-only, socket perms are
-  enough" stance fails if a network use case lands (#380). Mitigation:
+  enough" stance fails if a network use case lands ([#380](https://github.com/kantord/enwiro/issues/380)). Mitigation:
   any future network transport is a separate ADR; until then, the
   socket-perms story stands.
 
@@ -468,9 +468,9 @@ should live in the daemon.
 - `recipes.list` RPC, `enw list-recipes` wrapper, migrate
   `enwiro/src/commands/ls.rs` off `DaemonCache::read_recipes()`.
 - `events.subscribe` / `events.notify` implementation, gated on first
-  consumer (#297 costae flash is the leading candidate).
-- `status.get` + `status_changed` events for #302.
-- `cache.status` + `cache_refreshed` events for #357.
+  consumer ([#297](https://github.com/kantord/enwiro/issues/297) costae flash is the leading candidate).
+- `status.get` + `status_changed` events for [#302](https://github.com/kantord/enwiro/issues/302).
+- `cache.status` + `cache_refreshed` events for [#357](https://github.com/kantord/enwiro/issues/357).
 - `env.current` RPC + `enw current-env` wrapper + remove last
   `DaemonCache` direct read in `enwiro/src/context.rs:99-103`. Daemon
   gains an in-memory `current_env` state populated by the existing
@@ -518,17 +518,17 @@ should live in the daemon.
   cookbook protocol payload shape. ADR-0002 extends the cookbook
   contract by adding an env var (`ENWIRO_RPC_SOCKET`) and an optional
   outbound capability (calling `cookbook.invoke`). Non-breaking.
-- **#278** — resolved by this ADR.
-- **#432** — *designed* by this ADR (`events.subscribe` + `events.notify`
+- **[#278](https://github.com/kantord/enwiro/issues/278)** — resolved by this ADR.
+- **[#432](https://github.com/kantord/enwiro/issues/432)** — *designed* by this ADR (`events.subscribe` + `events.notify`
   + `enw events tail` wrapper); implementation tracked separately,
-  gated on the first concrete consumer (likely #297). Do not close on
+  gated on the first concrete consumer (likely [#297](https://github.com/kantord/enwiro/issues/297)). Do not close on
   ADR merge.
-- **#301** — refined; will be updated (or superseded by a follow-up
+- **[#301](https://github.com/kantord/enwiro/issues/301)** — refined; will be updated (or superseded by a follow-up
   issue) to reflect daemon-mediated cookbook delegation.
-- **#357** — unblocked.
-- **#302, #297, #298, #348/#386, #395, #427/#428, #431, #436** — all
+- **[#357](https://github.com/kantord/enwiro/issues/357)** — unblocked.
+- **[#302](https://github.com/kantord/enwiro/issues/302), [#297](https://github.com/kantord/enwiro/issues/297), [#298](https://github.com/kantord/enwiro/issues/298), [#348](https://github.com/kantord/enwiro/issues/348)/[#386](https://github.com/kantord/enwiro/issues/386), [#395](https://github.com/kantord/enwiro/issues/395), [#427](https://github.com/kantord/enwiro/issues/427)/[#428](https://github.com/kantord/enwiro/issues/428), [#431](https://github.com/kantord/enwiro/issues/431), [#436](https://github.com/kantord/enwiro/issues/436)** — all
   gain a defined consumer interface.
-- **#380 (remote environments)** — future ADR. The three shapes the user
+- **[#380](https://github.com/kantord/enwiro/issues/380) (remote environments)** — future ADR. The three shapes the user
   identified (local daemon to remote env directly; local daemon to
   remote daemon bridge; "remote env" = mounted files, no remote logic)
   do not require a heavier protocol than JSON-RPC. None forces a
@@ -552,7 +552,7 @@ should live in the daemon.
 - `costae-i3/src/main.rs`, `costae-notify/src/server.rs:81`
   (`read_enwiro_env`) — costae's current indirect env-state derivation
   via i3 events + `/proc/<pid>/environ`. The first listener interface
-  for #297 will replace these for the swap-flash use case.
+  for [#297](https://github.com/kantord/enwiro/issues/297) will replace these for the swap-flash use case.
 - `/home/kantord/repos/tauler/src/jsx.rs:45` —
   `globalThis.useJSONStream = (bin, script) => ...`. The consumer
   pattern that `enw events tail` preserves.
@@ -563,6 +563,6 @@ should live in the daemon.
 - Docker daemon/client split — `dockerd` vs `docker`.
 - Nix daemon/client split — `nix-daemon` vs `nix`.
 - Kubernetes client CLI — `kubectl`.
-- Issue #278 — *"rely on unix sockets to connect to daemon instead of files"*.
-- Issue #432 — *"expose env-activation events to external listeners"*.
-- Issue #301 — *"formalize extension/composition rules for recipes/cookbooks"*.
+- Issue [#278](https://github.com/kantord/enwiro/issues/278) — *"rely on unix sockets to connect to daemon instead of files"*.
+- Issue [#432](https://github.com/kantord/enwiro/issues/432) — *"expose env-activation events to external listeners"*.
+- Issue [#301](https://github.com/kantord/enwiro/issues/301) — *"formalize extension/composition rules for recipes/cookbooks"*.
