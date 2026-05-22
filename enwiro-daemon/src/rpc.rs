@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use enwiro_sdk::rpc::{
-    CALL_CHAIN_ENV_VAR, CookbookInvokeParams, CookbookInvokeResult, JSONRPC_VERSION, Request,
+    CALL_CHAIN_ENV_VAR, CookbookInvokeParams, CookbookInvokeResult, MAX_FRAME_BYTES, Request,
     RequestEnvelope, ResponseEnvelope, RpcError,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -42,8 +42,15 @@ pub async fn serve(socket_path: PathBuf, state: Arc<State>) -> anyhow::Result<()
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", socket_path.display()))?;
     }
-    tracing::info!(path = %socket_path.display(), "rpc server listening");
+    serve_listener(listener, state, socket_path).await;
+    Ok(())
+}
 
+/// Run the accept loop against a pre-bound listener. Exposed so tests can
+/// own bind themselves (and surface bind errors directly) before signalling
+/// readiness. Production callers use `serve` instead.
+pub async fn serve_listener(listener: UnixListener, state: Arc<State>, socket_path: PathBuf) {
+    tracing::info!(path = %socket_path.display(), "rpc server listening");
     loop {
         let (stream, _addr) = match listener.accept().await {
             Ok(v) => v,
@@ -62,7 +69,7 @@ pub async fn serve(socket_path: PathBuf, state: Arc<State>) -> anyhow::Result<()
 }
 
 async fn handle_conn(stream: UnixStream, state: Arc<State>) -> anyhow::Result<()> {
-    let mut framed = Framed::new(stream, LinesCodec::new());
+    let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(MAX_FRAME_BYTES));
     while let Some(line) = framed.next().await {
         let line = match line {
             Ok(l) => l,
@@ -85,19 +92,7 @@ async fn handle_conn(stream: UnixStream, state: Arc<State>) -> anyhow::Result<()
 async fn dispatch(line: &str, state: &Arc<State>) -> ResponseEnvelope {
     let envelope: RequestEnvelope = match serde_json::from_str(line) {
         Ok(e) => e,
-        Err(e) => {
-            return ResponseEnvelope {
-                jsonrpc: JSONRPC_VERSION.into(),
-                id: 0,
-                body: enwiro_sdk::rpc::ResponseBody::Err {
-                    error: RpcError {
-                        code: RpcError::PARSE_ERROR,
-                        message: format!("parse error: {}", e),
-                        data: None,
-                    },
-                },
-            };
-        }
+        Err(e) => return ResponseEnvelope::parse_error(format!("parse error: {}", e)),
     };
 
     let id = envelope.id;

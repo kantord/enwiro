@@ -5,32 +5,55 @@
 //! spawning here (no plugins to find); a follow-up test will exercise the
 //! cookbook handler against a fixture plugin.
 
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
-use std::time::Duration;
 
 use enwiro_daemon::rpc;
 use enwiro_sdk::rpc::{Client, ClientError, CookbookInvokeParams, RpcError};
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 
-/// Spawn the rpc server on a current-thread runtime in a background tokio
-/// task. Returns the socket path; the test client connects to it.
+/// Spawn the RPC server in a background tokio task. Signals readiness via
+/// a `oneshot` *after* the socket has bound, so the test never races on
+/// existence polling and bind errors surface immediately on the join
+/// handle. Returns the socket path; caller keeps the `TempDir` alive.
 async fn spawn_server(tempdir: &TempDir) -> std::path::PathBuf {
     let socket_path = tempdir.path().join("rpc.sock");
     let state = Arc::new(rpc::State::default());
-    {
-        let socket_path = socket_path.clone();
-        tokio::spawn(async move {
-            let _ = rpc::serve(socket_path, state).await;
-        });
+
+    // Bind synchronously here (the test owns the failure surface) so the
+    // oneshot fires only after the socket file exists, then move the
+    // listener into the spawned task for the accept loop. This avoids the
+    // existence-polling/swallowed-bind-error pattern.
+    let _ = std::fs::remove_file(&socket_path);
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
     }
-    // Give the server a moment to bind before the client connects.
-    for _ in 0..50 {
-        if socket_path.exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind rpc socket in test");
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        .expect("chmod 0600 rpc socket in test");
+
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    let socket_path_clone = socket_path.clone();
+    tokio::spawn(async move {
+        let _ = ready_tx.send(());
+        rpc::serve_listener(listener, state, socket_path_clone).await;
+    });
+    ready_rx.await.expect("rpc server ready signal");
     socket_path
+}
+
+/// Security-relevant invariant: socket must be 0600.
+#[tokio::test]
+async fn socket_is_owner_only() {
+    let tempdir = TempDir::new().unwrap();
+    let socket_path = spawn_server(&tempdir).await;
+    let mode = std::fs::metadata(&socket_path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "rpc socket must be mode 0600, got {:o}", mode);
 }
 
 #[tokio::test]

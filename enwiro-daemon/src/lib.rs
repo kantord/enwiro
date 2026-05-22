@@ -224,6 +224,11 @@ pub fn run(
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
 
     let rpc_socket_path = dir.join(enwiro_sdk::rpc::SOCKET_FILENAME);
+    // SAFETY (Rust 2024): set_var can race with concurrent env reads.
+    // Done before any thread or child spawn, so the mutation is sound.
+    unsafe {
+        std::env::set_var(enwiro_sdk::rpc::SOCKET_ENV_VAR, rpc_socket_path.as_os_str());
+    }
     let rpc_state = Arc::new(rpc::State::default());
     {
         let rpc_socket_path = rpc_socket_path.clone();
@@ -246,16 +251,6 @@ pub fn run(
                 }
             })
             .context("spawn rpc thread")?;
-    }
-    // SAFETY: setenv is documented as unsafe in Rust 2024 because it can
-    // race with concurrent reads; we are still single-threaded at this
-    // point (signal handlers don't observe envp), so the modification is
-    // safe in practice.
-    unsafe {
-        std::env::set_var(
-            enwiro_sdk::rpc::SOCKET_ENV_VAR,
-            rpc_socket_path.as_os_str(),
-        );
     }
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();

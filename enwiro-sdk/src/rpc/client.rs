@@ -7,8 +7,8 @@
 //! background-reader-task stack.
 
 use crate::rpc::{
-    CookbookInvokeParams, CookbookInvokeResult, Request, RequestEnvelope, ResponseBody,
-    ResponseEnvelope, RpcError, default_socket_path,
+    CookbookInvokeParams, CookbookInvokeResult, MAX_FRAME_BYTES, Request, RequestEnvelope,
+    ResponseBody, ResponseEnvelope, RpcError, default_socket_path,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ impl Client {
                 source,
             })?;
         Ok(Self {
-            framed: Framed::new(stream, LinesCodec::new()),
+            framed: Framed::new(stream, LinesCodec::new_with_max_length(MAX_FRAME_BYTES)),
             next_id: AtomicU64::new(1),
         })
     }
@@ -86,11 +86,24 @@ impl Client {
             .await
             .ok_or(ClientError::Disconnected)??;
         let resp: ResponseEnvelope = serde_json::from_str(&line)?;
-        if resp.id != id {
-            return Err(ClientError::IdMismatch {
-                expected: id,
-                got: resp.id,
-            });
+        match resp.id {
+            None => {
+                // Server couldn't parse the request and has no id to echo
+                // back. Body always carries the diagnostic error in this
+                // case (see ResponseEnvelope::parse_error).
+                if let ResponseBody::Err { error } = resp.body {
+                    return Err(ClientError::Rpc(error));
+                }
+                return Err(ClientError::Rpc(RpcError {
+                    code: RpcError::INTERNAL_ERROR,
+                    message: "daemon returned response with no id and no error".into(),
+                    data: None,
+                }));
+            }
+            Some(got) if got != id => {
+                return Err(ClientError::IdMismatch { expected: id, got });
+            }
+            Some(_) => {}
         }
         match resp.body {
             ResponseBody::Ok { result } => Ok(serde_json::from_value(result)?),

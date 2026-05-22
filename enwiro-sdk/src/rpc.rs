@@ -29,6 +29,14 @@ pub const SOCKET_ENV_VAR: &str = "ENWIRO_RPC_SOCKET";
 /// `cookbook.invoke` (per ADR-0002 §4).
 pub const CALL_CHAIN_ENV_VAR: &str = "ENWIRO_RPC_CALL_CHAIN";
 
+/// Maximum length (bytes) of a single newline-delimited JSON frame. Caps
+/// memory use against pathological peer behaviour (one frame that grows
+/// forever); larger payloads should be chunked across messages or sent
+/// via a different transport. 1 MiB comfortably accommodates the
+/// CookbookPayload + cookbook stdout in practice (today's `recipes.cache`
+/// for ~3000 recipes is well under 500 KiB).
+pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
 /// Resolve the default socket path. `$XDG_RUNTIME_DIR/enwiro/rpc.sock`.
 pub fn default_socket_path() -> anyhow::Result<PathBuf> {
     let base = dirs::runtime_dir()
@@ -65,11 +73,13 @@ impl RequestEnvelope {
     }
 }
 
-/// One response from the daemon back to the client.
+/// One response from the daemon back to the client. `id` is optional
+/// because parse errors on the server side have no request ID to echo
+/// back; JSON-RPC 2.0 conveys this as `id: null`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseEnvelope {
     pub jsonrpc: String,
-    pub id: u64,
+    pub id: Option<u64>,
     #[serde(flatten)]
     pub body: ResponseBody,
 }
@@ -85,7 +95,7 @@ impl ResponseEnvelope {
     pub fn ok(id: u64, result: serde_json::Value) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
-            id,
+            id: Some(id),
             body: ResponseBody::Ok { result },
         }
     }
@@ -93,8 +103,25 @@ impl ResponseEnvelope {
     pub fn err(id: u64, error: RpcError) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
-            id,
+            id: Some(id),
             body: ResponseBody::Err { error },
+        }
+    }
+
+    /// Response with no `id` — used by the server when the request line
+    /// couldn't be parsed and no `id` is available to echo back. Carries
+    /// a `PARSE_ERROR` payload so the client can surface it cleanly.
+    pub fn parse_error(message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: None,
+            body: ResponseBody::Err {
+                error: RpcError {
+                    code: RpcError::PARSE_ERROR,
+                    message: message.into(),
+                    data: None,
+                },
+            },
         }
     }
 }

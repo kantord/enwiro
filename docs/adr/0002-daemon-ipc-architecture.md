@@ -31,9 +31,9 @@ Today's communication shapes:
   (`enwiro-daemon/src/lib.rs:263-319` + `enwiro-adapter-i3wm/src/main.rs:550-587`).
 - **Daemon → enw** — the daemon writes `recipes.cache` to
   `$XDG_RUNTIME_DIR/enwiro/`; `enw` reads it via
-  `DaemonCache::read_recipes()` (`enwiro-daemon/src/lib.rs:36`,
+  `DaemonCache::read_recipes()` (`enwiro-daemon/src/lib.rs:37`,
   consumed at `enwiro/src/context.rs:99-103` and
-  `enwiro/src/commands/ls.rs:144-151`). `enw` still re-implements the
+  `enwiro/src/commands/ls.rs:146-151`). `enw` still re-implements the
   cookbook iteration / sort / filter logic on top of the cached recipes.
 - **Host → cookbook plugin** — host invokes
   `<plugin> list-recipes` / `<plugin> cook` and parses stdout JSON
@@ -280,7 +280,7 @@ should live in the daemon.
    - `env.current` — returns the active env. Daemon serves this from an
      in-memory "last activated env" state that it populates from the
      adapter's `workspace_switch` event stream (the same callback site
-     today: `on_workspace_switch` at `enwiro-daemon/src/lib.rs:308-314`).
+     today: `on_workspace_switch` at `enwiro-daemon/src/lib.rs:355-360`).
      If the daemon has not yet seen a switch event since start, returns
      an explicit "unknown" result rather than guessing from
      `/proc/<pid>/environ`.
@@ -407,7 +407,7 @@ should live in the daemon.
   posture (`Restart=always`, per #330's spirit); document the failure
   message so users can diagnose.
 - **Migration cost.** Existing `enw` code (e.g. `context.rs:99-103`,
-  `commands/ls.rs:144-151`) needs to migrate from `DaemonCache`
+  `commands/ls.rs:146-151`) needs to migrate from `DaemonCache`
   file-reads to RPC calls over time. Incremental; tracked separately.
 
 ### Risks
@@ -474,7 +474,7 @@ should live in the daemon.
 - `env.current` RPC + `enw current-env` wrapper + remove last
   `DaemonCache` direct read in `enwiro/src/context.rs:99-103`. Daemon
   gains an in-memory `current_env` state populated by the existing
-  adapter-stream callback at `enwiro-daemon/src/lib.rs:308-314`.
+  adapter-stream callback at `enwiro-daemon/src/lib.rs:355-360`.
 
 ### Touchpoints
 
@@ -542,9 +542,9 @@ should live in the daemon.
 - `enwiro-daemon/src/lib.rs:263-319` and `enwiro-adapter-i3wm/src/main.rs:550-587`
   — existing adapter→daemon JSONL-on-stdout pattern. Kept as the
   publisher channel.
-- `enwiro-daemon/src/lib.rs:36` `pub struct DaemonCache` (and
-  `read_recipes` at `lib.rs:58`) plus call sites at
-  `enwiro/src/context.rs:99-103`, `enwiro/src/commands/ls.rs:144-151`
+- `enwiro-daemon/src/lib.rs:37` `pub struct DaemonCache` (and
+  `read_recipes` at `lib.rs:59`) plus call sites at
+  `enwiro/src/context.rs:99-103`, `enwiro/src/commands/ls.rs:146-151`
   — today's `enw ↔ daemon` coupling via file reads; will migrate to RPC.
 - `enwiro-sdk/src/cookbook.rs` and `enwiro-sdk/src/client.rs`
   (`CookbookClient::list_recipes`) — cookbook protocol; gains
