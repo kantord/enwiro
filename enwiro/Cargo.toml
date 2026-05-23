@@ -28,7 +28,7 @@ dirs = "6"
 dialoguer = { version = "0.12", default-features = false }
 
 [dev-dependencies]
-assertables = "9.0.0"
+assertables = "10.0.0"
 enwiro-sdk = { workspace = true, features = ["test-helpers"] }
 rstest = "0.26.0"
 tempfile = "3.25.0"
