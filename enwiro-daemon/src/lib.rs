@@ -20,6 +20,7 @@ use anyhow::Context;
 
 use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
+use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamItem, StreamKind};
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
 /// Prefers $XDG_RUNTIME_DIR/enwiro, falls back to $XDG_CACHE_HOME/enwiro/run.
@@ -260,54 +261,43 @@ pub fn run(
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
 
-    let adapter_plugin = get_plugins(PluginKind::Adapter).into_iter().next();
-    let mut listen_child: Option<std::process::Child> = None;
-    if let Some(ref plugin) = adapter_plugin {
-        match std::process::Command::new(&plugin.executable)
-            .arg("listen")
-            .arg("--debounce-secs")
-            .arg("5")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => {
-                listen_child = Some(child);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Could not spawn adapter listen subprocess");
-            }
-        }
-    }
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
+    let mut pool = ProcessPool::new(stream_tx);
 
-    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
-    if let Some(ref mut child) = listen_child
-        && let Some(stdout) = child.stdout.take()
-    {
-        let tx = line_tx.clone();
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+    let adapter_desired: Vec<ProcessSource> = get_plugins(PluginKind::Adapter)
+        .into_iter()
+        .next()
+        .map(|plugin| ProcessSource {
+            identity: ProcessIdentity {
+                bin: plugin.executable.clone(),
+                key: "adapter".to_string(),
+            },
+            args: vec![
+                "listen".to_string(),
+                "--debounce-secs".to_string(),
+                "5".to_string(),
+            ],
+            env: Default::default(),
+            current_dir: None,
+            props: None,
+        })
+        .into_iter()
+        .collect();
+
+    for (key, err) in pool.reconcile(adapter_desired) {
+        tracing::warn!(key = ?key, error = ?err, "Could not spawn adapter listen subprocess");
     }
 
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
         loop {
-            match line_rx.try_recv() {
-                Ok(line) => {
-                    if let Some((env_name, timestamp)) = parse_switch_event(&line)
+            match stream_rx.try_recv() {
+                Ok(item) => {
+                    if item.stream != StreamKind::Stdout {
+                        continue;
+                    }
+                    if let Some((env_name, timestamp)) = parse_switch_event(&item.line)
                         && !env_name.is_empty()
                     {
                         let env_dir = workspaces_directory.join(&env_name);
@@ -336,9 +326,7 @@ pub fn run(
         while elapsed < REFRESH_INTERVAL {
             if term.load(Ordering::Relaxed) {
                 tracing::info!("Received termination signal, exiting");
-                if let Some(mut child) = listen_child.take() {
-                    let _ = child.kill();
-                }
+                drop(pool);
                 remove_pid_file(&dir);
                 return Ok(());
             }
