@@ -269,13 +269,20 @@ pub fn run(
         });
     }
 
-    for (key, err) in pool.reconcile(desired) {
+    for (key, err) in pool.reconcile(desired.clone()) {
         tracing::warn!(key = ?key, error = ?err, "Could not spawn listen subprocess");
     }
 
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
+        // Reconcile each tick so the upstream pool can restart any
+        // listen subprocess that exited since the previous iteration
+        // (via `Lifecycle::reconcile_self`, which checks `try_wait`).
+        for (key, err) in pool.reconcile(desired.clone()) {
+            tracing::warn!(key = ?key, error = ?err, "Could not respawn listen subprocess");
+        }
+
         loop {
             match stream_rx.try_recv() {
                 Ok(item) => {
@@ -289,17 +296,21 @@ pub fn run(
                             let env_dir = workspaces_directory.join(&env_name);
                             on_workspace_switch(&env_dir, timestamp);
                         }
-                    } else if let Some(entry) = recipe_state.get_mut(&item.key.key)
-                        && let Ok(RecipeUpdate::Recipes { data }) =
-                            serde_json::from_str::<RecipeUpdate>(&item.line)
-                    {
-                        entry.recipes = data;
-                        let new_cache = build_cache_content(&recipe_state);
-                        if last_cache_content.as_deref() != Some(new_cache.as_str()) {
-                            if let Err(e) = write_cache_atomic(&dir, &new_cache) {
-                                tracing::error!(error = %e, "Failed to write cache");
+                    } else if let Some(entry) = recipe_state.get_mut(&item.key.key) {
+                        match serde_json::from_str::<RecipeUpdate>(&item.line) {
+                            Ok(RecipeUpdate::Recipes { data }) => {
+                                entry.recipes = data;
+                                let new_cache = build_cache_content(&recipe_state);
+                                if last_cache_content.as_deref() != Some(new_cache.as_str()) {
+                                    if let Err(e) = write_cache_atomic(&dir, &new_cache) {
+                                        tracing::error!(error = %e, "Failed to write cache");
+                                    }
+                                    last_cache_content = Some(new_cache);
+                                }
                             }
-                            last_cache_content = Some(new_cache);
+                            Err(e) => {
+                                tracing::debug!(cookbook = %item.key.key, error = %e, line = %item.line, "Could not parse RecipeUpdate from cookbook stdout");
+                            }
                         }
                     }
                 }
