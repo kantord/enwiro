@@ -6,7 +6,6 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
@@ -402,21 +401,6 @@ fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
             recipe
         })
         .collect()
-}
-
-fn listen(config: &ConfigurationValues) -> anyhow::Result<()> {
-    let mut last_payload: Option<String> = None;
-    loop {
-        let update = RecipeUpdate::Recipes {
-            data: collect_recipes(config),
-        };
-        let payload = update.to_jsonl();
-        if last_payload.as_deref() != Some(payload.as_str()) {
-            println!("{}", payload);
-            last_payload = Some(payload);
-        }
-        std::thread::sleep(LISTEN_POLL_INTERVAL);
-    }
 }
 
 /// Cooks a recipe. It returns the path to the already existing local
@@ -1265,7 +1249,7 @@ fn main() -> anyhow::Result<()> {
                 .context("Could not read cookbook payload from stdin")?;
             let config: ConfigurationValues = serde_json::from_value(payload.config)
                 .context("Could not deserialize cookbook-git configuration")?;
-            listen(&config)?;
+            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || collect_recipes(&config));
         }
     };
 

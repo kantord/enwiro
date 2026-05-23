@@ -26,14 +26,8 @@ use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamItem, StreamKind};
 
-/// Cookbook names whose recipe updates arrive via the unified
-/// `optative-process-pool` `listen` channel rather than the legacy
-/// periodic poll. Grows as each cookbook gains a `listen` subcommand.
-const LISTEN_DRIVEN_COOKBOOKS: &[&str] = &["git"];
-
-/// Per-cookbook state assembled from either the listen-stdout path
-/// or the legacy periodic poll. The cache content is rebuilt from
-/// this map on every change.
+/// Per-cookbook state assembled from the listen-stdout stream. The
+/// cache content is rebuilt from this map on every change.
 struct CookbookEntry {
     priority: u32,
     recipes: Vec<Recipe>,
@@ -93,47 +87,14 @@ pub(crate) fn write_cache_atomic(runtime_dir: &Path, content: &str) -> anyhow::R
     Ok(())
 }
 
-/// Maximum age for a cache file to be considered valid (refresh interval + 30s buffer).
-const CACHE_MAX_AGE: Duration = Duration::from_secs(70); // 40s + 30s
-
-/// Read the cached recipes. Returns None if cache doesn't exist or is stale.
+/// Read the cached recipes. Returns None if the cache file doesn't exist.
 fn read_cached_recipes(runtime_dir: &Path) -> anyhow::Result<Option<String>> {
     let cache_path = runtime_dir.join("recipes.cache");
-    let metadata = match fs::metadata(&cache_path) {
-        Ok(m) => m,
-        Err(_) => return Ok(None),
-    };
-    if let Ok(modified) = metadata.modified() {
-        let age = SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or(Duration::ZERO);
-        if age > CACHE_MAX_AGE {
-            tracing::debug!(age_secs = age.as_secs(), "Cache is stale, ignoring");
-            return Ok(None);
-        }
+    if !cache_path.exists() {
+        return Ok(None);
     }
     let content = fs::read_to_string(&cache_path).context("Could not read cache file")?;
     Ok(Some(content))
-}
-
-const USER_IDLE_THRESHOLD: Duration = Duration::from_secs(5400); // 90 minutes
-
-/// Returns true if the user has been idle longer than the threshold.
-/// When idle time is unavailable (e.g. Wayland without support), returns false
-/// so the daemon keeps running rather than dying unexpectedly.
-fn check_idle_with_timeout(get_idle: impl Fn() -> Option<Duration>, threshold: Duration) -> bool {
-    match get_idle() {
-        Some(idle) => idle > threshold,
-        None => false,
-    }
-}
-
-/// Returns true if the user has been idle longer than 90 minutes.
-pub(crate) fn check_idle() -> bool {
-    check_idle_with_timeout(
-        || system_idle_time::get_idle_time().ok(),
-        USER_IDLE_THRESHOLD,
-    )
 }
 
 /// Parse the PID file, returning (pid, optional binary mtime).
@@ -233,13 +194,9 @@ pub(crate) fn parse_switch_event(line: &str) -> Option<(String, i64)> {
     Some((env_name, timestamp))
 }
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(40);
-
-/// Returns true if the cache should be refreshed this cycle.
-/// The cache is refreshed only when the user is not idle.
-fn should_refresh_cache(is_idle: bool) -> bool {
-    !is_idle
-}
+/// How often the daemon's main loop wakes to check the termination flag
+/// and drain the cookbook/adapter stdout channel.
+const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Run the daemon. Blocks until SIGTERM/SIGINT/SIGHUP.
 ///
@@ -288,9 +245,6 @@ pub fn run(
         });
     }
     for plugin in get_plugins(PluginKind::Cookbook) {
-        if !LISTEN_DRIVEN_COOKBOOKS.contains(&plugin.name.as_str()) {
-            continue;
-        }
         let name = plugin.name.clone();
         let executable = plugin.executable.clone();
         let client = CookbookClient::new_user_level_only(plugin);
@@ -354,43 +308,13 @@ pub fn run(
             }
         }
 
-        if should_refresh_cache(check_idle()) {
-            for plugin in get_plugins(PluginKind::Cookbook) {
-                if LISTEN_DRIVEN_COOKBOOKS.contains(&plugin.name.as_str()) {
-                    continue;
-                }
-                let name = plugin.name.clone();
-                let client = CookbookClient::new_user_level_only(plugin);
-                let priority = client.priority();
-                match client.list_recipes() {
-                    Ok(recipes) => {
-                        recipe_state.insert(name, CookbookEntry { priority, recipes });
-                    }
-                    Err(e) => {
-                        tracing::warn!(cookbook = %name, error = %e, "Skipping cookbook due to error");
-                    }
-                }
-            }
-            let new_cache = build_cache_content(&recipe_state);
-            if last_cache_content.as_deref() != Some(new_cache.as_str()) {
-                if let Err(e) = write_cache_atomic(&dir, &new_cache) {
-                    tracing::error!(error = %e, "Failed to write cache");
-                }
-                last_cache_content = Some(new_cache);
-            }
+        if term.load(Ordering::Relaxed) {
+            tracing::info!("Received termination signal, exiting");
+            drop(pool);
+            remove_pid_file(&dir);
+            return Ok(());
         }
-
-        let mut elapsed = Duration::ZERO;
-        while elapsed < REFRESH_INTERVAL {
-            if term.load(Ordering::Relaxed) {
-                tracing::info!("Received termination signal, exiting");
-                drop(pool);
-                remove_pid_file(&dir);
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_secs(1));
-            elapsed += Duration::from_secs(1);
-        }
+        std::thread::sleep(TICK_INTERVAL);
     }
 }
 
@@ -531,32 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn test_user_is_idle_when_idle_time_exceeds_threshold() {
-        let threshold = Duration::from_secs(5400);
-        let idle_time = Duration::from_secs(6000);
-        assert!(check_idle_with_timeout(|| Some(idle_time), threshold));
-    }
-
-    #[test]
-    fn test_user_is_not_idle_when_idle_time_below_threshold() {
-        let threshold = Duration::from_secs(5400);
-        let idle_time = Duration::from_secs(60);
-        assert!(!check_idle_with_timeout(|| Some(idle_time), threshold));
-    }
-
-    #[test]
-    fn test_user_is_not_idle_when_idle_time_equals_threshold() {
-        let threshold = Duration::from_secs(5400);
-        assert!(!check_idle_with_timeout(|| Some(threshold), threshold));
-    }
-
-    #[test]
-    fn test_user_is_not_idle_when_idle_time_unavailable() {
-        let threshold = Duration::from_secs(5400);
-        assert!(!check_idle_with_timeout(|| None, threshold));
-    }
-
-    #[test]
     fn test_write_and_read_cache() {
         let dir = tempfile::tempdir().unwrap();
         let content = r#"{"cookbook":"git","name":"my-repo"}
@@ -584,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_cache_returns_none_when_stale() {
+    fn test_read_cache_returns_content_regardless_of_mtime() {
         let dir = tempfile::tempdir().unwrap();
         write_cache_atomic(dir.path(), r#"{"cookbook":"git","name":"old-repo"}"#).unwrap();
         let past = filetime::FileTime::from_system_time(
@@ -592,9 +490,9 @@ mod tests {
         );
         filetime::set_file_mtime(dir.path().join("recipes.cache"), past).unwrap();
         let read = read_cached_recipes(dir.path()).unwrap();
-        assert_eq!(
-            read, None,
-            "Stale cache (older than refresh interval + 30s) should be treated as missing"
+        assert!(
+            read.is_some(),
+            "Cache freshness is no longer time-based — listen-driven cookbooks may not emit for arbitrary periods"
         );
     }
 
@@ -662,22 +560,6 @@ mod tests {
         assert_eq!(entries[2].sort_order, 50);
         assert_eq!(entries[3].name, "gh-issue-2");
         assert_eq!(entries[3].sort_order, 50);
-    }
-
-    #[test]
-    fn test_should_refresh_cache_when_not_idle() {
-        assert!(
-            should_refresh_cache(false),
-            "should_refresh_cache(false) must return true: active user means refresh is needed"
-        );
-    }
-
-    #[test]
-    fn test_should_not_refresh_cache_when_idle() {
-        assert!(
-            !should_refresh_cache(true),
-            "should_refresh_cache(true) must return false: idle user means skip the refresh"
-        );
     }
 
     #[test]

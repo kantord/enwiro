@@ -1,11 +1,14 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 use serde_derive::{Deserialize, Serialize};
+
+const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ConfigurationValues {
@@ -48,6 +51,7 @@ enum EnwiroCookbookGithub {
     Cook(CookArgs),
     Gear(GearArgs),
     Metadata,
+    Listen,
 }
 
 #[derive(clap::Args)]
@@ -340,30 +344,42 @@ fn compute_sort_order(index: usize, total: usize) -> u32 {
     }
 }
 
-fn list_recipes() -> anyhow::Result<()> {
-    let repos = discover_github_repos()?;
+fn collect_recipes() -> Vec<Recipe> {
+    let Ok(repos) = discover_github_repos() else {
+        return Vec::new();
+    };
     let repo_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
 
-    let prs = search_github(&repo_names, "is:pr is:open")?;
+    let prs = search_github(&repo_names, "is:pr is:open").unwrap_or_default();
     // Issues are scoped to `assignee:@me` so only actionable work appears,
     // unlike PRs which show all open PRs on configured repos.
-    let issues = search_github(&repo_names, "is:issue is:open assignee:@me")?;
+    let issues = search_github(&repo_names, "is:issue is:open assignee:@me").unwrap_or_default();
 
     let mut items: Vec<GithubItem> = prs.into_iter().chain(issues).collect();
     sort_items_by_date(&mut items);
 
     let total = items.len();
-    for (index, item) in items.iter().enumerate() {
-        let safe_title = item.title.replace(['\n', '\0', '\x1f'], " ");
-        let prefix = match &item.kind {
-            GithubItemKind::PullRequest { .. } => "[PR]",
-            GithubItemKind::Issue => "[issue]",
-        };
-        let mut recipe = Recipe::with_description(
-            format!("{}#{}", item.repo, item.number),
-            format!("{} {}", prefix, safe_title),
-        );
-        recipe.sort_order = compute_sort_order(index, total);
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let safe_title = item.title.replace(['\n', '\0', '\x1f'], " ");
+            let prefix = match &item.kind {
+                GithubItemKind::PullRequest { .. } => "[PR]",
+                GithubItemKind::Issue => "[issue]",
+            };
+            let mut recipe = Recipe::with_description(
+                format!("{}#{}", item.repo, item.number),
+                format!("{} {}", prefix, safe_title),
+            );
+            recipe.sort_order = compute_sort_order(index, total);
+            recipe
+        })
+        .collect()
+}
+
+fn list_recipes() -> anyhow::Result<()> {
+    for recipe in collect_recipes() {
         println!("{}", recipe.to_jsonl());
     }
     Ok(())
@@ -1484,6 +1500,11 @@ fn main() -> anyhow::Result<()> {
                 }
                 .to_json()
             );
+        }
+        EnwiroCookbookGithub::Listen => {
+            let _ = CookbookPayload::read_first_line_from_stdin()
+                .context("Could not read cookbook payload from stdin")?;
+            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, collect_recipes);
         }
     };
 

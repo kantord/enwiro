@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::cookbook::Recipe;
@@ -11,6 +13,30 @@ pub enum RecipeUpdate {
 impl RecipeUpdate {
     pub fn to_jsonl(&self) -> String {
         serde_json::to_string(self).expect("RecipeUpdate is always serializable")
+    }
+}
+
+/// Long-running listen loop for cookbook binaries. Calls `build` to
+/// collect current recipes, emits `RecipeUpdate::Recipes` to stdout
+/// (skipping unchanged emissions), then sleeps `interval` before
+/// repeating. Cookbooks invoke this from their `listen` subcommand.
+///
+/// Never returns under normal operation; the daemon terminates the
+/// cookbook subprocess via the optative-process-pool's SIGTERM-then-
+/// SIGKILL teardown.
+pub fn serve<F>(interval: Duration, mut build: F) -> !
+where
+    F: FnMut() -> Vec<Recipe>,
+{
+    let mut last: Option<String> = None;
+    loop {
+        let update = RecipeUpdate::Recipes { data: build() };
+        let line = update.to_jsonl();
+        if last.as_deref() != Some(line.as_str()) {
+            println!("{}", line);
+            last = Some(line);
+        }
+        std::thread::sleep(interval);
     }
 }
 
