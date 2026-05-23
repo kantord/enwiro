@@ -18,8 +18,20 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 
+use std::collections::HashMap;
+
 use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
+use enwiro_sdk::cookbook::{CookbookPayload, Recipe};
+use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
+use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamItem, StreamKind};
+
+/// Per-cookbook state assembled from the listen-stdout stream. The
+/// cache content is rebuilt from this map on every change.
+struct CookbookEntry {
+    priority: u32,
+    recipes: Vec<Recipe>,
+}
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
 /// Prefers $XDG_RUNTIME_DIR/enwiro, falls back to $XDG_CACHE_HOME/enwiro/run.
@@ -75,47 +87,14 @@ pub(crate) fn write_cache_atomic(runtime_dir: &Path, content: &str) -> anyhow::R
     Ok(())
 }
 
-/// Maximum age for a cache file to be considered valid (refresh interval + 30s buffer).
-const CACHE_MAX_AGE: Duration = Duration::from_secs(70); // 40s + 30s
-
-/// Read the cached recipes. Returns None if cache doesn't exist or is stale.
+/// Read the cached recipes. Returns None if the cache file doesn't exist.
 fn read_cached_recipes(runtime_dir: &Path) -> anyhow::Result<Option<String>> {
     let cache_path = runtime_dir.join("recipes.cache");
-    let metadata = match fs::metadata(&cache_path) {
-        Ok(m) => m,
-        Err(_) => return Ok(None),
-    };
-    if let Ok(modified) = metadata.modified() {
-        let age = SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or(Duration::ZERO);
-        if age > CACHE_MAX_AGE {
-            tracing::debug!(age_secs = age.as_secs(), "Cache is stale, ignoring");
-            return Ok(None);
-        }
+    if !cache_path.exists() {
+        return Ok(None);
     }
     let content = fs::read_to_string(&cache_path).context("Could not read cache file")?;
     Ok(Some(content))
-}
-
-const USER_IDLE_THRESHOLD: Duration = Duration::from_secs(5400); // 90 minutes
-
-/// Returns true if the user has been idle longer than the threshold.
-/// When idle time is unavailable (e.g. Wayland without support), returns false
-/// so the daemon keeps running rather than dying unexpectedly.
-fn check_idle_with_timeout(get_idle: impl Fn() -> Option<Duration>, threshold: Duration) -> bool {
-    match get_idle() {
-        Some(idle) => idle > threshold,
-        None => false,
-    }
-}
-
-/// Returns true if the user has been idle longer than 90 minutes.
-pub(crate) fn check_idle() -> bool {
-    check_idle_with_timeout(
-        || system_idle_time::get_idle_time().ok(),
-        USER_IDLE_THRESHOLD,
-    )
 }
 
 /// Parse the PID file, returning (pid, optional binary mtime).
@@ -165,35 +144,22 @@ struct SortableCachedRecipe {
     priority: u32,
 }
 
-/// Collect recipes from all cookbooks as JSON lines, sorted globally
-/// by (sort_order, cookbook priority, name).
-/// Errors in individual cookbooks are logged and skipped.
-pub(crate) fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
+/// Serialize a per-cookbook recipe state map into the cache file's
+/// JSON-lines format, sorted globally by (sort_order, cookbook priority, name).
+pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> String {
     let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
-
-    for cookbook in cookbooks {
-        match cookbook.list_recipes() {
-            Ok(recipes) => {
-                for recipe in recipes {
-                    all_recipes.push(SortableCachedRecipe {
-                        cached: CachedRecipe {
-                            cookbook: cookbook.name().to_string(),
-                            name: recipe.name,
-                            description: recipe.description,
-                            sort_order: recipe.sort_order,
-                            scores: None,
-                        },
-                        priority: cookbook.priority(),
-                    });
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    cookbook = %cookbook.name(),
-                    error = %e,
-                    "Skipping cookbook due to error"
-                );
-            }
+    for (cookbook_name, entry) in state {
+        for recipe in &entry.recipes {
+            all_recipes.push(SortableCachedRecipe {
+                cached: CachedRecipe {
+                    cookbook: cookbook_name.clone(),
+                    name: recipe.name.clone(),
+                    description: recipe.description.clone(),
+                    sort_order: recipe.sort_order,
+                    scores: None,
+                },
+                priority: entry.priority,
+            });
         }
     }
 
@@ -228,13 +194,9 @@ pub(crate) fn parse_switch_event(line: &str) -> Option<(String, i64)> {
     Some((env_name, timestamp))
 }
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(40);
-
-/// Returns true if the cache should be refreshed this cycle.
-/// The cache is refreshed only when the user is not idle.
-fn should_refresh_cache(is_idle: bool) -> bool {
-    !is_idle
-}
+/// How often the daemon's main loop wakes to check the termination flag
+/// and drain the cookbook/adapter stdout channel.
+const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Run the daemon. Blocks until SIGTERM/SIGINT/SIGHUP.
 ///
@@ -260,58 +222,96 @@ pub fn run(
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
 
-    let adapter_plugin = get_plugins(PluginKind::Adapter).into_iter().next();
-    let mut listen_child: Option<std::process::Child> = None;
-    if let Some(ref plugin) = adapter_plugin {
-        match std::process::Command::new(&plugin.executable)
-            .arg("listen")
-            .arg("--debounce-secs")
-            .arg("5")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => {
-                listen_child = Some(child);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Could not spawn adapter listen subprocess");
-            }
-        }
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
+    let mut pool = ProcessPool::new(stream_tx);
+    let mut recipe_state: HashMap<String, CookbookEntry> = HashMap::new();
+    let mut last_cache_content: Option<String> = None;
+
+    let mut desired: Vec<ProcessSource> = Vec::new();
+    if let Some(plugin) = get_plugins(PluginKind::Adapter).into_iter().next() {
+        desired.push(ProcessSource {
+            identity: ProcessIdentity {
+                bin: plugin.executable.clone(),
+                key: "adapter".to_string(),
+            },
+            args: vec![
+                "listen".to_string(),
+                "--debounce-secs".to_string(),
+                "5".to_string(),
+            ],
+            env: Default::default(),
+            current_dir: None,
+            props: None,
+        });
+    }
+    for plugin in get_plugins(PluginKind::Cookbook) {
+        let name = plugin.name.clone();
+        let executable = plugin.executable.clone();
+        let client = CookbookClient::new_user_level_only(plugin);
+        let payload = CookbookPayload::new(client.config().clone());
+        let props = serde_json::to_value(&payload).ok();
+        recipe_state.insert(
+            name.clone(),
+            CookbookEntry {
+                priority: client.priority(),
+                recipes: Vec::new(),
+            },
+        );
+        desired.push(ProcessSource {
+            identity: ProcessIdentity {
+                bin: executable,
+                key: name,
+            },
+            args: vec!["listen".to_string()],
+            env: Default::default(),
+            current_dir: None,
+            props,
+        });
     }
 
-    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
-    if let Some(ref mut child) = listen_child
-        && let Some(stdout) = child.stdout.take()
-    {
-        let tx = line_tx.clone();
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(l) => {
-                        if tx.send(l).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+    for (key, err) in pool.reconcile(desired.clone()) {
+        tracing::warn!(key = ?key, error = ?err, "Could not spawn listen subprocess");
     }
 
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
+        // Reconcile each tick so the upstream pool can restart any
+        // listen subprocess that exited since the previous iteration
+        // (via `Lifecycle::reconcile_self`, which checks `try_wait`).
+        for (key, err) in pool.reconcile(desired.clone()) {
+            tracing::warn!(key = ?key, error = ?err, "Could not respawn listen subprocess");
+        }
+
         loop {
-            match line_rx.try_recv() {
-                Ok(line) => {
-                    if let Some((env_name, timestamp)) = parse_switch_event(&line)
-                        && !env_name.is_empty()
-                    {
-                        let env_dir = workspaces_directory.join(&env_name);
-                        on_workspace_switch(&env_dir, timestamp);
+            match stream_rx.try_recv() {
+                Ok(item) => {
+                    if item.stream != StreamKind::Stdout {
+                        continue;
+                    }
+                    if item.key.key == "adapter" {
+                        if let Some((env_name, timestamp)) = parse_switch_event(&item.line)
+                            && !env_name.is_empty()
+                        {
+                            let env_dir = workspaces_directory.join(&env_name);
+                            on_workspace_switch(&env_dir, timestamp);
+                        }
+                    } else if let Some(entry) = recipe_state.get_mut(&item.key.key) {
+                        match serde_json::from_str::<RecipeUpdate>(&item.line) {
+                            Ok(RecipeUpdate::Recipes { data }) => {
+                                entry.recipes = data;
+                                let new_cache = build_cache_content(&recipe_state);
+                                if last_cache_content.as_deref() != Some(new_cache.as_str()) {
+                                    if let Err(e) = write_cache_atomic(&dir, &new_cache) {
+                                        tracing::error!(error = %e, "Failed to write cache");
+                                    }
+                                    last_cache_content = Some(new_cache);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(cookbook = %item.key.key, error = %e, line = %item.line, "Could not parse RecipeUpdate from cookbook stdout");
+                            }
+                        }
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -319,32 +319,13 @@ pub fn run(
             }
         }
 
-        if should_refresh_cache(check_idle()) {
-            let plugins = get_plugins(PluginKind::Cookbook);
-            let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
-                .into_iter()
-                .map(|p| Box::new(CookbookClient::new_user_level_only(p)) as Box<dyn CookbookTrait>)
-                .collect();
-
-            let recipes = collect_all_recipes(&cookbooks);
-            if let Err(e) = write_cache_atomic(&dir, &recipes) {
-                tracing::error!(error = %e, "Failed to write cache");
-            }
+        if term.load(Ordering::Relaxed) {
+            tracing::info!("Received termination signal, exiting");
+            drop(pool);
+            remove_pid_file(&dir);
+            return Ok(());
         }
-
-        let mut elapsed = Duration::ZERO;
-        while elapsed < REFRESH_INTERVAL {
-            if term.load(Ordering::Relaxed) {
-                tracing::info!("Received termination signal, exiting");
-                if let Some(mut child) = listen_child.take() {
-                    let _ = child.kill();
-                }
-                remove_pid_file(&dir);
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_secs(1));
-            elapsed += Duration::from_secs(1);
-        }
+        std::thread::sleep(TICK_INTERVAL);
     }
 }
 
@@ -352,7 +333,6 @@ pub fn run(
 mod tests {
     use super::*;
     use enwiro_sdk::client::CachedRecipe;
-    use enwiro_sdk::test_helpers::{FailingCookbook, FakeCookbook};
 
     fn parse_cached_lines(output: &str) -> Vec<CachedRecipe> {
         output
@@ -362,16 +342,28 @@ mod tests {
             .collect()
     }
 
+    fn entry(priority: u32, recipes: Vec<Recipe>) -> CookbookEntry {
+        CookbookEntry { priority, recipes }
+    }
+
+    fn recipe_with_desc(name: &str, description: Option<&str>) -> Recipe {
+        match description {
+            Some(d) => Recipe::with_description(name, d),
+            None => Recipe::new(name),
+        }
+    }
+
     #[test]
-    fn test_collect_all_recipes_includes_description() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> =
-            vec![Box::new(FakeCookbook::new_with_descriptions(
-                "github",
-                vec![("owner/repo#42", Some("Fix auth bug"))],
-                vec![],
-            ))];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_includes_description() {
+        let mut state = HashMap::new();
+        state.insert(
+            "github".to_string(),
+            entry(
+                30,
+                vec![recipe_with_desc("owner/repo#42", Some("Fix auth bug"))],
+            ),
+        );
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].cookbook, "github");
         assert_eq!(entries[0].name, "owner/repo#42");
@@ -379,49 +371,43 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_omits_description_when_none() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(
-            FakeCookbook::new_with_descriptions("git", vec![("repo-a", None)], vec![]),
-        )];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_omits_description_when_none() {
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, vec![Recipe::new("repo-a")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "repo-a");
         assert!(entries[0].description.is_none());
     }
 
     #[test]
-    fn test_collect_all_recipes_formats_output() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["repo-a", "repo-b"],
-            vec![],
-        ))];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_formats_output_as_jsonl() {
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            entry(10, vec![Recipe::new("repo-a"), Recipe::new("repo-b")]),
+        );
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "repo-a");
         assert_eq!(entries[1].name, "repo-b");
     }
 
     #[test]
-    fn test_collect_all_recipes_multiple_cookbooks() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
-            Box::new(FakeCookbook::new("npm", vec!["pkg-x"], vec![])),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_combines_multiple_cookbooks() {
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, vec![Recipe::new("repo-a")]));
+        state.insert("npm".to_string(), entry(20, vec![Recipe::new("pkg-x")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"repo-a"));
         assert!(names.contains(&"pkg-x"));
     }
 
     #[test]
-    fn test_collect_all_recipes_empty() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![];
-        let output = collect_all_recipes(&cookbooks);
-        assert_eq!(output, "");
+    fn build_cache_content_empty_state_produces_empty_string() {
+        let state: HashMap<String, CookbookEntry> = HashMap::new();
+        assert_eq!(build_cache_content(&state), "");
     }
 
     #[test]
@@ -480,32 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn test_user_is_idle_when_idle_time_exceeds_threshold() {
-        let threshold = Duration::from_secs(5400);
-        let idle_time = Duration::from_secs(6000);
-        assert!(check_idle_with_timeout(|| Some(idle_time), threshold));
-    }
-
-    #[test]
-    fn test_user_is_not_idle_when_idle_time_below_threshold() {
-        let threshold = Duration::from_secs(5400);
-        let idle_time = Duration::from_secs(60);
-        assert!(!check_idle_with_timeout(|| Some(idle_time), threshold));
-    }
-
-    #[test]
-    fn test_user_is_not_idle_when_idle_time_equals_threshold() {
-        let threshold = Duration::from_secs(5400);
-        assert!(!check_idle_with_timeout(|| Some(threshold), threshold));
-    }
-
-    #[test]
-    fn test_user_is_not_idle_when_idle_time_unavailable() {
-        let threshold = Duration::from_secs(5400);
-        assert!(!check_idle_with_timeout(|| None, threshold));
-    }
-
-    #[test]
     fn test_write_and_read_cache() {
         let dir = tempfile::tempdir().unwrap();
         let content = r#"{"cookbook":"git","name":"my-repo"}
@@ -533,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_cache_returns_none_when_stale() {
+    fn test_read_cache_returns_content_regardless_of_mtime() {
         let dir = tempfile::tempdir().unwrap();
         write_cache_atomic(dir.path(), r#"{"cookbook":"git","name":"old-repo"}"#).unwrap();
         let past = filetime::FileTime::from_system_time(
@@ -541,9 +501,9 @@ mod tests {
         );
         filetime::set_file_mtime(dir.path().join("recipes.cache"), past).unwrap();
         let read = read_cached_recipes(dir.path()).unwrap();
-        assert_eq!(
-            read, None,
-            "Stale cache (older than refresh interval + 30s) should be treated as missing"
+        assert!(
+            read.is_some(),
+            "Cache freshness is no longer time-based — listen-driven cookbooks may not emit for arbitrary periods"
         );
     }
 
@@ -557,13 +517,14 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_sorts_by_priority() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FakeCookbook::new("github", vec!["repo#42"], vec![]).with_priority(30)),
-            Box::new(FakeCookbook::new("git", vec!["my-repo"], vec![]).with_priority(10)),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_sorts_by_priority() {
+        let mut state = HashMap::new();
+        state.insert(
+            "github".to_string(),
+            entry(30, vec![Recipe::new("repo#42")]),
+        );
+        state.insert("git".to_string(), entry(10, vec![Recipe::new("my-repo")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(
             entries[0].cookbook, "git",
             "Higher priority (lower number) should come first"
@@ -574,13 +535,11 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_sorts_by_name_on_priority_tie() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FakeCookbook::new("npm", vec!["pkg-x"], vec![]).with_priority(20)),
-            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]).with_priority(20)),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_sorts_by_name_on_priority_tie() {
+        let mut state = HashMap::new();
+        state.insert("npm".to_string(), entry(20, vec![Recipe::new("pkg-x")]));
+        state.insert("git".to_string(), entry(20, vec![Recipe::new("repo-a")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(
             entries[0].name, "pkg-x",
             "Same sort_order and priority should tie-break by recipe name"
@@ -591,36 +550,18 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_skips_failing_cookbook() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FailingCookbook {
-                cookbook_name: "broken".into(),
-            }),
-            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].cookbook, "git");
-        assert_eq!(entries[0].name, "repo-a");
-    }
+    fn build_cache_content_sorts_globally_by_sort_order() {
+        let mut git_recipes = vec![Recipe::new("git-repo-a"), Recipe::new("git-repo-b")];
+        git_recipes[0].sort_order = 0;
+        git_recipes[1].sort_order = 50;
+        let mut gh_recipes = vec![Recipe::new("gh-issue-1"), Recipe::new("gh-issue-2")];
+        gh_recipes[0].sort_order = 0;
+        gh_recipes[1].sort_order = 50;
 
-    #[test]
-    fn test_collect_all_recipes_sorts_globally_by_sort_order() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(
-                FakeCookbook::new("git", vec!["git-repo-a", "git-repo-b"], vec![])
-                    .with_priority(10)
-                    .with_sort_orders(vec![0, 50]),
-            ),
-            Box::new(
-                FakeCookbook::new("github", vec!["gh-issue-1", "gh-issue-2"], vec![])
-                    .with_priority(30)
-                    .with_sort_orders(vec![0, 50]),
-            ),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, git_recipes));
+        state.insert("github".to_string(), entry(30, gh_recipes));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].name, "git-repo-a");
         assert_eq!(entries[0].sort_order, 0);
@@ -630,22 +571,6 @@ mod tests {
         assert_eq!(entries[2].sort_order, 50);
         assert_eq!(entries[3].name, "gh-issue-2");
         assert_eq!(entries[3].sort_order, 50);
-    }
-
-    #[test]
-    fn test_should_refresh_cache_when_not_idle() {
-        assert!(
-            should_refresh_cache(false),
-            "should_refresh_cache(false) must return true: active user means refresh is needed"
-        );
-    }
-
-    #[test]
-    fn test_should_not_refresh_cache_when_idle() {
-        assert!(
-            !should_refresh_cache(true),
-            "should_refresh_cache(true) must return false: idle user means skip the refresh"
-        );
     }
 
     #[test]
@@ -725,21 +650,16 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_interleaves_cookbooks_by_sort_order() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(
-                FakeCookbook::new("git", vec!["low-priority-branch"], vec![])
-                    .with_priority(10)
-                    .with_sort_orders(vec![80]),
-            ),
-            Box::new(
-                FakeCookbook::new("github", vec!["hot-issue"], vec![])
-                    .with_priority(30)
-                    .with_sort_orders(vec![0]),
-            ),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_interleaves_cookbooks_by_sort_order() {
+        let mut git_recipe = Recipe::new("low-priority-branch");
+        git_recipe.sort_order = 80;
+        let mut gh_recipe = Recipe::new("hot-issue");
+        gh_recipe.sort_order = 0;
+
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, vec![git_recipe]));
+        state.insert("github".to_string(), entry(30, vec![gh_recipe]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0].name, "hot-issue",

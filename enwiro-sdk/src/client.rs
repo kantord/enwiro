@@ -92,6 +92,13 @@ impl CookbookClient {
         }
     }
 
+    /// The resolved cookbook config (typed as `serde_json::Value`).
+    /// Used by callers (e.g. the daemon) that need to forward the same
+    /// payload to a long-running `listen` subprocess over stdin.
+    pub fn config(&self) -> &serde_json::Value {
+        &self.config
+    }
+
     #[cfg(test)]
     fn with_metadata(plugin: Plugin, metadata: CookbookMetadata) -> Self {
         Self::with_metadata_and_config(

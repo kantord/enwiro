@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -182,7 +183,10 @@ enum EnwiroCookbookGit {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
     Metadata,
+    Listen,
 }
+
+const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(clap::Args)]
 pub struct ListRecipesArgs {}
@@ -383,6 +387,20 @@ fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
         println!("{}", recipe.to_jsonl());
     }
     Ok(())
+}
+
+fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
+    let Ok(repos) = build_repository_hashmap(config) else {
+        return Vec::new();
+    };
+    build_sorted_recipes(&repos)
+        .into_iter()
+        .map(|(key, sort_order)| {
+            let mut recipe = Recipe::new(key);
+            recipe.sort_order = sort_order;
+            recipe
+        })
+        .collect()
 }
 
 /// Cooks a recipe. It returns the path to the already existing local
@@ -1225,6 +1243,13 @@ fn main() -> anyhow::Result<()> {
                 }
                 .to_json()
             );
+        }
+        EnwiroCookbookGit::Listen => {
+            let payload = CookbookPayload::read_first_line_from_stdin()
+                .context("Could not read cookbook payload from stdin")?;
+            let config: ConfigurationValues = serde_json::from_value(payload.config)
+                .context("Could not deserialize cookbook-git configuration")?;
+            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || collect_recipes(&config));
         }
     };
 

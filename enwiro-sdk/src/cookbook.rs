@@ -81,6 +81,27 @@ impl CookbookPayload {
         }
         serde_json::from_str(&buf).context("Could not parse cookbook payload as JSON")
     }
+
+    /// Read one newline-delimited payload line from stdin. Used by
+    /// long-running subcommands (`listen`) whose stdin is kept open by
+    /// the daemon for subsequent events. Empty input is treated like
+    /// [`Self::read_from_stdin`].
+    pub fn read_first_line_from_stdin() -> anyhow::Result<Self> {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        let mut handle = stdin.lock();
+        let mut buf = String::new();
+        handle
+            .read_line(&mut buf)
+            .context("Could not read cookbook payload line from stdin")?;
+        if buf.trim().is_empty() {
+            return Ok(Self {
+                version: COOKBOOK_PAYLOAD_VERSION,
+                config: serde_json::Value::Object(Default::default()),
+            });
+        }
+        serde_json::from_str(buf.trim()).context("Could not parse cookbook payload as JSON")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

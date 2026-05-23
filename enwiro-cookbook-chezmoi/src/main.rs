@@ -1,16 +1,19 @@
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
-use enwiro_sdk::{CookbookMetadata, Recipe};
+use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 
 const RECIPE_NAME: &str = "chezmoi";
+const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 enum EnwiroCookbookChezmoi {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
     Metadata,
+    Listen,
 }
 
 #[derive(clap::Args)]
@@ -71,6 +74,11 @@ fn main() -> anyhow::Result<()> {
                 }
                 .to_json()
             );
+        }
+        EnwiroCookbookChezmoi::Listen => {
+            let _ = CookbookPayload::read_first_line_from_stdin()
+                .context("Could not read cookbook payload from stdin")?;
+            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || vec![Recipe::new(RECIPE_NAME)]);
         }
     };
 

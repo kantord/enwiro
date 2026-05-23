@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
-use enwiro_sdk::{CookbookMetadata, Recipe};
+use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 use serde::Deserialize;
 
 const RECIPE_PREFIX: &str = "obsidian#";
 const DEFAULT_PRIORITY: u32 = 40;
 const OBSIDIAN_BINARY: &str = "obsidian";
 const ZOTERO_BINARY: &str = "zotero";
+const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 struct ObsidianVaultEntry {
@@ -178,6 +180,7 @@ enum EnwiroCookbookObsidian {
     Cook(CookArgs),
     Gear(GearArgs),
     Metadata,
+    Listen,
 }
 
 #[derive(clap::Args)]
@@ -256,6 +259,15 @@ fn main() -> Result<()> {
                 }
                 .to_json()
             );
+        }
+        EnwiroCookbookObsidian::Listen => {
+            let _ = CookbookPayload::read_first_line_from_stdin()
+                .context("Could not read cookbook payload from stdin")?;
+            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || {
+                read_obsidian_json()
+                    .and_then(|json| list_recipes_from_json(&json))
+                    .unwrap_or_default()
+            });
         }
     }
     Ok(())
