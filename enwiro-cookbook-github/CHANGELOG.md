@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.13...enwiro-cookbook-github-v0.1.14) - 2026-05-23
+
+### Added
+
+- *(daemon)* unified listen-driven cookbook/adapter pool ([#498](https://github.com/kantord/enwiro/pull/498))
+
 ## [0.1.13](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.12...enwiro-cookbook-github-v0.1.13) - 2026-05-20
 
 ### Added
