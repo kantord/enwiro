@@ -1,10 +1,12 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::Context;
 use clap::Parser;
+use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
@@ -182,7 +184,10 @@ enum EnwiroCookbookGit {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
     Metadata,
+    Listen,
 }
+
+const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(clap::Args)]
 pub struct ListRecipesArgs {}
@@ -383,6 +388,35 @@ fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
         println!("{}", recipe.to_jsonl());
     }
     Ok(())
+}
+
+fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
+    let Ok(repos) = build_repository_hashmap(config) else {
+        return Vec::new();
+    };
+    build_sorted_recipes(&repos)
+        .into_iter()
+        .map(|(key, sort_order)| {
+            let mut recipe = Recipe::new(key);
+            recipe.sort_order = sort_order;
+            recipe
+        })
+        .collect()
+}
+
+fn listen(config: &ConfigurationValues) -> anyhow::Result<()> {
+    let mut last_payload: Option<String> = None;
+    loop {
+        let update = RecipeUpdate::Recipes {
+            data: collect_recipes(config),
+        };
+        let payload = update.to_jsonl();
+        if last_payload.as_deref() != Some(payload.as_str()) {
+            println!("{}", payload);
+            last_payload = Some(payload);
+        }
+        std::thread::sleep(LISTEN_POLL_INTERVAL);
+    }
 }
 
 /// Cooks a recipe. It returns the path to the already existing local
@@ -1225,6 +1259,13 @@ fn main() -> anyhow::Result<()> {
                 }
                 .to_json()
             );
+        }
+        EnwiroCookbookGit::Listen => {
+            let config_value = enwiro_sdk::config::load_user_config("cookbook-git")
+                .context("Could not load user-level cookbook-git config")?;
+            let config: ConfigurationValues = serde_json::from_value(config_value)
+                .context("Could not deserialize cookbook-git configuration")?;
+            listen(&config)?;
         }
     };
 

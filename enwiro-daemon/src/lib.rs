@@ -18,9 +18,26 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 
+use std::collections::HashMap;
+
 use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
+use enwiro_sdk::cookbook::Recipe;
+use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamItem, StreamKind};
+
+/// Cookbook names whose recipe updates arrive via the unified
+/// `optative-process-pool` `listen` channel rather than the legacy
+/// periodic poll. Grows as each cookbook gains a `listen` subcommand.
+const LISTEN_DRIVEN_COOKBOOKS: &[&str] = &["git"];
+
+/// Per-cookbook state assembled from either the listen-stdout path
+/// or the legacy periodic poll. The cache content is rebuilt from
+/// this map on every change.
+struct CookbookEntry {
+    priority: u32,
+    recipes: Vec<Recipe>,
+}
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
 /// Prefers $XDG_RUNTIME_DIR/enwiro, falls back to $XDG_CACHE_HOME/enwiro/run.
@@ -166,35 +183,22 @@ struct SortableCachedRecipe {
     priority: u32,
 }
 
-/// Collect recipes from all cookbooks as JSON lines, sorted globally
-/// by (sort_order, cookbook priority, name).
-/// Errors in individual cookbooks are logged and skipped.
-pub(crate) fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
+/// Serialize a per-cookbook recipe state map into the cache file's
+/// JSON-lines format, sorted globally by (sort_order, cookbook priority, name).
+pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> String {
     let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
-
-    for cookbook in cookbooks {
-        match cookbook.list_recipes() {
-            Ok(recipes) => {
-                for recipe in recipes {
-                    all_recipes.push(SortableCachedRecipe {
-                        cached: CachedRecipe {
-                            cookbook: cookbook.name().to_string(),
-                            name: recipe.name,
-                            description: recipe.description,
-                            sort_order: recipe.sort_order,
-                            scores: None,
-                        },
-                        priority: cookbook.priority(),
-                    });
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    cookbook = %cookbook.name(),
-                    error = %e,
-                    "Skipping cookbook due to error"
-                );
-            }
+    for (cookbook_name, entry) in state {
+        for recipe in &entry.recipes {
+            all_recipes.push(SortableCachedRecipe {
+                cached: CachedRecipe {
+                    cookbook: cookbook_name.clone(),
+                    name: recipe.name.clone(),
+                    description: recipe.description.clone(),
+                    sort_order: recipe.sort_order,
+                    scores: None,
+                },
+                priority: entry.priority,
+            });
         }
     }
 
@@ -214,6 +218,35 @@ pub(crate) fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> Strin
         }
     }
     output
+}
+
+/// Collect recipes from all cookbooks as JSON lines, sorted globally
+/// by (sort_order, cookbook priority, name).
+/// Errors in individual cookbooks are logged and skipped.
+#[cfg(test)]
+pub(crate) fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
+    let mut state: HashMap<String, CookbookEntry> = HashMap::new();
+    for cookbook in cookbooks {
+        match cookbook.list_recipes() {
+            Ok(recipes) => {
+                state.insert(
+                    cookbook.name().to_string(),
+                    CookbookEntry {
+                        priority: cookbook.priority(),
+                        recipes,
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    cookbook = %cookbook.name(),
+                    error = %e,
+                    "Skipping cookbook due to error"
+                );
+            }
+        }
+    }
+    build_cache_content(&state)
 }
 
 /// Parse a JSONL workspace switch event line.
@@ -263,11 +296,12 @@ pub fn run(
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);
+    let mut recipe_state: HashMap<String, CookbookEntry> = HashMap::new();
+    let mut last_cache_content: Option<String> = None;
 
-    let adapter_desired: Vec<ProcessSource> = get_plugins(PluginKind::Adapter)
-        .into_iter()
-        .next()
-        .map(|plugin| ProcessSource {
+    let mut desired: Vec<ProcessSource> = Vec::new();
+    if let Some(plugin) = get_plugins(PluginKind::Adapter).into_iter().next() {
+        desired.push(ProcessSource {
             identity: ProcessIdentity {
                 bin: plugin.executable.clone(),
                 key: "adapter".to_string(),
@@ -280,12 +314,36 @@ pub fn run(
             env: Default::default(),
             current_dir: None,
             props: None,
-        })
-        .into_iter()
-        .collect();
+        });
+    }
+    for plugin in get_plugins(PluginKind::Cookbook) {
+        if !LISTEN_DRIVEN_COOKBOOKS.contains(&plugin.name.as_str()) {
+            continue;
+        }
+        let name = plugin.name.clone();
+        let executable = plugin.executable.clone();
+        let client = CookbookClient::new_user_level_only(plugin);
+        recipe_state.insert(
+            name.clone(),
+            CookbookEntry {
+                priority: client.priority(),
+                recipes: Vec::new(),
+            },
+        );
+        desired.push(ProcessSource {
+            identity: ProcessIdentity {
+                bin: executable,
+                key: name,
+            },
+            args: vec!["listen".to_string()],
+            env: Default::default(),
+            current_dir: None,
+            props: None,
+        });
+    }
 
-    for (key, err) in pool.reconcile(adapter_desired) {
-        tracing::warn!(key = ?key, error = ?err, "Could not spawn adapter listen subprocess");
+    for (key, err) in pool.reconcile(desired) {
+        tracing::warn!(key = ?key, error = ?err, "Could not spawn listen subprocess");
     }
 
     tracing::info!(pid = std::process::id(), "Daemon started");
@@ -297,11 +355,25 @@ pub fn run(
                     if item.stream != StreamKind::Stdout {
                         continue;
                     }
-                    if let Some((env_name, timestamp)) = parse_switch_event(&item.line)
-                        && !env_name.is_empty()
+                    if item.key.key == "adapter" {
+                        if let Some((env_name, timestamp)) = parse_switch_event(&item.line)
+                            && !env_name.is_empty()
+                        {
+                            let env_dir = workspaces_directory.join(&env_name);
+                            on_workspace_switch(&env_dir, timestamp);
+                        }
+                    } else if let Some(entry) = recipe_state.get_mut(&item.key.key)
+                        && let Ok(RecipeUpdate::Recipes { data }) =
+                            serde_json::from_str::<RecipeUpdate>(&item.line)
                     {
-                        let env_dir = workspaces_directory.join(&env_name);
-                        on_workspace_switch(&env_dir, timestamp);
+                        entry.recipes = data;
+                        let new_cache = build_cache_content(&recipe_state);
+                        if last_cache_content.as_deref() != Some(new_cache.as_str()) {
+                            if let Err(e) = write_cache_atomic(&dir, &new_cache) {
+                                tracing::error!(error = %e, "Failed to write cache");
+                            }
+                            last_cache_content = Some(new_cache);
+                        }
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -310,15 +382,28 @@ pub fn run(
         }
 
         if should_refresh_cache(check_idle()) {
-            let plugins = get_plugins(PluginKind::Cookbook);
-            let cookbooks: Vec<Box<dyn CookbookTrait>> = plugins
-                .into_iter()
-                .map(|p| Box::new(CookbookClient::new_user_level_only(p)) as Box<dyn CookbookTrait>)
-                .collect();
-
-            let recipes = collect_all_recipes(&cookbooks);
-            if let Err(e) = write_cache_atomic(&dir, &recipes) {
-                tracing::error!(error = %e, "Failed to write cache");
+            for plugin in get_plugins(PluginKind::Cookbook) {
+                if LISTEN_DRIVEN_COOKBOOKS.contains(&plugin.name.as_str()) {
+                    continue;
+                }
+                let name = plugin.name.clone();
+                let client = CookbookClient::new_user_level_only(plugin);
+                let priority = client.priority();
+                match client.list_recipes() {
+                    Ok(recipes) => {
+                        recipe_state.insert(name, CookbookEntry { priority, recipes });
+                    }
+                    Err(e) => {
+                        tracing::warn!(cookbook = %name, error = %e, "Skipping cookbook due to error");
+                    }
+                }
+            }
+            let new_cache = build_cache_content(&recipe_state);
+            if last_cache_content.as_deref() != Some(new_cache.as_str()) {
+                if let Err(e) = write_cache_atomic(&dir, &new_cache) {
+                    tracing::error!(error = %e, "Failed to write cache");
+                }
+                last_cache_content = Some(new_cache);
             }
         }
 
