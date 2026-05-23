@@ -21,7 +21,7 @@ use anyhow::Context;
 use std::collections::HashMap;
 
 use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
-use enwiro_sdk::cookbook::Recipe;
+use enwiro_sdk::cookbook::{CookbookPayload, Recipe};
 use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamItem, StreamKind};
@@ -220,35 +220,6 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
     output
 }
 
-/// Collect recipes from all cookbooks as JSON lines, sorted globally
-/// by (sort_order, cookbook priority, name).
-/// Errors in individual cookbooks are logged and skipped.
-#[cfg(test)]
-pub(crate) fn collect_all_recipes(cookbooks: &[Box<dyn CookbookTrait>]) -> String {
-    let mut state: HashMap<String, CookbookEntry> = HashMap::new();
-    for cookbook in cookbooks {
-        match cookbook.list_recipes() {
-            Ok(recipes) => {
-                state.insert(
-                    cookbook.name().to_string(),
-                    CookbookEntry {
-                        priority: cookbook.priority(),
-                        recipes,
-                    },
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    cookbook = %cookbook.name(),
-                    error = %e,
-                    "Skipping cookbook due to error"
-                );
-            }
-        }
-    }
-    build_cache_content(&state)
-}
-
 /// Parse a JSONL workspace switch event line.
 /// Returns `Some((env_name, timestamp))` if the line is a valid `workspace_switch` event,
 /// or `None` for any other content (wrong type, missing fields, invalid JSON).
@@ -323,6 +294,8 @@ pub fn run(
         let name = plugin.name.clone();
         let executable = plugin.executable.clone();
         let client = CookbookClient::new_user_level_only(plugin);
+        let payload = CookbookPayload::new(client.config().clone());
+        let props = serde_json::to_value(&payload).ok();
         recipe_state.insert(
             name.clone(),
             CookbookEntry {
@@ -338,7 +311,7 @@ pub fn run(
             args: vec!["listen".to_string()],
             env: Default::default(),
             current_dir: None,
-            props: None,
+            props,
         });
     }
 
@@ -425,7 +398,6 @@ pub fn run(
 mod tests {
     use super::*;
     use enwiro_sdk::client::CachedRecipe;
-    use enwiro_sdk::test_helpers::{FailingCookbook, FakeCookbook};
 
     fn parse_cached_lines(output: &str) -> Vec<CachedRecipe> {
         output
@@ -435,16 +407,28 @@ mod tests {
             .collect()
     }
 
+    fn entry(priority: u32, recipes: Vec<Recipe>) -> CookbookEntry {
+        CookbookEntry { priority, recipes }
+    }
+
+    fn recipe_with_desc(name: &str, description: Option<&str>) -> Recipe {
+        match description {
+            Some(d) => Recipe::with_description(name, d),
+            None => Recipe::new(name),
+        }
+    }
+
     #[test]
-    fn test_collect_all_recipes_includes_description() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> =
-            vec![Box::new(FakeCookbook::new_with_descriptions(
-                "github",
-                vec![("owner/repo#42", Some("Fix auth bug"))],
-                vec![],
-            ))];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_includes_description() {
+        let mut state = HashMap::new();
+        state.insert(
+            "github".to_string(),
+            entry(
+                30,
+                vec![recipe_with_desc("owner/repo#42", Some("Fix auth bug"))],
+            ),
+        );
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].cookbook, "github");
         assert_eq!(entries[0].name, "owner/repo#42");
@@ -452,49 +436,43 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_omits_description_when_none() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(
-            FakeCookbook::new_with_descriptions("git", vec![("repo-a", None)], vec![]),
-        )];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_omits_description_when_none() {
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, vec![Recipe::new("repo-a")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "repo-a");
         assert!(entries[0].description.is_none());
     }
 
     #[test]
-    fn test_collect_all_recipes_formats_output() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(FakeCookbook::new(
-            "git",
-            vec!["repo-a", "repo-b"],
-            vec![],
-        ))];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_formats_output_as_jsonl() {
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            entry(10, vec![Recipe::new("repo-a"), Recipe::new("repo-b")]),
+        );
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "repo-a");
         assert_eq!(entries[1].name, "repo-b");
     }
 
     #[test]
-    fn test_collect_all_recipes_multiple_cookbooks() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
-            Box::new(FakeCookbook::new("npm", vec!["pkg-x"], vec![])),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_combines_multiple_cookbooks() {
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, vec![Recipe::new("repo-a")]));
+        state.insert("npm".to_string(), entry(20, vec![Recipe::new("pkg-x")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"repo-a"));
         assert!(names.contains(&"pkg-x"));
     }
 
     #[test]
-    fn test_collect_all_recipes_empty() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![];
-        let output = collect_all_recipes(&cookbooks);
-        assert_eq!(output, "");
+    fn build_cache_content_empty_state_produces_empty_string() {
+        let state: HashMap<String, CookbookEntry> = HashMap::new();
+        assert_eq!(build_cache_content(&state), "");
     }
 
     #[test]
@@ -630,13 +608,14 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_sorts_by_priority() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FakeCookbook::new("github", vec!["repo#42"], vec![]).with_priority(30)),
-            Box::new(FakeCookbook::new("git", vec!["my-repo"], vec![]).with_priority(10)),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_sorts_by_priority() {
+        let mut state = HashMap::new();
+        state.insert(
+            "github".to_string(),
+            entry(30, vec![Recipe::new("repo#42")]),
+        );
+        state.insert("git".to_string(), entry(10, vec![Recipe::new("my-repo")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(
             entries[0].cookbook, "git",
             "Higher priority (lower number) should come first"
@@ -647,13 +626,11 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_sorts_by_name_on_priority_tie() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FakeCookbook::new("npm", vec!["pkg-x"], vec![]).with_priority(20)),
-            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![]).with_priority(20)),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_sorts_by_name_on_priority_tie() {
+        let mut state = HashMap::new();
+        state.insert("npm".to_string(), entry(20, vec![Recipe::new("pkg-x")]));
+        state.insert("git".to_string(), entry(20, vec![Recipe::new("repo-a")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(
             entries[0].name, "pkg-x",
             "Same sort_order and priority should tie-break by recipe name"
@@ -664,36 +641,18 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_skips_failing_cookbook() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(FailingCookbook {
-                cookbook_name: "broken".into(),
-            }),
-            Box::new(FakeCookbook::new("git", vec!["repo-a"], vec![])),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].cookbook, "git");
-        assert_eq!(entries[0].name, "repo-a");
-    }
+    fn build_cache_content_sorts_globally_by_sort_order() {
+        let mut git_recipes = vec![Recipe::new("git-repo-a"), Recipe::new("git-repo-b")];
+        git_recipes[0].sort_order = 0;
+        git_recipes[1].sort_order = 50;
+        let mut gh_recipes = vec![Recipe::new("gh-issue-1"), Recipe::new("gh-issue-2")];
+        gh_recipes[0].sort_order = 0;
+        gh_recipes[1].sort_order = 50;
 
-    #[test]
-    fn test_collect_all_recipes_sorts_globally_by_sort_order() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(
-                FakeCookbook::new("git", vec!["git-repo-a", "git-repo-b"], vec![])
-                    .with_priority(10)
-                    .with_sort_orders(vec![0, 50]),
-            ),
-            Box::new(
-                FakeCookbook::new("github", vec!["gh-issue-1", "gh-issue-2"], vec![])
-                    .with_priority(30)
-                    .with_sort_orders(vec![0, 50]),
-            ),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, git_recipes));
+        state.insert("github".to_string(), entry(30, gh_recipes));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].name, "git-repo-a");
         assert_eq!(entries[0].sort_order, 0);
@@ -798,21 +757,16 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_all_recipes_interleaves_cookbooks_by_sort_order() {
-        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![
-            Box::new(
-                FakeCookbook::new("git", vec!["low-priority-branch"], vec![])
-                    .with_priority(10)
-                    .with_sort_orders(vec![80]),
-            ),
-            Box::new(
-                FakeCookbook::new("github", vec!["hot-issue"], vec![])
-                    .with_priority(30)
-                    .with_sort_orders(vec![0]),
-            ),
-        ];
-        let output = collect_all_recipes(&cookbooks);
-        let entries = parse_cached_lines(&output);
+    fn build_cache_content_interleaves_cookbooks_by_sort_order() {
+        let mut git_recipe = Recipe::new("low-priority-branch");
+        git_recipe.sort_order = 80;
+        let mut gh_recipe = Recipe::new("hot-issue");
+        gh_recipe.sort_order = 0;
+
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, vec![git_recipe]));
+        state.insert("github".to_string(), entry(30, vec![gh_recipe]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
         assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0].name, "hot-issue",

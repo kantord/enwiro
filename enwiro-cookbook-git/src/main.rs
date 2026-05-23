@@ -187,7 +187,7 @@ enum EnwiroCookbookGit {
     Listen,
 }
 
-const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(clap::Args)]
 pub struct ListRecipesArgs {}
@@ -1261,9 +1261,9 @@ fn main() -> anyhow::Result<()> {
             );
         }
         EnwiroCookbookGit::Listen => {
-            let config_value = enwiro_sdk::config::load_user_config("cookbook-git")
-                .context("Could not load user-level cookbook-git config")?;
-            let config: ConfigurationValues = serde_json::from_value(config_value)
+            let payload = CookbookPayload::read_first_line_from_stdin()
+                .context("Could not read cookbook payload from stdin")?;
+            let config: ConfigurationValues = serde_json::from_value(payload.config)
                 .context("Could not deserialize cookbook-git configuration")?;
             listen(&config)?;
         }
