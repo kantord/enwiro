@@ -3,6 +3,7 @@
 //! the read/write helpers, and the data-collection functions that produce
 //! entries on activation, switch, and recipe-cook events.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +29,75 @@ pub struct EnvStats {
     pub cookbook: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_log: Vec<EventLogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Status {
+    #[serde(rename = "uncooked")]
+    Uncooked,
+    #[serde(rename = "cooked")]
+    Cooked {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<CookedPhase>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<StatusDetail>,
+    },
+    #[serde(rename = "done")]
+    Done {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<DoneOutcome>,
+    },
+    #[serde(rename = "evergreen")]
+    Evergreen,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CookedPhase {
+    Active,
+    Waiting,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoneOutcome {
+    Completed,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusDetail {
+    pub source: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventLogEntry {
+    #[serde(rename = "type")]
+    pub event_type: EventType,
+    pub detail: String,
+    pub started: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventType {
+    StatusChange,
+    #[serde(untagged)]
+    Other(String),
+}
+
+pub fn now_utc() -> DateTime<Utc> {
+    Utc::now()
 }
 
 pub fn now_timestamp() -> i64 {

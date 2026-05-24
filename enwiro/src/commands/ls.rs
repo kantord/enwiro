@@ -492,6 +492,7 @@ mod tests {
             description: Some("Fix auth bug".to_string()),
             cookbook: Some("github".to_string()),
             recipe: Some("owner/repo#42".to_string()),
+            ..Default::default()
         };
         let env_dir = temp_dir.path().join("owner-repo#42");
         std::fs::write(

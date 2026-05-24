@@ -11,6 +11,7 @@ use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
 use commands::env_info::{EnvInfoArgs, env_info};
 use commands::ls::{LsArgs, ls};
+use commands::mark::{MarkArgs, mark};
 use commands::prep::{PrepArgs, prep};
 use commands::rm::{RmArgs, rm};
 use commands::run::{RunArgs, run};
@@ -29,6 +30,7 @@ enum EnwiroCli {
     Activate(ActivateArgs),
     Info(EnvInfoArgs),
     Ls(LsArgs),
+    Mark(MarkArgs),
     Prep(PrepArgs),
     Rm(RmArgs),
     Run(RunArgs),
@@ -88,6 +90,7 @@ fn main() -> anyhow::Result<()> {
             let scope = args.scope();
             ls(&mut context_object, scope, args.json)
         }
+        EnwiroCli::Mark(args) => mark(&mut context_object, args),
         EnwiroCli::Prep(args) => prep(&mut context_object, args),
         EnwiroCli::Rm(args) => rm(&mut context_object, args),
         EnwiroCli::Run(args) => run(&mut context_object, args),
