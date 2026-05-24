@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.39](https://github.com/kantord/enwiro/compare/enwiro-v0.3.38...enwiro-v0.3.39) - 2026-05-24
+
+### Added
+
+- add `enw info --json` ([#509](https://github.com/kantord/enwiro/pull/509))
+- pilot IPC for daemon
+
 ## [0.3.38](https://github.com/kantord/enwiro/compare/enwiro-v0.3.37...enwiro-v0.3.38) - 2026-05-23
 
 ### Other
