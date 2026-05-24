@@ -121,7 +121,7 @@ impl CookbookClient {
         }
     }
 
-    fn fetch_metadata(executable: &str) -> CookbookMetadata {
+    pub(crate) fn fetch_metadata(executable: &str) -> CookbookMetadata {
         let result = (|| -> anyhow::Result<CookbookMetadata> {
             let output = Command::new(executable)
                 .arg("metadata")
@@ -210,6 +210,150 @@ fn resolve_user_level_only(plugin: &Plugin) -> serde_json::Value {
 
 fn scope_for(plugin: &Plugin) -> String {
     format!("cookbook-{}", plugin.name)
+}
+
+/// A `CookbookTrait` implementation that delegates every operation to the
+/// running `enwiro-daemon` over the JSON-RPC IPC defined in ADR-0002.
+///
+/// The construction side (metadata fetch + project-layer config resolution)
+/// stays on the caller's side because the daemon has no concept of the
+/// caller's cwd; the daemon only spawns the cookbook with the resolved
+/// payload that the caller pre-computed. On each operation the resolved
+/// `payload` is sent through the RPC to the daemon, which writes it to the
+/// cookbook's stdin as a `CookbookPayload`.
+///
+/// Sync façade over the async `Client`: holds a current-thread tokio runtime
+/// per cookbook client. The cost is one runtime per cookbook on construction;
+/// `enw` constructs a handful of cookbook clients in `CommandContext::new`
+/// and then reuses them for the lifetime of the process, so this is fine.
+pub struct RpcCookbookClient {
+    plugin: Plugin,
+    metadata: CookbookMetadata,
+    config: serde_json::Value,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl RpcCookbookClient {
+    /// Construct an RPC-backed cookbook client. Behaves like
+    /// `CookbookClient::new` from the caller's POV: resolves project-layer
+    /// config using `current_dir()` and fetches metadata directly via
+    /// subprocess (metadata is a one-shot read on construction, not a hot
+    /// path, and doesn't need the daemon).
+    pub fn new(plugin: Plugin) -> Self {
+        let metadata = CookbookClient::fetch_metadata(&plugin.executable);
+        let config = resolve_config_with_walker(&plugin, &metadata);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread tokio runtime for RpcCookbookClient");
+        Self {
+            plugin,
+            metadata,
+            config,
+            runtime,
+        }
+    }
+
+    /// Run one `cookbook.invoke` RPC and return the cookbook's raw stdout.
+    /// Connects fresh on every call — cheap for our usage pattern (one or
+    /// two cooks per `enw` invocation), and avoids long-held connections.
+    fn invoke(&self, op: &str, args: Vec<String>) -> anyhow::Result<String> {
+        let cookbook = self.plugin.name.clone();
+        let op = op.to_string();
+        let payload = self.config.clone();
+        let call_chain = current_call_chain();
+
+        self.runtime.block_on(async move {
+            use crate::rpc::EnwiroRpcClient;
+            let client = crate::rpc::connect()
+                .await
+                .context("connect to enwiro-daemon")?;
+            let result = client
+                .cookbook_invoke(crate::rpc::CookbookInvokeParams {
+                    cookbook,
+                    op,
+                    args,
+                    payload,
+                    call_chain,
+                })
+                .await
+                .context("rpc cookbook.invoke")?;
+            Ok(result.stdout)
+        })
+    }
+}
+
+/// Parse `$ENWIRO_RPC_CALL_CHAIN` (colon-separated cookbook names, set by
+/// the daemon when one cookbook invokes another) into an ordered list.
+/// Empty / unset env var yields an empty chain.
+fn current_call_chain() -> Vec<String> {
+    std::env::var(crate::rpc::CALL_CHAIN_ENV_VAR)
+        .unwrap_or_default()
+        .split(':')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+impl CookbookTrait for RpcCookbookClient {
+    fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>> {
+        let cookbook = self.plugin.name.as_str();
+        tracing::debug!(%cookbook, "Listing recipes via daemon RPC");
+        let stdout = self
+            .invoke("list-recipes", vec![])
+            .with_context(|| format!("cookbook '{cookbook}' failed during 'list-recipes'"))?;
+        Ok(stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                serde_json::from_str::<Recipe>(line).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        %cookbook, error = %e, %line,
+                        "cookbook list-recipes produced non-Recipe-JSON line; treating as a bare name"
+                    );
+                    Recipe::new(line)
+                })
+            })
+            .collect())
+    }
+
+    fn cook(&self, recipe: &str) -> anyhow::Result<String> {
+        let cookbook = self.plugin.name.as_str();
+        tracing::debug!(%cookbook, %recipe, "Cooking recipe via daemon RPC");
+        let stdout = self
+            .invoke("cook", vec![recipe.to_string()])
+            .with_context(|| format!("cookbook '{cookbook}' failed during 'cook {recipe}'"))?;
+        Ok(stdout.trim().to_string())
+    }
+
+    fn name(&self) -> &str {
+        &self.plugin.name
+    }
+
+    fn priority(&self) -> u32 {
+        self.metadata.default_priority.unwrap_or(DEFAULT_PRIORITY)
+    }
+
+    /// Best-effort `gear <recipe>` via the daemon. Any failure path
+    /// (cookbook doesn't implement gear, exec error, malformed JSON)
+    /// degrades to `Ok(None)` so a missing or broken `gear` never blocks
+    /// cooking — same contract as `CookbookClient::gear`.
+    fn gear(&self, recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        let stdout = match self.invoke("gear", vec![recipe.to_string()]) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear RPC failed");
+                return Ok(None);
+            }
+        };
+        match serde_json::from_str::<serde_json::Value>(&stdout) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear stdout was not valid JSON");
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl CookbookTrait for CookbookClient {

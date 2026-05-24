@@ -8,15 +8,15 @@
 
 pub mod config;
 pub mod meta;
+pub mod rpc;
 pub use config::ConfigurationValues;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
+use tokio::signal::unix::{SignalKind, signal};
 
 use std::collections::HashMap;
 
@@ -31,6 +31,15 @@ use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamI
 struct CookbookEntry {
     priority: u32,
     recipes: Vec<Recipe>,
+}
+
+/// Caller-provided startup configuration for `run`. Distinct from
+/// `config::ConfigurationValues`, which carries project-level cookbook
+/// config; this struct only carries what the daemon needs to start.
+pub struct DaemonConfig {
+    /// Root directory under which env worktrees live; switch events name
+    /// envs by basename, resolved as `workspaces_directory/<env_name>`.
+    pub workspaces_directory: PathBuf,
 }
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
@@ -138,6 +147,41 @@ pub(crate) fn is_daemon_running(runtime_dir: &Path) -> bool {
     }
 }
 
+/// Acquire an exclusive non-blocking lock on `<runtime_dir>/daemon.lock`.
+/// Returns the lock file handle — the lock is held for as long as the
+/// returned file is alive (kernel releases it on `close(2)`). If another
+/// daemon already holds the lock, returns an error before we touch the
+/// socket file, preventing two instances from racing over `bind`.
+pub(crate) fn acquire_daemon_lock(runtime_dir: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+
+    fs::create_dir_all(runtime_dir).context("Could not create runtime directory for lock")?;
+    let lock_path = runtime_dir.join("daemon.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open daemon lock at {}", lock_path.display()))?;
+
+    // flock(LOCK_EX | LOCK_NB): exclusive, non-blocking. Fails fast with
+    // EWOULDBLOCK if another daemon holds the lock.
+    let fd = file.as_raw_fd();
+    let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        let errno = std::io::Error::last_os_error();
+        anyhow::bail!(
+            "another enwiro-daemon instance is already running (could not acquire \
+             exclusive lock on {}: {}). Stop it with `systemctl --user stop \
+             enwiro-daemon.service` (or the equivalent) before starting another.",
+            lock_path.display(),
+            errno
+        );
+    }
+    Ok(file)
+}
+
 /// A cached recipe with its cookbook's priority, used for global sorting.
 struct SortableCachedRecipe {
     cached: CachedRecipe,
@@ -198,15 +242,20 @@ pub(crate) fn parse_switch_event(line: &str) -> Option<(String, i64)> {
 /// and drain the cookbook/adapter stdout channel.
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Run the daemon. Blocks until SIGTERM/SIGINT/SIGHUP.
+/// Run the daemon. Awaits until SIGTERM/SIGINT/SIGHUP.
 ///
-/// `workspaces_directory` is the root under which enwiro environments live;
-/// switch events emitted by the adapter `listen` subprocess are resolved as
-/// `<workspaces_directory>/<env_name>` and passed to `on_workspace_switch`.
-pub fn run(
-    workspaces_directory: PathBuf,
+/// `config.workspaces_directory` is the root under which enwiro environments
+/// live; switch events emitted by the adapter `listen` subprocess are
+/// resolved as `<workspaces_directory>/<env_name>` and passed to
+/// `on_workspace_switch`.
+pub async fn run(
+    config: DaemonConfig,
     on_workspace_switch: impl Fn(&Path, i64) + Send + 'static,
 ) -> anyhow::Result<()> {
+    let DaemonConfig {
+        workspaces_directory,
+    } = config;
+
     let setsid_result = unsafe { libc::setsid() };
     if setsid_result == -1 {
         tracing::warn!("setsid() failed, continuing anyway");
@@ -215,12 +264,20 @@ pub fn run(
     let dir = runtime_dir()?;
     fs::create_dir_all(&dir)?;
 
+    // Kernel-mutex against double-start. Held for the lifetime of `run()`
+    // via this binding; closing the file (drop) releases the lock.
+    let _daemon_lock = acquire_daemon_lock(&dir)?;
+
     write_pid_file(&dir)?;
 
-    let term = Arc::new(AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))?;
-    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
-    signal_hook::flag::register(signal_hook::consts::SIGHUP, Arc::clone(&term))?;
+    let rpc_socket_path = dir.join(enwiro_sdk::rpc::SOCKET_FILENAME);
+    // SAFETY (Rust 2024): set_var can race with concurrent env reads.
+    // Done before any tokio task or child spawn, so the mutation is sound.
+    unsafe {
+        std::env::set_var(enwiro_sdk::rpc::SOCKET_ENV_VAR, rpc_socket_path.as_os_str());
+    }
+
+    tokio::spawn(rpc::serve(rpc_socket_path.clone()));
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);
@@ -273,19 +330,23 @@ pub fn run(
         tracing::warn!(key = ?key, error = ?err, "Could not spawn listen subprocess");
     }
 
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sighup = signal(SignalKind::hangup())?;
+    let mut tick = tokio::time::interval(TICK_INTERVAL);
+
     tracing::info!(pid = std::process::id(), "Daemon started");
 
     loop {
-        // Reconcile each tick so the upstream pool can restart any
-        // listen subprocess that exited since the previous iteration
-        // (via `Lifecycle::reconcile_self`, which checks `try_wait`).
-        for (key, err) in pool.reconcile(desired.clone()) {
-            tracing::warn!(key = ?key, error = ?err, "Could not respawn listen subprocess");
-        }
-
-        loop {
-            match stream_rx.try_recv() {
-                Ok(item) => {
+        tokio::select! {
+            _ = sigterm.recv() => break,
+            _ = sigint.recv() => break,
+            _ = sighup.recv() => break,
+            _ = tick.tick() => {
+                for (key, err) in pool.reconcile(desired.clone()) {
+                    tracing::warn!(key = ?key, error = ?err, "Could not respawn listen subprocess");
+                }
+                while let Ok(item) = stream_rx.try_recv() {
                     if item.stream != StreamKind::Stdout {
                         continue;
                     }
@@ -293,8 +354,7 @@ pub fn run(
                         if let Some((env_name, timestamp)) = parse_switch_event(&item.line)
                             && !env_name.is_empty()
                         {
-                            let env_dir = workspaces_directory.join(&env_name);
-                            on_workspace_switch(&env_dir, timestamp);
+                            on_workspace_switch(&workspaces_directory.join(&env_name), timestamp);
                         }
                     } else if let Some(entry) = recipe_state.get_mut(&item.key.key) {
                         match serde_json::from_str::<RecipeUpdate>(&item.line) {
@@ -314,19 +374,15 @@ pub fn run(
                         }
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
             }
         }
-
-        if term.load(Ordering::Relaxed) {
-            tracing::info!("Received termination signal, exiting");
-            drop(pool);
-            remove_pid_file(&dir);
-            return Ok(());
-        }
-        std::thread::sleep(TICK_INTERVAL);
     }
+
+    tracing::info!("Received termination signal, exiting");
+    drop(pool);
+    remove_pid_file(&dir);
+    let _ = std::fs::remove_file(&rpc_socket_path);
+    Ok(())
 }
 
 #[cfg(test)]
