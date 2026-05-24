@@ -6,6 +6,8 @@
 
 use std::os::unix::fs::PermissionsExt;
 
+use std::sync::{Arc, Mutex};
+
 use enwiro_daemon::rpc;
 use enwiro_sdk::rpc::{
     APPLICATION_ERROR_CODE, CYCLE_DETECTED_CODE, CookbookInvokeParams, EnwiroRpcClient, connect_at,
@@ -29,11 +31,12 @@ async fn spawn_server(tempdir: &TempDir) -> std::path::PathBuf {
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
         .expect("chmod 0600 rpc socket in test");
 
+    let active_env: Arc<Mutex<Option<rpc::ActiveEnvState>>> = Arc::new(Mutex::new(None));
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     let socket_path_clone = socket_path.clone();
     tokio::spawn(async move {
         let _ = ready_tx.send(());
-        let _ = rpc::serve_listener(listener, socket_path_clone).await;
+        let _ = rpc::serve_listener(listener, socket_path_clone, active_env).await;
     });
     ready_rx.await.expect("rpc server ready signal");
     socket_path
@@ -106,4 +109,41 @@ async fn cookbook_invoke_refuses_cycle_in_call_chain() {
         .unwrap_err();
 
     let _ = assert_call_error(err, CYCLE_DETECTED_CODE);
+}
+
+#[tokio::test]
+async fn env_current_returns_none_when_no_switch_seen() {
+    let (_tempdir, client) = setup().await;
+    let result = client.env_current().await.unwrap();
+    assert!(result.env_name.is_none());
+    assert!(result.timestamp.is_none());
+}
+
+#[tokio::test]
+async fn env_current_returns_state_when_set() {
+    let tempdir = TempDir::new().unwrap();
+    let socket_path = tempdir.path().join("rpc.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
+    let listener = tokio::net::UnixListener::bind(&socket_path).expect("bind");
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let active_env: Arc<Mutex<Option<rpc::ActiveEnvState>>> =
+        Arc::new(Mutex::new(Some(rpc::ActiveEnvState {
+            env_name: "my-project".into(),
+            timestamp: 1700000000,
+        })));
+    let active_env_clone = active_env.clone();
+    let socket_path_clone = socket_path.clone();
+    let (ready_tx, ready_rx) = oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let _ = ready_tx.send(());
+        let _ = rpc::serve_listener(listener, socket_path_clone, active_env_clone).await;
+    });
+    ready_rx.await.unwrap();
+
+    let client = connect_at(&socket_path).await.unwrap();
+    let result = client.env_current().await.unwrap();
+    assert_eq!(result.env_name.as_deref(), Some("my-project"));
+    assert!(result.timestamp.is_some());
 }

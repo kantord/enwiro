@@ -647,6 +647,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -679,6 +680,7 @@ dependencies = [
  "anyhow",
  "clap",
  "enwiro-sdk",
+ "serde_json",
  "tracing",
 ]
 
@@ -780,6 +782,7 @@ version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "dirs",
  "enwiro-sdk",
  "filetime",

@@ -9,6 +9,7 @@ mod usage_stats;
 use anyhow::Context;
 use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
+use commands::env_info::{EnvInfoArgs, env_info};
 use commands::ls::{LsArgs, ls};
 use commands::prep::{PrepArgs, prep};
 use commands::rm::{RmArgs, rm};
@@ -26,6 +27,7 @@ use std::path::Path;
 #[derive(Parser)]
 enum EnwiroCli {
     Activate(ActivateArgs),
+    Info(EnvInfoArgs),
     Ls(LsArgs),
     Prep(PrepArgs),
     Rm(RmArgs),
@@ -81,6 +83,7 @@ fn main() -> anyhow::Result<()> {
 
     let result = match args {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
+        EnwiroCli::Info(args) => env_info(&mut context_object, args),
         EnwiroCli::Ls(args) => {
             let scope = args.scope();
             ls(&mut context_object, scope, args.json)

@@ -70,6 +70,15 @@ pub struct CookbookInvokeResult {
     pub stdout: String,
 }
 
+/// Result shape for `env.current`. The daemon returns whatever it last
+/// saw from the adapter's `workspace_switch` event stream; `None` fields
+/// mean "no switch event observed since daemon start".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvCurrentResult {
+    pub env_name: Option<String>,
+    pub timestamp: Option<String>,
+}
+
 /// Single source of truth for the client↔daemon RPC surface.
 #[jsonrpsee::proc_macros::rpc(server, client)]
 pub trait EnwiroRpc {
@@ -78,6 +87,9 @@ pub trait EnwiroRpc {
         &self,
         params: CookbookInvokeParams,
     ) -> Result<CookbookInvokeResult, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "env.current")]
+    async fn env_current(&self) -> Result<EnvCurrentResult, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 pub mod client;

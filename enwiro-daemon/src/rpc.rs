@@ -19,11 +19,12 @@ use anyhow::Context;
 use async_trait::async_trait;
 use enwiro_sdk::rpc::{
     APPLICATION_ERROR_CODE, CALL_CHAIN_ENV_VAR, CYCLE_DETECTED_CODE, CookbookInvokeParams,
-    CookbookInvokeResult, EnwiroRpcServer,
+    CookbookInvokeResult, EnvCurrentResult, EnwiroRpcServer,
 };
 use futures_util::{SinkExt, StreamExt};
 use jsonrpsee::core::server::Methods;
 use jsonrpsee::types::{ErrorObjectOwned, error::ErrorCode};
+use std::sync::{Arc, Mutex};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
@@ -42,11 +43,17 @@ const MAX_INVOKE_STDOUT_BYTES: u64 = 16 * 1024 * 1024;
 /// in error payloads; truncate aggressively.
 const MAX_INVOKE_STDERR_BYTES: u64 = 1024 * 1024;
 
-/// The struct that implements the RPC trait. Unit struct today — when
-/// Layer 2 (`env.current`) or Layer 3 (events) land, this gains a
-/// shared-state field.
-#[derive(Clone, Default)]
-struct DaemonRpc;
+pub struct ActiveEnvState {
+    pub env_name: String,
+    pub timestamp: i64,
+}
+
+pub type SharedActiveEnv = Arc<Mutex<Option<ActiveEnvState>>>;
+
+#[derive(Clone)]
+struct DaemonRpc {
+    active_env: SharedActiveEnv,
+}
 
 /// `APPLICATION_ERROR_CODE` constructor — every "cookbook X failed at Y"
 /// error in this module funnels through here so the wire shape stays
@@ -176,6 +183,18 @@ impl EnwiroRpcServer for DaemonRpc {
 
         Ok(CookbookInvokeResult { stdout })
     }
+
+    async fn env_current(&self) -> Result<EnvCurrentResult, ErrorObjectOwned> {
+        let state = self.active_env.lock().unwrap();
+        Ok(EnvCurrentResult {
+            env_name: state.as_ref().map(|s| s.env_name.clone()),
+            timestamp: state.as_ref().map(|s| {
+                chrono::DateTime::from_timestamp(s.timestamp, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|| s.timestamp.to_string())
+            }),
+        })
+    }
 }
 
 /// Output of a single cookbook subprocess invocation; carries enough
@@ -277,7 +296,7 @@ async fn run_cookbook_subprocess(
 }
 
 /// Bind the unix socket, set perms to 0600, and run the accept loop.
-pub async fn serve(socket_path: PathBuf) -> anyhow::Result<()> {
+pub async fn serve(socket_path: PathBuf, active_env: SharedActiveEnv) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create runtime dir {}", parent.display()))?;
@@ -291,14 +310,19 @@ pub async fn serve(socket_path: PathBuf) -> anyhow::Result<()> {
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", socket_path.display()))?;
     }
-    serve_listener(listener, socket_path).await
+    serve_listener(listener, socket_path, active_env).await
 }
 
 /// Run the accept loop against a pre-bound listener. Exposed so tests
 /// can own bind themselves (and surface bind errors directly) before
 /// signalling readiness.
-pub async fn serve_listener(listener: UnixListener, socket_path: PathBuf) -> anyhow::Result<()> {
-    let methods: Methods = DaemonRpc.into_rpc().into();
+pub async fn serve_listener(
+    listener: UnixListener,
+    socket_path: PathBuf,
+    active_env: SharedActiveEnv,
+) -> anyhow::Result<()> {
+    let rpc = DaemonRpc { active_env };
+    let methods: Methods = rpc.into_rpc().into();
     tracing::info!(path = %socket_path.display(), "rpc server listening");
 
     loop {
