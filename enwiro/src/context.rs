@@ -92,9 +92,10 @@ impl<W: Write> CommandContext<W> {
         Ok(env)
     }
 
-    /// Look up a recipe in the daemon cache.
-    /// Returns `Some((cookbook, description))` if the cache contains the recipe,
-    /// `None` for any miss (cache absent, stale, or recipe not listed).
+    pub fn find_recipe_in_cache_by_name(&self, recipe_name: &str) -> bool {
+        self.find_recipe_in_cache(recipe_name).is_some()
+    }
+
     fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<(String, Option<String>)> {
         let cache = match &self.cache_dir {
             Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),

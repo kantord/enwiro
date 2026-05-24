@@ -19,6 +19,7 @@ use anyhow::Context;
 use tokio::signal::unix::{SignalKind, signal};
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
 use enwiro_sdk::cookbook::{CookbookPayload, Recipe};
@@ -277,7 +278,9 @@ pub async fn run(
         std::env::set_var(enwiro_sdk::rpc::SOCKET_ENV_VAR, rpc_socket_path.as_os_str());
     }
 
-    tokio::spawn(rpc::serve(rpc_socket_path.clone()));
+    let active_env: rpc::SharedActiveEnv = Arc::new(Mutex::new(None));
+    let active_env_writer = active_env.clone();
+    tokio::spawn(rpc::serve(rpc_socket_path.clone(), active_env));
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);
@@ -354,6 +357,8 @@ pub async fn run(
                         if let Some((env_name, timestamp)) = parse_switch_event(&item.line)
                             && !env_name.is_empty()
                         {
+                            *active_env_writer.lock().unwrap() =
+                                Some(rpc::ActiveEnvState { env_name: env_name.clone(), timestamp });
                             on_workspace_switch(&workspaces_directory.join(&env_name), timestamp);
                         }
                     } else if let Some(entry) = recipe_state.get_mut(&item.key.key) {

@@ -10,4 +10,5 @@ repository.workspace = true
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
 enwiro-sdk.workspace = true
+serde_json = "1"
 tracing.workspace = true

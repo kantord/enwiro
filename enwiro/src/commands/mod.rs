@@ -1,5 +1,6 @@
 pub mod activate;
 pub mod adapter;
+pub mod env_info;
 pub mod ls;
 pub mod prep;
 pub mod rm;

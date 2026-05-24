@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 dirs = "6"
 enwiro-sdk.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }

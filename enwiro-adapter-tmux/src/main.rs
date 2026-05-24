@@ -1,3 +1,5 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use clap::Parser;
 use enwiro_sdk::adapter::RunPayload;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
@@ -8,6 +10,13 @@ enum EnwiroAdapterTmuxCli {
     GetActiveWorkspaceId,
     Activate(ActivateArgs),
     Run(RunArgs),
+    Listen(ListenArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ListenArgs {
+    #[arg(long, default_value = "5")]
+    pub debounce_secs: u64,
 }
 
 #[derive(clap::Args)]
@@ -129,6 +138,9 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        EnwiroAdapterTmuxCli::Listen(listen_args) => {
+            listen(listen_args.debounce_secs)?;
+        }
         EnwiroAdapterTmuxCli::Activate(activate_args) => {
             let name = &activate_args.name;
             validate_session_name(name)?;
@@ -149,6 +161,47 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn get_current_session() -> Option<String> {
+    let output = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#S"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if name.is_empty() { None } else { Some(name) }
+    } else {
+        None
+    }
+}
+
+fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn listen(debounce_secs: u64) -> anyhow::Result<()> {
+    let interval = Duration::from_secs(debounce_secs);
+    let mut last_session: Option<String> = None;
+
+    loop {
+        let current = get_current_session();
+        if current != last_session {
+            if let Some(ref name) = current {
+                let event = serde_json::json!({
+                    "type": "workspace_switch",
+                    "env_name": name,
+                    "timestamp": unix_timestamp(),
+                });
+                println!("{event}");
+            }
+            last_session = current;
+        }
+        std::thread::sleep(interval);
+    }
 }
 
 fn new_session_args(name: &str, shell: &str) -> Vec<String> {
