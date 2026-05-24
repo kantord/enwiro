@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.8...enwiro-adapter-tmux-v0.1.9) - 2026-05-24
+
+### Added
+
+- add `enw info --json` ([#509](https://github.com/kantord/enwiro/pull/509))
+
 ## [0.1.8](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.7...enwiro-adapter-tmux-v0.1.8) - 2026-05-23
 
 ### Other
