@@ -1,4 +1,5 @@
 use anyhow::{Context, anyhow};
+use enwiro_sdk::rpc::{EnvMarkParams, EnwiroRpcClient};
 
 use crate::{
     commands::adapter::{EnwiroAdapterExternal, EnwiroAdapterNone, EnwiroAdapterTrait},
@@ -89,6 +90,7 @@ impl<W: Write> CommandContext<W> {
         self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
         self.write_garnish_gear(&env_path, &flat_name, cfg);
+        mark_via_daemon(&flat_name, "active");
         Ok(env)
     }
 
@@ -226,6 +228,27 @@ impl<W: Write> CommandContext<W> {
     pub fn get_all_environments(&self) -> anyhow::Result<HashMap<String, Environment>> {
         Environment::get_all(&self.config.workspaces_directory)
     }
+}
+
+pub(crate) fn mark_via_daemon(env_name: &str, status: &str) {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let _ = rt.block_on(async {
+        let client = enwiro_sdk::rpc::connect().await.ok()?;
+        EnwiroRpcClient::env_mark(
+            &client,
+            EnvMarkParams {
+                env_name: env_name.to_string(),
+                status: status.to_string(),
+            },
+        )
+        .await
+        .ok()
+    });
 }
 
 /// Gate over `fire_autorun_on_cook` that respects `CookConfig::no_hooks`.
