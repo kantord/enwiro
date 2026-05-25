@@ -37,7 +37,6 @@ pub fn prep<W: Write>(context: &mut CommandContext<W>, args: PrepArgs) -> anyhow
     let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
     if env_dir.is_dir() && !env_dir.is_symlink() {
         crate::usage_stats::record_prep_per_env(&env_dir);
-        crate::context::mark_via_daemon(&env.name, "ready");
     }
 
     context
