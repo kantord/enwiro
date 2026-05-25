@@ -167,16 +167,27 @@ fn format_ls_text(rows: &[LsRow], term_width: Option<usize>) -> String {
         .map(|s| s.len())
         .max()
         .unwrap_or(0);
-    let name_width = rows.iter().map(|r| r.name.len()).max().unwrap_or(1);
 
     let has_status_col = status_width > 0;
     let has_any_desc = rows.iter().any(|r| !r.description.is_empty());
 
-    let fixed_width = cookbook_width
-        + if has_status_col { 2 + status_width } else { 0 }
-        + 2
-        + if has_any_desc { name_width + 2 } else { 0 };
+    let prefix_width = cookbook_width + if has_status_col { 2 + status_width } else { 0 } + 2;
 
+    let max_name = rows.iter().map(|r| r.name.len()).max().unwrap_or(1);
+    let name_width = if has_any_desc {
+        let mut lengths: Vec<usize> = rows.iter().map(|r| r.name.len()).collect();
+        lengths.sort();
+        let p90 = lengths[lengths.len() * 9 / 10];
+        let cap = match term_width {
+            Some(w) => (w.saturating_sub(prefix_width)) * 2 / 5,
+            None => p90 * 3 / 2,
+        };
+        max_name.min(cap.max(10))
+    } else {
+        max_name
+    };
+
+    let fixed_width = prefix_width + if has_any_desc { name_width + 2 } else { 0 };
     let desc_budget = term_width.map(|w| w.saturating_sub(fixed_width));
 
     let mut out = String::new();
@@ -198,7 +209,9 @@ fn format_ls_text(rows: &[LsRow], term_width: Option<usize>) -> String {
         };
 
         let trimmed_desc = row.description.trim();
-        let show_desc = !trimmed_desc.is_empty() && desc_budget.map_or(true, |b| b >= 4);
+        let name_too_long = row.name.len() > name_width && has_any_desc;
+        let show_desc =
+            !trimmed_desc.is_empty() && !name_too_long && desc_budget.is_none_or(|b| b >= 4);
         if show_desc {
             let display_desc = match desc_budget {
                 Some(budget) if budget < trimmed_desc.len() => {
@@ -215,9 +228,16 @@ fn format_ls_text(rows: &[LsRow], term_width: Option<usize>) -> String {
                 style(display_desc).dim(),
             ));
         } else {
+            let name_budget = term_width.map(|w| w.saturating_sub(prefix_width));
+            let display_name = match name_budget {
+                Some(budget) if row.name.len() > budget => {
+                    truncate_str(&row.name, budget, "\u{2026}")
+                }
+                _ => row.name.as_str().into(),
+            };
             out.push_str(&format!(
                 "{}{}{}  {}\n",
-                dimmed_cookbook, cookbook_pad, status_part, row.name,
+                dimmed_cookbook, cookbook_pad, status_part, display_name,
             ));
         }
     }
