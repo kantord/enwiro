@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.8...enwiro-daemon-v0.0.9) - 2026-05-25
+
+### Fixed
+
+- *(deps)* update rust crate optative-process-pool to 0.0.3 ([#532](https://github.com/kantord/enwiro/pull/532))
+- validate plugin names ([#529](https://github.com/kantord/enwiro/pull/529))
+
 ## [0.0.8](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.7...enwiro-daemon-v0.0.8) - 2026-05-25
 
 ### Added
