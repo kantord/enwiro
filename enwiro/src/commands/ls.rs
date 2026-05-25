@@ -1,7 +1,7 @@
 use anyhow::{Context, anyhow};
-use colored::Colorize;
+use console::{Term, style, truncate_str};
 use std::collections::{HashMap, HashSet};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::Path;
 
 use crate::context::CommandContext;
@@ -64,7 +64,7 @@ impl LsArgs {
 
 #[derive(serde::Serialize)]
 struct EnvEntry {
-    cookbook: Option<String>,
+    cookbook: String,
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -93,12 +93,12 @@ fn status_label(status: Option<&Status>) -> &'static str {
 
 fn colorize_status(label: &str) -> String {
     match label {
-        "active" => label.green().to_string(),
-        "waiting" => label.yellow().to_string(),
-        "ready" => label.cyan().to_string(),
-        "done" => label.dimmed().to_string(),
-        "evergreen" => label.blue().to_string(),
-        _ => label.dimmed().to_string(),
+        "active" => style(label).green().to_string(),
+        "waiting" => style(label).yellow().to_string(),
+        "ready" => style(label).cyan().to_string(),
+        "done" => style(label).dim().to_string(),
+        "evergreen" => style(label).blue().to_string(),
+        _ => style(label).dim().to_string(),
     }
 }
 
@@ -148,39 +148,97 @@ fn collect_env_names<W: Write>(context: &CommandContext<W>) -> anyhow::Result<Ha
         .collect())
 }
 
-fn format_env_text(entries: &[(String, Option<Status>, String)]) -> String {
-    let status_width = entries
+struct LsRow {
+    cookbook: String,
+    status: Option<String>,
+    name: String,
+    description: String,
+}
+
+fn format_ls_text(rows: &[LsRow], term_width: Option<usize>) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let cookbook_width = rows.iter().map(|r| r.cookbook.len()).max().unwrap_or(0);
+    let status_width = rows
         .iter()
-        .map(|(_, s, _)| status_label(s.as_ref()).len())
+        .filter_map(|r| r.status.as_deref())
+        .map(|s| s.len())
         .max()
-        .unwrap_or(1);
-    let has_any_desc = entries.iter().any(|(_, _, d)| !d.trim().is_empty());
-    let name_width = if has_any_desc {
-        entries.iter().map(|(n, _, _)| n.len()).max().unwrap_or(1)
-    } else {
-        0
-    };
+        .unwrap_or(0);
+    let name_width = rows.iter().map(|r| r.name.len()).max().unwrap_or(1);
+
+    let has_status_col = status_width > 0;
+    let has_any_desc = rows.iter().any(|r| !r.description.is_empty());
+
+    let fixed_width = cookbook_width
+        + if has_status_col { 2 + status_width } else { 0 }
+        + 2
+        + if has_any_desc { name_width + 2 } else { 0 };
+
+    let desc_budget = term_width.map(|w| w.saturating_sub(fixed_width));
 
     let mut out = String::new();
-    for (name, status, desc) in entries {
-        let label = status_label(status.as_ref());
-        let colored_label = colorize_status(label);
-        let padded_label = format!(
-            "{}{}",
-            colored_label,
-            " ".repeat(status_width.saturating_sub(label.len()))
-        );
-        let trimmed_desc = desc.trim();
-        if trimmed_desc.is_empty() {
-            out.push_str(&format!("{}: {}\n", padded_label, name));
+    for row in rows {
+        let dimmed_cookbook = style(&row.cookbook).dim().to_string();
+        let cookbook_pad = " ".repeat(cookbook_width.saturating_sub(row.cookbook.len()));
+
+        let status_part = if has_status_col {
+            match &row.status {
+                Some(s) => {
+                    let colored = colorize_status(s);
+                    let pad = " ".repeat(status_width.saturating_sub(s.len()));
+                    format!("  {}{}", colored, pad)
+                }
+                None => format!("  {}", " ".repeat(status_width)),
+            }
+        } else {
+            String::new()
+        };
+
+        let trimmed_desc = row.description.trim();
+        let show_desc = !trimmed_desc.is_empty() && desc_budget.map_or(true, |b| b >= 4);
+        if show_desc {
+            let display_desc = match desc_budget {
+                Some(budget) if budget < trimmed_desc.len() => {
+                    truncate_str(trimmed_desc, budget, "\u{2026}")
+                }
+                _ => trimmed_desc.into(),
+            };
+            out.push_str(&format!(
+                "{}{}{}  {:<name_width$}  {}\n",
+                dimmed_cookbook,
+                cookbook_pad,
+                status_part,
+                row.name,
+                style(display_desc).dim(),
+            ));
         } else {
             out.push_str(&format!(
-                "{}: {:<name_width$}  {}\n",
-                padded_label, name, trimmed_desc,
+                "{}{}{}  {}\n",
+                dimmed_cookbook, cookbook_pad, status_part, row.name,
             ));
         }
     }
     out
+}
+
+#[cfg(test)]
+fn format_env_text(
+    entries: &[(String, Option<Status>, String)],
+    term_width: Option<usize>,
+) -> String {
+    let rows: Vec<LsRow> = entries
+        .iter()
+        .map(|(name, status, desc)| LsRow {
+            cookbook: String::new(),
+            status: Some(status_label(status.as_ref()).to_string()),
+            name: name.clone(),
+            description: desc.clone(),
+        })
+        .collect();
+    format_ls_text(&rows, term_width)
 }
 
 fn write_envs<W: Write>(
@@ -239,7 +297,7 @@ fn write_envs<W: Write>(
             let slot = slot_map.get(&env.name).copied().unwrap_or(0.0);
             let meta = meta_map.get(&env.name);
             let entry = EnvEntry {
-                cookbook: meta.and_then(|m| m.cookbook.clone()),
+                cookbook: meta.and_then(|m| m.cookbook.clone()).unwrap_or_default(),
                 name: env.name.clone(),
                 description: meta.and_then(|m| m.description.clone()),
                 status: meta.and_then(|m| m.status.clone()),
@@ -249,11 +307,14 @@ fn write_envs<W: Write>(
             writeln!(context.writer, "{}", line).context("Could not write to output")?;
         }
     } else {
-        if std::io::stdout().is_terminal() {
-            colored::control::set_override(true);
-        }
+        let term = Term::stdout();
+        let term_width = if term.is_term() {
+            Some(term.size().1 as usize)
+        } else {
+            None
+        };
 
-        let entries: Vec<_> = envs
+        let rows: Vec<LsRow> = envs
             .iter()
             .map(|env| {
                 let meta = meta_map.get(&env.name);
@@ -262,11 +323,19 @@ fn write_envs<W: Write>(
                     .and_then(|m| m.description.as_deref())
                     .unwrap_or("")
                     .to_string();
-                (env.name.clone(), status.cloned(), desc)
+                LsRow {
+                    cookbook: meta
+                        .and_then(|m| m.cookbook.as_deref())
+                        .unwrap_or("")
+                        .to_string(),
+                    status: Some(status_label(status).to_string()),
+                    name: env.name.clone(),
+                    description: desc,
+                }
             })
             .collect();
 
-        let text = format_env_text(&entries);
+        let text = format_ls_text(&rows, term_width);
         context
             .writer
             .write_all(text.as_bytes())
@@ -316,32 +385,33 @@ fn write_recipes<W: Write>(
             writeln!(context.writer, "{}", line).context("Could not write recipe to output")?;
         }
     } else {
-        let cookbook_width = filtered.iter().map(|e| e.cookbook.len()).max().unwrap_or(1);
-        let has_any_desc = filtered.iter().any(|e| e.description.is_some());
-        let name_width = if has_any_desc {
-            filtered.iter().map(|e| e.name.len()).max().unwrap_or(1)
+        let term = Term::stdout();
+        let term_width = if term.is_term() {
+            Some(term.size().1 as usize)
         } else {
-            0
+            None
         };
 
-        for entry in &filtered {
-            let desc = entry.description.as_deref().unwrap_or("").trim();
-            if desc.is_empty() {
-                writeln!(
-                    context.writer,
-                    "{:<cookbook_width$}: {}",
-                    entry.cookbook, entry.name,
-                )
-                .context("Could not write recipe to output")?;
-            } else {
-                writeln!(
-                    context.writer,
-                    "{:<cookbook_width$}: {:<name_width$}  {}",
-                    entry.cookbook, entry.name, desc,
-                )
-                .context("Could not write recipe to output")?;
-            }
-        }
+        let rows: Vec<LsRow> = filtered
+            .iter()
+            .map(|entry| LsRow {
+                cookbook: entry.cookbook.clone(),
+                status: None,
+                name: entry.name.clone(),
+                description: entry
+                    .description
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string(),
+            })
+            .collect();
+
+        let text = format_ls_text(&rows, term_width);
+        context
+            .writer
+            .write_all(text.as_bytes())
+            .context("Could not write recipe to output")?;
     }
 
     Ok(())
@@ -357,17 +427,8 @@ mod tests {
     };
     use enwiro_daemon::meta::UserIntentSignals;
 
-    fn env_text_lines(output: &str) -> Vec<&str> {
-        output
-            .lines()
-            .filter(|l| {
-                l.contains(": ")
-                    && !l.starts_with("git:")
-                    && !l.starts_with("npm:")
-                    && !l.starts_with("github:")
-                    && !l.starts_with("chezmoi:")
-            })
-            .collect()
+    fn non_empty_lines(output: &str) -> Vec<&str> {
+        output.lines().filter(|l| !l.trim().is_empty()).collect()
     }
 
     #[rstest]
@@ -382,8 +443,8 @@ mod tests {
 
         let output = context_object.get_output();
         assert!(output.contains("my-env"));
-        assert!(output.contains("git: repo-a"));
-        assert!(output.contains("git: repo-b"));
+        assert!(output.contains("repo-a"));
+        assert!(output.contains("repo-b"));
     }
 
     #[rstest]
@@ -398,12 +459,15 @@ mod tests {
 
         let output = context_object.get_output();
         assert!(output.contains("repo-a"), "Environment should be listed");
-        assert!(
-            !output.contains("git: repo-a"),
-            "Recipe matching an existing environment should be excluded"
+        let repo_a_lines: Vec<&str> = output.lines().filter(|l| l.contains("repo-a")).collect();
+        assert_eq!(
+            repo_a_lines.len(),
+            1,
+            "repo-a should appear exactly once (as env, not duplicated as recipe): {:?}",
+            repo_a_lines
         );
         assert!(
-            output.contains("git: repo-b"),
+            output.contains("repo-b"),
             "Recipe without a matching environment should still be listed"
         );
     }
@@ -422,9 +486,12 @@ mod tests {
         ls(&mut context_object, Scope::All, false, None).unwrap();
 
         let output = context_object.get_output();
-        assert!(
-            !output.contains("github: repo#42"),
-            "Recipe with description matching an existing environment should be excluded"
+        let repo42_lines: Vec<&str> = output.lines().filter(|l| l.contains("repo#42")).collect();
+        assert_eq!(
+            repo42_lines.len(),
+            1,
+            "repo#42 should appear once (as env, not duplicated as recipe): {:?}",
+            repo42_lines
         );
         assert!(
             output.contains("repo#99") && output.contains("Add feature"),
@@ -446,7 +513,7 @@ mod tests {
         let output = context_object.get_output();
         assert!(output.contains("env-a"));
         assert!(output.contains("env-b"));
-        assert!(!output.contains("git:"));
+        assert!(!output.contains("git "));
     }
 
     #[rstest]
@@ -459,7 +526,7 @@ mod tests {
         ls(&mut context_object, Scope::All, false, None).unwrap();
 
         let output = context_object.get_output();
-        assert!(output.contains("git: some-repo"));
+        assert!(output.contains("some-repo"));
     }
 
     #[rstest]
@@ -476,9 +543,9 @@ mod tests {
         ls(&mut context_object, Scope::All, false, None).unwrap();
 
         let output = context_object.get_output();
-        assert!(output.contains("git: repo-a"));
-        assert!(output.contains("npm: pkg-x"));
-        assert!(output.contains("npm: pkg-y"));
+        assert!(output.contains("repo-a"));
+        assert!(output.contains("pkg-x"));
+        assert!(output.contains("pkg-y"));
     }
 
     #[rstest]
@@ -501,7 +568,7 @@ mod tests {
 
         let output = context_object.get_output();
         assert!(
-            output.contains("git: cached-repo"),
+            output.contains("cached-repo"),
             "Should read from cache, got: {}",
             output
         );
@@ -548,10 +615,10 @@ mod tests {
         ls(&mut context_object, Scope::All, false, None).unwrap();
 
         let output = context_object.get_output();
-        let env_lines = env_text_lines(&output);
-        assert!(env_lines[0].contains("often-used"));
-        assert!(env_lines[1].contains("rarely-used"));
-        assert!(env_lines[2].contains("never-used"));
+        let lines = non_empty_lines(&output);
+        assert!(lines[0].contains("often-used"));
+        assert!(lines[1].contains("rarely-used"));
+        assert!(lines[2].contains("never-used"));
     }
 
     #[rstest]
@@ -821,7 +888,7 @@ mod tests {
 
         let output = context_object.get_output();
         assert!(output.contains("my-env"));
-        assert!(!output.contains("git: repo-a"));
+        assert!(!output.contains("repo-a"));
     }
 
     #[rstest]
@@ -835,7 +902,7 @@ mod tests {
         ls(&mut context_object, Scope::Recipes, false, None).unwrap();
 
         let output = context_object.get_output();
-        assert!(output.contains("git: repo-a"));
+        assert!(output.contains("repo-a"));
     }
 
     #[rstest]
@@ -922,8 +989,8 @@ mod prop_tests {
         fn text_output_no_trailing_whitespace(
             entries in proptest::collection::vec(arb_env_entry(), 0..20)
         ) {
-            colored::control::set_override(false);
-            let text = format_env_text(&entries);
+            console::set_colors_enabled(false);
+            let text = format_env_text(&entries, None);
             for line in text.lines() {
                 prop_assert!(
                     !line.ends_with(' '),
@@ -936,8 +1003,8 @@ mod prop_tests {
         fn text_output_line_count_matches_entries(
             entries in proptest::collection::vec(arb_env_entry(), 0..20)
         ) {
-            colored::control::set_override(false);
-            let text = format_env_text(&entries);
+            console::set_colors_enabled(false);
+            let text = format_env_text(&entries, None);
             let line_count = text.lines().count();
             prop_assert_eq!(line_count, entries.len());
         }
@@ -946,8 +1013,8 @@ mod prop_tests {
         fn text_output_every_name_appears(
             entries in proptest::collection::vec(arb_env_entry(), 0..20)
         ) {
-            colored::control::set_override(false);
-            let text = format_env_text(&entries);
+            console::set_colors_enabled(false);
+            let text = format_env_text(&entries, None);
             for (name, _, _) in &entries {
                 prop_assert!(
                     text.contains(name.as_str()),
@@ -960,8 +1027,8 @@ mod prop_tests {
         fn text_output_separator_aligned_no_color(
             entries in proptest::collection::vec(arb_env_entry(), 1..20)
         ) {
-            colored::control::set_override(false);
-            let text = format_env_text(&entries);
+            console::set_colors_enabled(false);
+            let text = format_env_text(&entries, None);
             let stripped = strip_ansi(&text);
             let positions: Vec<usize> = stripped
                 .lines()
@@ -982,8 +1049,8 @@ mod prop_tests {
         fn text_output_separator_aligned_with_color(
             entries in proptest::collection::vec(arb_env_entry(), 1..20)
         ) {
-            colored::control::set_override(true);
-            let text = format_env_text(&entries);
+            console::set_colors_enabled(true);
+            let text = format_env_text(&entries, None);
             let stripped = strip_ansi(&text);
             let positions: Vec<usize> = stripped
                 .lines()
@@ -998,28 +1065,29 @@ mod prop_tests {
                     );
                 }
             }
-            colored::control::set_override(false);
+            console::set_colors_enabled(false);
         }
 
         #[test]
         fn text_output_lines_with_desc_are_longer_than_without(
             entries in proptest::collection::vec(arb_env_entry(), 1..20)
         ) {
-            colored::control::set_override(false);
-            let text = format_env_text(&entries);
+            console::set_colors_enabled(false);
+            let text = format_env_text(&entries, None);
             let lines: Vec<&str> = text.lines().collect();
-            let no_desc_max_len = lines.iter()
+            let no_desc_max_width = lines.iter()
                 .zip(entries.iter())
                 .filter(|(_, (_, _, desc))| desc.trim().is_empty())
-                .map(|(line, _)| line.len())
+                .map(|(line, _)| console::measure_text_width(line))
                 .max();
-            if let Some(max_no_desc) = no_desc_max_len {
+            if let Some(max_no_desc) = no_desc_max_width {
                 for (line, (_, _, desc)) in lines.iter().zip(entries.iter()) {
                     if !desc.trim().is_empty() {
+                        let w = console::measure_text_width(line);
                         prop_assert!(
-                            line.len() > max_no_desc,
-                            "line with desc {:?} should be longer than lines without desc (len {} <= {})\noutput:\n{}",
-                            desc.trim(), line.len(), max_no_desc, text
+                            w > max_no_desc,
+                            "line with desc {:?} should be wider than lines without desc ({} <= {})\noutput:\n{}",
+                            desc.trim(), w, max_no_desc, text
                         );
                     }
                 }
@@ -1029,8 +1097,8 @@ mod prop_tests {
         fn text_output_lines_with_desc_end_with_desc(
             entries in proptest::collection::vec(arb_env_entry(), 0..20)
         ) {
-            colored::control::set_override(false);
-            let text = format_env_text(&entries);
+            console::set_colors_enabled(false);
+            let text = format_env_text(&entries, None);
             for (line, (_, _, desc)) in text.lines().zip(entries.iter()) {
                 let trimmed = desc.trim();
                 if !trimmed.is_empty() {
@@ -1044,12 +1112,32 @@ mod prop_tests {
         }
 
         #[test]
+        fn text_output_desc_lines_respect_terminal_width(
+            entries in proptest::collection::vec(arb_env_entry(), 1..20),
+            term_width in 40usize..200,
+        ) {
+            console::set_colors_enabled(false);
+            let text = format_env_text(&entries, Some(term_width));
+            for (i, (line, (_, _, desc))) in text.lines().zip(entries.iter()).enumerate() {
+                let trimmed = desc.trim();
+                if !trimmed.is_empty() && line.contains(trimmed) {
+                    let display_width = console::measure_text_width(line);
+                    prop_assert!(
+                        display_width <= term_width,
+                        "line {} with visible desc is {} display cols but terminal is {} wide: {:?}",
+                        i, display_width, term_width, line
+                    );
+                }
+            }
+        }
+
+        #[test]
         fn json_output_always_valid(
             entries in proptest::collection::vec(arb_env_entry(), 0..20)
         ) {
             for (name, status, desc) in &entries {
                 let entry = EnvEntry {
-                    cookbook: Some("test".into()),
+                    cookbook: "test".into(),
                     name: name.clone(),
                     description: if desc.is_empty() { None } else { Some(desc.clone()) },
                     status: status.clone(),
