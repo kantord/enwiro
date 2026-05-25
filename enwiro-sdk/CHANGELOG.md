@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.5.0...enwiro-sdk-v0.5.1) - 2026-05-25
+
+### Fixed
+
+- validate plugin names ([#529](https://github.com/kantord/enwiro/pull/529))
+
 ## [0.5.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.4.2...enwiro-sdk-v0.5.0) - 2026-05-25
 
 ### Added
