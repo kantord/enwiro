@@ -36,7 +36,13 @@ async fn spawn_server(tempdir: &TempDir) -> std::path::PathBuf {
     let socket_path_clone = socket_path.clone();
     tokio::spawn(async move {
         let _ = ready_tx.send(());
-        let _ = rpc::serve_listener(listener, socket_path_clone, active_env).await;
+        let _ = rpc::serve_listener(
+            listener,
+            socket_path_clone,
+            active_env,
+            std::path::PathBuf::from("/tmp"),
+        )
+        .await;
     });
     ready_rx.await.expect("rpc server ready signal");
     socket_path
@@ -138,7 +144,13 @@ async fn env_current_returns_state_when_set() {
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         let _ = ready_tx.send(());
-        let _ = rpc::serve_listener(listener, socket_path_clone, active_env_clone).await;
+        let _ = rpc::serve_listener(
+            listener,
+            socket_path_clone,
+            active_env_clone,
+            std::path::PathBuf::from("/tmp"),
+        )
+        .await;
     });
     ready_rx.await.unwrap();
 

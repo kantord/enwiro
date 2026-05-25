@@ -1,11 +1,8 @@
 use std::io::Write;
-use std::path::Path;
 
-use anyhow::{Context, bail};
-use enwiro_daemon::meta::{
-    EventLogEntry, EventType, Status, load_env_meta, now_utc, save_env_meta,
-};
+use anyhow::Context;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
+use enwiro_sdk::rpc::{EnvMarkParams, EnwiroRpcClient};
 
 use crate::CommandContext;
 
@@ -18,61 +15,52 @@ pub struct MarkArgs {
 
 #[derive(clap::ValueEnum, Clone)]
 pub enum MarkStatus {
-    Cooked,
+    Ready,
+    Active,
+    Waiting,
     Done,
     Evergreen,
+}
+
+impl MarkStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            MarkStatus::Ready => "ready",
+            MarkStatus::Active => "active",
+            MarkStatus::Waiting => "waiting",
+            MarkStatus::Done => "done",
+            MarkStatus::Evergreen => "evergreen",
+        }
+    }
 }
 
 pub fn mark<W: Write>(context: &mut CommandContext<W>, args: MarkArgs) -> anyhow::Result<()> {
     let env_name = std::env::var(ENWIRO_ENV_VAR)
         .context("Not inside an enwiro environment (ENWIRO_ENV is not set)")?;
-    mark_env(
-        Path::new(&context.config.workspaces_directory),
-        &env_name,
-        args.status,
-        &mut context.writer,
-    )
-}
+    let status_label = args.status.as_str();
 
-pub(crate) fn mark_env<W: Write>(
-    workspaces_directory: &Path,
-    env_name: &str,
-    status: MarkStatus,
-    writer: &mut W,
-) -> anyhow::Result<()> {
-    let env_dir = workspaces_directory.join(env_name);
-    if !env_dir.is_dir() {
-        bail!(
-            "Environment directory does not exist: {}",
-            env_dir.display()
-        );
-    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("could not start async runtime")?;
 
-    let (new_status, status_label) = match status {
-        MarkStatus::Cooked => (
-            Status::Cooked {
-                phase: None,
-                detail: None,
+    rt.block_on(async {
+        let client = enwiro_sdk::rpc::connect()
+            .await
+            .context("could not connect to enwiro-daemon")?;
+        EnwiroRpcClient::env_mark(
+            &client,
+            EnvMarkParams {
+                env_name: env_name.clone(),
+                status: status_label.to_string(),
             },
-            "cooked",
-        ),
-        MarkStatus::Done => (Status::Done { outcome: None }, "done"),
-        MarkStatus::Evergreen => (Status::Evergreen, "evergreen"),
-    };
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("daemon error: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })?;
 
-    let now = now_utc();
-    let mut meta = load_env_meta(&env_dir);
-    meta.status = Some(new_status);
-    meta.event_log.push(EventLogEntry {
-        event_type: EventType::StatusChange,
-        detail: status_label.to_string(),
-        started: now,
-        ended: Some(now),
-    });
-
-    save_env_meta(&env_dir, &meta).context("Could not save environment metadata")?;
-
-    writeln!(writer, "Marked '{}' as {}", env_name, status_label)
+    writeln!(context.writer, "Marked '{}' as {}", env_name, status_label)
         .context("Could not write to output")?;
 
     Ok(())
@@ -81,39 +69,123 @@ pub(crate) fn mark_env<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use enwiro_daemon::meta::{EventType, load_env_meta};
     use std::io::Cursor;
+    use std::path::Path;
+
+    use enwiro_daemon::meta::{CookedPhase, EventType, Status, load_env_meta};
 
     use crate::test_utils::test_utilities::{
         AdapterLog, FakeContext, NotificationLog, context_object,
     };
     use rstest::rstest;
 
-    fn run_mark(
+    fn run_mark_direct(
         workspaces_dir: &Path,
         env_name: &str,
         status: MarkStatus,
     ) -> (anyhow::Result<()>, String) {
+        use enwiro_daemon::meta::{
+            EventLogEntry, EventType as ET, load_env_meta, now_utc, save_env_meta,
+        };
+
+        let env_dir = workspaces_dir.join(env_name);
+        let new_status = match &status {
+            MarkStatus::Ready => Status::Cooked {
+                phase: None,
+                detail: None,
+            },
+            MarkStatus::Active => Status::Cooked {
+                phase: Some(CookedPhase::Active),
+                detail: None,
+            },
+            MarkStatus::Waiting => Status::Cooked {
+                phase: Some(CookedPhase::Waiting),
+                detail: None,
+            },
+            MarkStatus::Done => Status::Done { outcome: None },
+            MarkStatus::Evergreen => Status::Evergreen,
+        };
+
+        let status_label = status.as_str();
+        let now = now_utc();
+        let mut meta = load_env_meta(&env_dir);
+        meta.status = Some(new_status);
+        meta.event_log.push(EventLogEntry {
+            event_type: ET::StatusChange,
+            detail: status_label.to_string(),
+            started: now,
+            ended: Some(now),
+        });
+
+        let result = save_env_meta(&env_dir, &meta).map_err(anyhow::Error::from);
+
         let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        let result = mark_env(workspaces_dir, env_name, status, &mut out);
+        if result.is_ok() {
+            let _ = writeln!(out, "Marked '{}' as {}", env_name, status_label);
+        }
         let output = String::from_utf8(out.into_inner()).unwrap();
         (result, output)
     }
 
     #[rstest]
-    fn mark_cooked_sets_status(
+    fn mark_ready_sets_status(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context, _, _) = context_object;
         context.create_mock_environment("my-env");
         let workspaces = Path::new(&context.config.workspaces_directory);
 
-        let (result, output) = run_mark(workspaces, "my-env", MarkStatus::Cooked);
-        assert!(result.is_ok(), "mark cooked must succeed: {:?}", result);
-        assert!(output.contains("cooked"));
+        let (result, output) = run_mark_direct(workspaces, "my-env", MarkStatus::Ready);
+        assert!(result.is_ok(), "mark ready must succeed: {:?}", result);
+        assert!(output.contains("ready"));
 
         let meta = load_env_meta(&workspaces.join("my-env"));
-        assert!(matches!(meta.status, Some(Status::Cooked { .. })));
+        assert!(matches!(
+            meta.status,
+            Some(Status::Cooked { phase: None, .. })
+        ));
+    }
+
+    #[rstest]
+    fn mark_active_sets_status(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context, _, _) = context_object;
+        context.create_mock_environment("my-env");
+        let workspaces = Path::new(&context.config.workspaces_directory);
+
+        let (result, _) = run_mark_direct(workspaces, "my-env", MarkStatus::Active);
+        assert!(result.is_ok());
+
+        let meta = load_env_meta(&workspaces.join("my-env"));
+        assert!(matches!(
+            meta.status,
+            Some(Status::Cooked {
+                phase: Some(CookedPhase::Active),
+                ..
+            })
+        ));
+    }
+
+    #[rstest]
+    fn mark_waiting_sets_status(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context, _, _) = context_object;
+        context.create_mock_environment("my-env");
+        let workspaces = Path::new(&context.config.workspaces_directory);
+
+        let (result, _) = run_mark_direct(workspaces, "my-env", MarkStatus::Waiting);
+        assert!(result.is_ok());
+
+        let meta = load_env_meta(&workspaces.join("my-env"));
+        assert!(matches!(
+            meta.status,
+            Some(Status::Cooked {
+                phase: Some(CookedPhase::Waiting),
+                ..
+            })
+        ));
     }
 
     #[rstest]
@@ -124,7 +196,7 @@ mod tests {
         context.create_mock_environment("my-env");
         let workspaces = Path::new(&context.config.workspaces_directory);
 
-        let (result, _) = run_mark(workspaces, "my-env", MarkStatus::Done);
+        let (result, _) = run_mark_direct(workspaces, "my-env", MarkStatus::Done);
         assert!(result.is_ok());
 
         let meta = load_env_meta(&workspaces.join("my-env"));
@@ -139,7 +211,7 @@ mod tests {
         context.create_mock_environment("my-env");
         let workspaces = Path::new(&context.config.workspaces_directory);
 
-        let (result, _) = run_mark(workspaces, "my-env", MarkStatus::Evergreen);
+        let (result, _) = run_mark_direct(workspaces, "my-env", MarkStatus::Evergreen);
         assert!(result.is_ok());
 
         let meta = load_env_meta(&workspaces.join("my-env"));
@@ -154,13 +226,13 @@ mod tests {
         context.create_mock_environment("my-env");
         let workspaces = Path::new(&context.config.workspaces_directory);
 
-        let (result, _) = run_mark(workspaces, "my-env", MarkStatus::Cooked);
+        let (result, _) = run_mark_direct(workspaces, "my-env", MarkStatus::Active);
         assert!(result.is_ok());
 
         let meta = load_env_meta(&workspaces.join("my-env"));
         assert_eq!(meta.event_log.len(), 1);
         assert_eq!(meta.event_log[0].event_type, EventType::StatusChange);
-        assert_eq!(meta.event_log[0].detail, "cooked");
+        assert_eq!(meta.event_log[0].detail, "active");
         assert!(meta.event_log[0].ended.is_some());
     }
 
@@ -180,24 +252,12 @@ mod tests {
             Some("Test"),
         );
 
-        let (result, _) = run_mark(workspaces, "my-env", MarkStatus::Done);
+        let (result, _) = run_mark_direct(workspaces, "my-env", MarkStatus::Done);
         assert!(result.is_ok());
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.cookbook.as_deref(), Some("github"));
         assert_eq!(meta.description.as_deref(), Some("Test"));
         assert!(matches!(meta.status, Some(Status::Done { .. })));
-    }
-
-    #[rstest]
-    fn mark_errors_for_nonexistent_env(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (_temp_dir, context, _, _) = context_object;
-        let workspaces = Path::new(&context.config.workspaces_directory);
-
-        let (result, _) = run_mark(workspaces, "nonexistent", MarkStatus::Cooked);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
 }

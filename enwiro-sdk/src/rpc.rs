@@ -79,6 +79,19 @@ pub struct EnvCurrentResult {
     pub timestamp: Option<String>,
 }
 
+/// Params for `env.mark`: set the status of an environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvMarkParams {
+    pub env_name: String,
+    pub status: String,
+}
+
+/// Result shape for `env.mark`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvMarkResult {
+    pub ok: bool,
+}
+
 /// Single source of truth for the client↔daemon RPC surface.
 #[jsonrpsee::proc_macros::rpc(server, client)]
 pub trait EnwiroRpc {
@@ -90,6 +103,12 @@ pub trait EnwiroRpc {
 
     #[method(name = "env.current")]
     async fn env_current(&self) -> Result<EnvCurrentResult, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "env.mark")]
+    async fn env_mark(
+        &self,
+        params: EnvMarkParams,
+    ) -> Result<EnvMarkResult, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 pub mod client;
