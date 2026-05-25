@@ -98,7 +98,8 @@ fn main() -> anyhow::Result<()> {
         EnwiroCli::Info(args) => env_info(&mut context_object, args),
         EnwiroCli::Ls(args) => {
             let scope = args.scope();
-            ls(&mut context_object, scope, args.json)
+            let status_filter = args.status.clone();
+            ls(&mut context_object, scope, args.json, status_filter)
         }
         EnwiroCli::Mark(args) => mark(&mut context_object, args),
         EnwiroCli::Prep(args) => prep(&mut context_object, args),
