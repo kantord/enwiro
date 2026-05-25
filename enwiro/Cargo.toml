@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
+colored = "3"
 enwiro-daemon.workspace = true
 enwiro-sdk.workspace = true
 home.workspace = true
@@ -30,6 +31,7 @@ dialoguer = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 assertables = "10.0.0"
+proptest = "1.7"
 enwiro-sdk = { workspace = true, features = ["test-helpers"] }
 rstest = "0.26.0"
 tempfile = "3.25.0"
