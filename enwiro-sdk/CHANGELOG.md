@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.4.2...enwiro-sdk-v0.5.0) - 2026-05-25
+
+### Added
+
+- add `enw mark` command for manual status tracking ([#515](https://github.com/kantord/enwiro/pull/515))
+
 ## [0.4.2](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.4.1...enwiro-sdk-v0.4.2) - 2026-05-24
 
 ### Added
