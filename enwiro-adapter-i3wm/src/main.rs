@@ -1,7 +1,7 @@
 use anyhow::Context;
 use clap::Parser;
 use i3ipc_types::event::{Event, Subscribe};
-use i3ipc_types::reply::Workspace;
+use i3ipc_types::reply::{Node, Workspace};
 use tokio_i3ipc::I3;
 use tokio_stream::StreamExt;
 
@@ -451,6 +451,26 @@ fn should_rebalance(
     }
 }
 
+fn workspace_is_empty(tree: &Node, ws_name: &str) -> bool {
+    fn find_workspace<'a>(node: &'a Node, name: &str) -> Option<&'a Node> {
+        if node.node_type == i3ipc_types::reply::NodeType::Workspace
+            && node.name.as_deref() == Some(name)
+        {
+            return Some(node);
+        }
+        for child in &node.nodes {
+            if let Some(found) = find_workspace(child, name) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    match find_workspace(tree, ws_name) {
+        Some(ws) => ws.nodes.is_empty() && ws.floating_nodes.is_empty(),
+        None => true,
+    }
+}
+
 fn extract_environment_name(workspace: &Workspace) -> String {
     workspace
         .name
@@ -516,8 +536,27 @@ async fn main() -> anyhow::Result<()> {
                 };
                 run_i3_command(&mut i3, &render(&op)).await?;
             } else {
-                let (existing, unmanaged) =
+                let (mut existing, mut unmanaged) =
                     snapshot_for_rebalance(&workspaces, &payload.managed_envs);
+
+                // Exclude the focused empty workspace: i3 reaps empty
+                // workspaces when focus moves away, so the spawn Focus at
+                // the end of compile will destroy it. Including it would
+                // produce a plan that references a workspace that no
+                // longer exists after the Focus fires.
+                if let Some(focused_ws) = workspaces.iter().find(|ws| ws.focused) {
+                    let focused_env = extract_environment_name(focused_ws);
+                    if let Some(pos) = existing.iter().position(|e| e.name.0 == focused_env) {
+                        let tree = i3.get_tree().await?;
+                        if workspace_is_empty(&tree, &focused_ws.name) {
+                            let removed = existing.remove(pos);
+                            unmanaged.push(removed.slot);
+                            tracing::debug!(env = %focused_env, slot = removed.slot.0,
+                                "Excluding empty focused workspace from rebalance");
+                        }
+                    }
+                }
+
                 let free_num = lowest_unused_slot(&workspaces);
                 let score = payload
                     .managed_envs
