@@ -401,7 +401,7 @@ mod tests {
     /// leaf detail (`"leaf git2 error: reference is locked"`) is distinct from the
     /// outer wrapper. Used to verify that error notifications surface the full chain.
     struct ChainedErrorCookbook {
-        cookbook_name: String,
+        cookbook_name: enwiro_sdk::plugin::PluginName,
         recipe_name: String,
     }
 
@@ -416,7 +416,7 @@ mod tests {
         }
 
         fn name(&self) -> &str {
-            &self.cookbook_name
+            self.cookbook_name.as_str()
         }
     }
 
@@ -431,7 +431,7 @@ mod tests {
 
         ctx.write_cache_entry("git", "my-project");
         ctx.cookbooks = vec![Box::new(ChainedErrorCookbook {
-            cookbook_name: "git".to_string(),
+            cookbook_name: enwiro_sdk::plugin::PluginName::new("git").unwrap(),
             recipe_name: "my-project".to_string(),
         })];
 

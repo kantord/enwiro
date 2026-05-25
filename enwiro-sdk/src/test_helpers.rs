@@ -7,9 +7,10 @@ use std::collections::HashMap;
 
 use crate::client::CookbookTrait;
 use crate::cookbook::Recipe;
+use crate::plugin::PluginName;
 
 pub struct FakeCookbook {
-    pub cookbook_name: String,
+    pub cookbook_name: PluginName,
     pub recipes: Vec<Recipe>,
     pub cook_results: HashMap<String, String>,
     pub priority: u32,
@@ -19,7 +20,7 @@ pub struct FakeCookbook {
 impl FakeCookbook {
     pub fn new(name: &str, recipes: Vec<&str>, cook_results: Vec<(&str, &str)>) -> Self {
         Self {
-            cookbook_name: name.to_string(),
+            cookbook_name: PluginName::new(name).unwrap(),
             recipes: recipes.into_iter().map(Recipe::new).collect(),
             cook_results: cook_results
                 .into_iter()
@@ -41,7 +42,7 @@ impl FakeCookbook {
         cook_results: Vec<(&str, &str)>,
     ) -> Self {
         Self {
-            cookbook_name: name.to_string(),
+            cookbook_name: PluginName::new(name).unwrap(),
             recipes: recipes
                 .into_iter()
                 .map(|(n, d)| match d {
@@ -84,7 +85,7 @@ impl CookbookTrait for FakeCookbook {
     }
 
     fn name(&self) -> &str {
-        &self.cookbook_name
+        self.cookbook_name.as_str()
     }
 
     fn priority(&self) -> u32 {
@@ -97,7 +98,7 @@ impl CookbookTrait for FakeCookbook {
 }
 
 pub struct FailingCookbook {
-    pub cookbook_name: String,
+    pub cookbook_name: PluginName,
 }
 
 impl CookbookTrait for FailingCookbook {
@@ -110,6 +111,6 @@ impl CookbookTrait for FailingCookbook {
     }
 
     fn name(&self) -> &str {
-        &self.cookbook_name
+        self.cookbook_name.as_str()
     }
 }

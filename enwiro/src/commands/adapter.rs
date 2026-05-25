@@ -114,7 +114,7 @@ impl EnwiroAdapterExternal {
         let plugins = get_plugins(PluginKind::Adapter);
         let plugin = plugins
             .into_iter()
-            .find(|p| p.name == adapter_name)
+            .find(|p| p.name.as_str() == adapter_name)
             .context(format!("Adapter '{}' not found", adapter_name))?;
 
         Ok(Self {

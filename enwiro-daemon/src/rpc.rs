@@ -101,7 +101,7 @@ impl EnwiroRpcServer for DaemonRpc {
         // for `enwiro-cookbook-*` executables (existing behaviour).
         let plugin = enwiro_sdk::plugin::get_plugins(enwiro_sdk::plugin::PluginKind::Cookbook)
             .into_iter()
-            .find(|p| p.name == params.cookbook)
+            .find(|p| p.name.as_str() == params.cookbook)
             .ok_or_else(|| app_err(format!("cookbook '{}' not found", params.cookbook)))?;
 
         tracing::debug!(executable = %plugin.executable, "spawning cookbook subprocess");

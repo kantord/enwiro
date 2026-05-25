@@ -258,7 +258,7 @@ impl RpcCookbookClient {
     /// Connects fresh on every call — cheap for our usage pattern (one or
     /// two cooks per `enw` invocation), and avoids long-held connections.
     fn invoke(&self, op: &str, args: Vec<String>) -> anyhow::Result<String> {
-        let cookbook = self.plugin.name.clone();
+        let cookbook = self.plugin.name.to_string();
         let op = op.to_string();
         let payload = self.config.clone();
         let call_chain = current_call_chain();
@@ -297,7 +297,7 @@ fn current_call_chain() -> Vec<String> {
 
 impl CookbookTrait for RpcCookbookClient {
     fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>> {
-        let cookbook = self.plugin.name.as_str();
+        let cookbook: &str = self.plugin.name.as_str();
         tracing::debug!(%cookbook, "Listing recipes via daemon RPC");
         let stdout = self
             .invoke("list-recipes", vec![])
@@ -327,7 +327,7 @@ impl CookbookTrait for RpcCookbookClient {
     }
 
     fn name(&self) -> &str {
-        &self.plugin.name
+        self.plugin.name.as_str()
     }
 
     fn priority(&self) -> u32 {
@@ -401,7 +401,7 @@ impl CookbookTrait for CookbookClient {
     }
 
     fn name(&self) -> &str {
-        &self.plugin.name
+        self.plugin.name.as_str()
     }
 
     fn priority(&self) -> u32 {
@@ -443,7 +443,7 @@ mod tests {
 
     fn mock_plugin(name: &str) -> Plugin {
         Plugin {
-            name: name.to_string(),
+            name: crate::plugin::PluginName::new(name).unwrap(),
             kind: PluginKind::Cookbook,
             executable: String::new(),
         }
@@ -518,7 +518,7 @@ echo "$payload"
         );
 
         let plugin = Plugin {
-            name: "fake".to_string(),
+            name: crate::plugin::PluginName::new("fake").unwrap(),
             kind: PluginKind::Cookbook,
             executable: script.to_string_lossy().into_owned(),
         };
@@ -591,7 +591,7 @@ echo "$payload"
             project_overridable: vec!["repo_globs".to_string()],
         };
         let plugin = Plugin {
-            name: "fake".to_string(),
+            name: crate::plugin::PluginName::new("fake").unwrap(),
             kind: PluginKind::Cookbook,
             executable: script.to_string_lossy().into_owned(),
         };
