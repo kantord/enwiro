@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.40](https://github.com/kantord/enwiro/compare/enwiro-v0.3.39...enwiro-v0.3.40) - 2026-05-25
+
+### Added
+
+- improve enw run UX ([#527](https://github.com/kantord/enwiro/pull/527))
+- auto-mark status on cook and prep ([#526](https://github.com/kantord/enwiro/pull/526))
+- add `enw mark` command for manual status tracking ([#515](https://github.com/kantord/enwiro/pull/515))
+
 ## [0.3.39](https://github.com/kantord/enwiro/compare/enwiro-v0.3.38...enwiro-v0.3.39) - 2026-05-24
 
 ### Added

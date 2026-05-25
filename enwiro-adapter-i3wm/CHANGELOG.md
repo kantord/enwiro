@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.26](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.25...enwiro-adapter-i3wm-v0.1.26) - 2026-05-25
+
+### Added
+
+- improve enw run UX ([#527](https://github.com/kantord/enwiro/pull/527))
+
 ## [0.1.25](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.24...enwiro-adapter-i3wm-v0.1.25) - 2026-05-24
 
 ### Other

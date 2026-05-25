@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/kantord/enwiro/compare/enwiro-cookbook-chezmoi-v0.1.11...enwiro-cookbook-chezmoi-v0.1.12) - 2026-05-25
+
+### Other
+
+- updated the following local packages: enwiro-sdk
+
 ## [0.1.11](https://github.com/kantord/enwiro/compare/enwiro-cookbook-chezmoi-v0.1.10...enwiro-cookbook-chezmoi-v0.1.11) - 2026-05-24
 
 ### Other
