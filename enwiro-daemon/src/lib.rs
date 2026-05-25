@@ -280,7 +280,11 @@ pub async fn run(
 
     let active_env: rpc::SharedActiveEnv = Arc::new(Mutex::new(None));
     let active_env_writer = active_env.clone();
-    tokio::spawn(rpc::serve(rpc_socket_path.clone(), active_env));
+    tokio::spawn(rpc::serve(
+        rpc_socket_path.clone(),
+        active_env,
+        workspaces_directory.clone(),
+    ));
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);

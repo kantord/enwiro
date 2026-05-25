@@ -15,11 +15,14 @@
 
 use std::path::PathBuf;
 
+use crate::meta::{
+    CookedPhase, EventLogEntry, EventType, Status, load_env_meta, now_utc, save_env_meta,
+};
 use anyhow::Context;
 use async_trait::async_trait;
 use enwiro_sdk::rpc::{
     APPLICATION_ERROR_CODE, CALL_CHAIN_ENV_VAR, CYCLE_DETECTED_CODE, CookbookInvokeParams,
-    CookbookInvokeResult, EnvCurrentResult, EnwiroRpcServer,
+    CookbookInvokeResult, EnvCurrentResult, EnvMarkParams, EnvMarkResult, EnwiroRpcServer,
 };
 use futures_util::{SinkExt, StreamExt};
 use jsonrpsee::core::server::Methods;
@@ -53,6 +56,7 @@ pub type SharedActiveEnv = Arc<Mutex<Option<ActiveEnvState>>>;
 #[derive(Clone)]
 struct DaemonRpc {
     active_env: SharedActiveEnv,
+    workspaces_directory: PathBuf,
 }
 
 /// `APPLICATION_ERROR_CODE` constructor — every "cookbook X failed at Y"
@@ -195,6 +199,49 @@ impl EnwiroRpcServer for DaemonRpc {
             }),
         })
     }
+
+    async fn env_mark(&self, params: EnvMarkParams) -> Result<EnvMarkResult, ErrorObjectOwned> {
+        let env_dir = self.workspaces_directory.join(&params.env_name);
+        if !env_dir.is_dir() {
+            return Err(app_err(format!(
+                "environment directory does not exist: {}",
+                env_dir.display()
+            )));
+        }
+
+        let new_status = match params.status.as_str() {
+            "ready" => Status::Cooked {
+                phase: None,
+                detail: None,
+            },
+            "active" => Status::Cooked {
+                phase: Some(CookedPhase::Active),
+                detail: None,
+            },
+            "waiting" => Status::Cooked {
+                phase: Some(CookedPhase::Waiting),
+                detail: None,
+            },
+            "done" => Status::Done { outcome: None },
+            "evergreen" => Status::Evergreen,
+            other => return Err(app_err(format!("unknown status: {other}"))),
+        };
+
+        let now = now_utc();
+        let mut meta = load_env_meta(&env_dir);
+        meta.status = Some(new_status);
+        meta.event_log.push(EventLogEntry {
+            event_type: EventType::StatusChange,
+            detail: params.status.clone(),
+            started: now,
+            ended: Some(now),
+        });
+
+        save_env_meta(&env_dir, &meta)
+            .map_err(|e| app_err(format!("could not save metadata: {e}")))?;
+
+        Ok(EnvMarkResult { ok: true })
+    }
 }
 
 /// Output of a single cookbook subprocess invocation; carries enough
@@ -296,7 +343,11 @@ async fn run_cookbook_subprocess(
 }
 
 /// Bind the unix socket, set perms to 0600, and run the accept loop.
-pub async fn serve(socket_path: PathBuf, active_env: SharedActiveEnv) -> anyhow::Result<()> {
+pub async fn serve(
+    socket_path: PathBuf,
+    active_env: SharedActiveEnv,
+    workspaces_directory: PathBuf,
+) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create runtime dir {}", parent.display()))?;
@@ -310,7 +361,7 @@ pub async fn serve(socket_path: PathBuf, active_env: SharedActiveEnv) -> anyhow:
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", socket_path.display()))?;
     }
-    serve_listener(listener, socket_path, active_env).await
+    serve_listener(listener, socket_path, active_env, workspaces_directory).await
 }
 
 /// Run the accept loop against a pre-bound listener. Exposed so tests
@@ -320,8 +371,12 @@ pub async fn serve_listener(
     listener: UnixListener,
     socket_path: PathBuf,
     active_env: SharedActiveEnv,
+    workspaces_directory: PathBuf,
 ) -> anyhow::Result<()> {
-    let rpc = DaemonRpc { active_env };
+    let rpc = DaemonRpc {
+        active_env,
+        workspaces_directory,
+    };
     let methods: Methods = rpc.into_rpc().into();
     tracing::info!(path = %socket_path.display(), "rpc server listening");
 
