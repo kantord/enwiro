@@ -32,7 +32,7 @@ fn install_fixture(name: &str, config: &Value) -> (TempDir, PathBuf) {
 
 fn cookbook_plugin(bin: &Path) -> Plugin {
     Plugin {
-        name: "fake".into(),
+        name: enwiro_sdk::plugin::PluginName::new("fake").unwrap(),
         kind: PluginKind::Cookbook,
         executable: bin.to_string_lossy().into_owned(),
     }
@@ -40,7 +40,7 @@ fn cookbook_plugin(bin: &Path) -> Plugin {
 
 fn garnish_plugin(name: &str, bin: &Path) -> Plugin {
     Plugin {
-        name: name.into(),
+        name: enwiro_sdk::plugin::PluginName::new(name).unwrap(),
         kind: PluginKind::Garnish,
         executable: bin.to_string_lossy().into_owned(),
     }
@@ -99,7 +99,7 @@ fn cookbook_cook_pipes_payload_to_stdin() {
 #[test]
 fn cookbook_gear_returns_none_when_spawn_fails() {
     let plugin = Plugin {
-        name: "fake".into(),
+        name: enwiro_sdk::plugin::PluginName::new("fake").unwrap(),
         kind: PluginKind::Cookbook,
         executable: "/nonexistent/enwiro-test-binary".into(),
     };

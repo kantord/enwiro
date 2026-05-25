@@ -305,7 +305,7 @@ pub async fn run(
         });
     }
     for plugin in get_plugins(PluginKind::Cookbook) {
-        let name = plugin.name.clone();
+        let name = plugin.name.to_string();
         let executable = plugin.executable.clone();
         let client = CookbookClient::new_user_level_only(plugin);
         let payload = CookbookPayload::new(client.config().clone());

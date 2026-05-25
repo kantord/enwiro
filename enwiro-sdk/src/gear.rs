@@ -637,6 +637,39 @@ mod tests {
         }
     }
 
+    mod gear_filename_props {
+        use proptest::prelude::*;
+
+        use super::super::gear_filename;
+        use crate::plugin::PluginName;
+
+        proptest! {
+            #[test]
+            fn always_has_prefix_and_suffix(name in "[a-zA-Z0-9_-]{1,50}") {
+                let pn = PluginName::new(&name).unwrap();
+                let result = pn.gear_filename();
+                prop_assert!(result.starts_with("cookbook-"));
+                prop_assert!(result.ends_with(".json"));
+            }
+
+            #[test]
+            fn embeds_the_original_name(name in "[a-zA-Z0-9_-]{1,50}") {
+                let pn = PluginName::new(&name).unwrap();
+                let result = pn.gear_filename();
+                let inner = result
+                    .strip_prefix("cookbook-").unwrap()
+                    .strip_suffix(".json").unwrap();
+                prop_assert_eq!(inner, name);
+            }
+
+            #[test]
+            fn free_fn_matches_method(name in "[a-zA-Z0-9_-]{1,50}") {
+                let pn = PluginName::new(&name).unwrap();
+                prop_assert_eq!(gear_filename(&name), pn.gear_filename());
+            }
+        }
+    }
+
     mod loaded_gear {
         use super::super::{LoadedGear, SCHEMA_VERSION, gear_dir};
         use std::fs;

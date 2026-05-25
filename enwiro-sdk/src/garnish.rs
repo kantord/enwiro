@@ -58,7 +58,7 @@ impl GarnishClient {
 
 impl Garnish for GarnishClient {
     fn name(&self) -> &str {
-        &self.plugin.name
+        self.plugin.name.as_str()
     }
 
     fn applies_to(&self, project_dir: &Path) -> bool {

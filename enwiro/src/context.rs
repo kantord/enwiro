@@ -643,7 +643,7 @@ mod tests {
         // block or error if list_recipes() is called. The working cookbook is second.
         context_object.cookbooks = vec![
             Box::new(FailingCookbook {
-                cookbook_name: "github".into(),
+                cookbook_name: enwiro_sdk::plugin::PluginName::new("github").unwrap(),
             }),
             Box::new(FakeCookbook::new(
                 "git",
@@ -753,7 +753,7 @@ mod tests {
         // No matching environment for "foobaz" (adapter's workspace name).
         // FailingCookbook would error if cook_environment tries list_recipes().
         context_object.cookbooks = vec![Box::new(FailingCookbook {
-            cookbook_name: "github".into(),
+            cookbook_name: enwiro_sdk::plugin::PluginName::new("github").unwrap(),
         })];
 
         // Name is None → resolved from adapter → should not try to cook
