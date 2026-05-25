@@ -169,6 +169,7 @@ pub mod test_utilities {
             notifier: Box::new(mock_notifier),
             cookbooks: vec![],
             cache_dir: Some(temp_dir.path().join("daemon")),
+            global_env: None,
         };
         (temp_dir, context, activated, notifications)
     }

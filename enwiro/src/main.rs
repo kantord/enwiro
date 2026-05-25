@@ -26,6 +26,15 @@ use std::io::Write;
 use std::path::Path;
 
 #[derive(Parser)]
+struct Cli {
+    #[arg(global = true, long)]
+    env: Option<String>,
+
+    #[command(subcommand)]
+    command: EnwiroCli,
+}
+
+#[derive(clap::Subcommand)]
 enum EnwiroCli {
     Activate(ActivateArgs),
     Info(EnvInfoArgs),
@@ -78,12 +87,13 @@ fn main() -> anyhow::Result<()> {
         return run_gear::dispatch(Path::new(&config.workspaces_directory), &argv[1..]);
     }
 
-    let args = EnwiroCli::parse();
+    let cli = Cli::parse();
     let mut writer = std::io::stdout();
     let mut context_object = CommandContext::new(config, &mut writer)?;
+    context_object.global_env = cli.env;
     ensure_can_run(&context_object)?;
 
-    let result = match args {
+    let result = match cli.command {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
         EnwiroCli::Info(args) => env_info(&mut context_object, args),
         EnwiroCli::Ls(args) => {
