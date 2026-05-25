@@ -1695,14 +1695,15 @@ dependencies = [
 
 [[package]]
 name = "optative-process-pool"
-version = "0.0.2"
+version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6a09b47e8550455d704a60858993c08bdf1eed2d89345cccf4c6eacc257e872"
+checksum = "ca3bf23258032729d547c02bf7d597c5b5c2b06f1167e7b37bb8a44cfb753ed1"
 dependencies = [
  "nix",
  "optative",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tracing",
 ]
