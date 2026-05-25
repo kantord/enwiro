@@ -47,21 +47,46 @@ fn read_activate_payload() -> ActivatePayload {
 }
 
 fn build_run_shell_argv(command: &str, args: &[String]) -> String {
-    std::iter::once(command)
-        .chain(args.iter().map(String::as_str))
+    if args.is_empty() {
+        return command.to_string();
+    }
+    let quoted_args = args
+        .iter()
+        .map(String::as_str)
         .map(shell_quote)
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    format!("{command} {quoted_args}")
+}
+
+fn user_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "sh".into())
+}
+
+/// Wrap the user's command so it runs in `$SHELL` and the terminal stays
+/// open on failure. The outer invocation is always POSIX `sh` so the
+/// error-handling syntax is portable; the user's command runs inside
+/// `$SHELL -c '...'` so they get their configured shell.
+fn wrap_with_error_feedback(user_cmd: &str, shell: &str) -> String {
+    let escaped = user_cmd.replace('\'', r"'\''");
+    format!(
+        "{shell} -c '{escaped}'; __enw_rc=$?; \
+         [ $__enw_rc -ne 0 ] && \
+         printf '\\n[enw] exited %d - press Enter\\n' $__enw_rc && \
+         read _; \
+         exit $__enw_rc"
+    )
 }
 
 /// Child is detached intentionally — enw exits before the terminal does.
 fn spawn_run_in_terminal(payload: &RunPayload) -> anyhow::Result<()> {
-    let quoted_argv = build_run_shell_argv(&payload.command, &payload.args);
+    let user_cmd = build_run_shell_argv(&payload.command, &payload.args);
+    let wrapped = wrap_with_error_feedback(&user_cmd, &user_shell());
     ProcessSpec::new("i3-sensible-terminal")
         .arg("-e")
         .arg("sh")
         .arg("-c")
-        .arg(&quoted_argv)
+        .arg(&wrapped)
         .into_command_in_env(&payload.env_name, std::path::Path::new(&payload.env_path))
         .spawn()
         .with_context(|| format!("Failed to spawn terminal for `{}`", payload.command))?;
@@ -987,6 +1012,72 @@ mod tests {
     #[case::escapes_single_quote("it's", r"'it'\''s'")]
     fn test_shell_quote_cases(#[case] input: &str, #[case] expected: &str) {
         assert_eq!(shell_quote(input), expected);
+    }
+
+    #[test]
+    fn test_build_run_shell_argv_simple_command_no_args() {
+        assert_eq!(build_run_shell_argv("echo", &[]), "echo");
+    }
+
+    #[test]
+    fn test_build_run_shell_argv_simple_command_with_args() {
+        let args = vec!["hello world".to_string(), "foo".to_string()];
+        assert_eq!(
+            build_run_shell_argv("echo", &args),
+            "echo 'hello world' foo"
+        );
+    }
+
+    #[test]
+    fn test_build_run_shell_argv_shell_expression_no_args() {
+        let cmd = r#"bbox claude-code -- "please fix this bug""#;
+        assert_eq!(
+            build_run_shell_argv(cmd, &[]),
+            cmd,
+            "a full shell expression must pass through verbatim so sh -c can interpret it"
+        );
+    }
+
+    #[test]
+    fn test_wrap_with_error_feedback_contains_user_shell() {
+        let wrapped = wrap_with_error_feedback("echo hello", "/bin/zsh");
+        assert!(
+            wrapped.starts_with("/bin/zsh -c "),
+            "must invoke user's shell; got: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn test_wrap_with_error_feedback_contains_error_handler() {
+        let wrapped = wrap_with_error_feedback("echo hello", "sh");
+        assert!(
+            wrapped.contains("__enw_rc=$?"),
+            "must capture exit code; got: {wrapped}"
+        );
+        assert!(
+            wrapped.contains("read _"),
+            "must wait for Enter on failure; got: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn test_wrap_with_error_feedback_escapes_single_quotes() {
+        let wrapped = wrap_with_error_feedback("echo 'hello'", "bash");
+        assert!(
+            wrapped.contains(r"echo '\''hello'\''"),
+            "single quotes in user cmd must be escaped for outer sh; got: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn test_user_shell_falls_back_to_sh() {
+        let prior = std::env::var("SHELL").ok();
+        unsafe { std::env::remove_var("SHELL") };
+        let result = user_shell();
+        if let Some(v) = prior {
+            unsafe { std::env::set_var("SHELL", v) };
+        }
+        assert_eq!(result, "sh");
     }
 
     /// `resolve_enw_binary` must produce an absolute path so the spawned

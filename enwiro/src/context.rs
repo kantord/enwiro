@@ -24,6 +24,7 @@ pub struct CommandContext<W: Write> {
     pub notifier: Box<dyn Notifier>,
     pub cookbooks: Vec<Box<dyn CookbookTrait>>,
     pub cache_dir: Option<PathBuf>,
+    pub global_env: Option<String>,
 }
 
 impl<W: Write> CommandContext<W> {
@@ -57,6 +58,7 @@ impl<W: Write> CommandContext<W> {
             notifier,
             cookbooks,
             cache_dir: None,
+            global_env: None,
         })
     }
 
@@ -198,13 +200,15 @@ impl<W: Write> CommandContext<W> {
     }
 
     fn resolve_environment_name(&self, name: &Option<String>) -> anyhow::Result<String> {
-        match name {
-            Some(n) => Ok(n.clone()),
-            None => self
-                .adapter
-                .get_active_environment_name()
-                .context("Could not determine active environment"),
+        if let Some(n) = name {
+            return Ok(n.clone());
         }
+        if let Some(n) = &self.global_env {
+            return Ok(n.clone());
+        }
+        self.adapter
+            .get_active_environment_name()
+            .context("Could not determine active environment")
     }
 
     pub fn get_or_cook_environment(
@@ -212,11 +216,12 @@ impl<W: Write> CommandContext<W> {
         name: &Option<String>,
         cfg: &CookConfig,
     ) -> anyhow::Result<Environment> {
+        let explicitly_named = name.is_some() || self.global_env.is_some();
         let resolved = self.resolve_environment_name(name)?;
         let flat_name = resolved.replace('/', "-");
         match Environment::get_one(&self.config.workspaces_directory, &flat_name) {
             Ok(env) => Ok(env),
-            Err(_) if name.is_some() => self
+            Err(_) if explicitly_named => self
                 .cook_environment(&resolved, cfg)
                 .context("Could not cook environment"),
             Err(e) => Err(e),
@@ -740,6 +745,58 @@ mod tests {
         // "new-project" doesn't exist as an environment, so it should be cooked
         let env = context_object
             .get_or_cook_environment(&Some("new-project".to_string()), &CookConfig::default())
+            .unwrap();
+        assert_eq!(env.name, "new-project");
+    }
+
+    #[rstest]
+    fn test_global_env_used_when_positional_absent(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("from-flag");
+        context_object.global_env = Some("from-flag".to_string());
+
+        let env = context_object
+            .get_or_cook_environment(&None, &CookConfig::default())
+            .unwrap();
+        assert_eq!(env.name, "from-flag");
+    }
+
+    #[rstest]
+    fn test_positional_wins_over_global_env(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("positional");
+        context_object.create_mock_environment("from-flag");
+        context_object.global_env = Some("from-flag".to_string());
+
+        let env = context_object
+            .get_or_cook_environment(&Some("positional".to_string()), &CookConfig::default())
+            .unwrap();
+        assert_eq!(env.name, "positional");
+    }
+
+    #[rstest]
+    fn test_global_env_triggers_autocook(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.write_cache_entry("git", "new-project");
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["new-project"],
+            vec![("new-project", cooked_dir.to_str().unwrap())],
+        ))];
+        context_object.global_env = Some("new-project".to_string());
+
+        let env = context_object
+            .get_or_cook_environment(&None, &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "new-project");
     }
