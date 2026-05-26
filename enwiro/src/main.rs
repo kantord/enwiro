@@ -16,7 +16,7 @@ use commands::prep::{PrepArgs, prep};
 use commands::rm::{RmArgs, rm};
 use commands::run::{RunArgs, run};
 use commands::run_gear;
-use commands::run_gear::{LONG_YES_FLAG, SHORT_YES_FLAG};
+use commands::run_gear::{ENV_FLAG, LONG_YES_FLAG, SHORT_YES_FLAG};
 use commands::wrap::{WrapArgs, wrap};
 use context::CommandContext;
 use enwiro_daemon::ConfigurationValues;
@@ -62,13 +62,18 @@ fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
 /// Side effect: `--help` after `:<gear> <entry>` reaches the spawned
 /// command (e.g. `enw :just --help` runs `just --help`). Intentional.
 fn is_dispatch_invocation(argv: &[OsString]) -> bool {
-    let leading_arg = argv.get(1).and_then(|a| a.to_str());
-    let gear_pos = if leading_arg == Some(SHORT_YES_FLAG) || leading_arg == Some(LONG_YES_FLAG) {
-        2
-    } else {
-        1
-    };
-    argv.get(gear_pos)
+    let mut pos = 1;
+    if argv.get(pos).and_then(|a| a.to_str()) == Some(ENV_FLAG) {
+        pos += 2;
+    }
+    if argv
+        .get(pos)
+        .and_then(|a| a.to_str())
+        .is_some_and(|s| s == SHORT_YES_FLAG || s == LONG_YES_FLAG)
+    {
+        pos += 1;
+    }
+    argv.get(pos)
         .and_then(|a| a.to_str())
         .is_some_and(|s| s.starts_with(':'))
 }

@@ -31,6 +31,20 @@ pub struct DispatchTarget {
     pub entry_name: Option<String>,
     pub passthrough: Vec<OsString>,
     pub yes: bool,
+    pub env_override: Option<String>,
+}
+
+pub const ENV_FLAG: &str = "--env";
+
+fn strip_env_flag(args: &[OsString]) -> (Option<String>, &[OsString]) {
+    let is_env = args
+        .first()
+        .and_then(|a| a.to_str())
+        .is_some_and(|s| s == ENV_FLAG);
+    if is_env && let Some(val) = args.get(1).and_then(|a| a.to_str()) {
+        return (Some(val.to_owned()), &args[2..]);
+    }
+    (None, args)
 }
 
 /// Strip a single leading `-y`/`--yes` flag from the front of `args`.
@@ -50,7 +64,8 @@ fn strip_yes_flag(args: &[OsString]) -> (bool, &[OsString]) {
 }
 
 pub fn parse_dispatch_args(args: &[OsString]) -> anyhow::Result<DispatchTarget> {
-    let (yes, rest) = strip_yes_flag(args);
+    let (env_override, rest) = strip_env_flag(args);
+    let (yes, rest) = strip_yes_flag(rest);
     let first = rest
         .first()
         .ok_or_else(|| anyhow!("missing :<gear> argument"))?;
@@ -76,6 +91,7 @@ pub fn parse_dispatch_args(args: &[OsString]) -> anyhow::Result<DispatchTarget> 
         entry_name,
         passthrough: rest.iter().skip(2).cloned().collect(),
         yes,
+        env_override,
     })
 }
 
@@ -197,7 +213,10 @@ pub fn format_entry_list(gear_name: &str, gear: &Gear) -> String {
 /// child failure (exit with child's status); other errors bubble.
 pub fn dispatch(workspaces_directory: &Path, args: &[OsString]) -> anyhow::Result<()> {
     let target = parse_dispatch_args(args)?;
-    let env_name = active_env_name()?;
+    let env_name = match target.env_override {
+        Some(ref name) => name.clone(),
+        None => active_env_name()?,
+    };
     let env_dir = workspaces_directory.join(&env_name);
     let project_dir = env_project_dir(workspaces_directory, &env_name);
 

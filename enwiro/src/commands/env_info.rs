@@ -2,7 +2,6 @@ use std::io::Write;
 
 use anyhow::Context;
 use clap::Args;
-use enwiro_sdk::process::ENWIRO_ENV_VAR;
 
 use crate::context::CommandContext;
 use crate::environments::Environment;
@@ -38,13 +37,6 @@ fn resolve_env_name_from_daemon() -> Option<String> {
     })
 }
 
-fn resolve_env_name() -> Option<String> {
-    if let Some(name) = resolve_env_name_from_daemon() {
-        return Some(name);
-    }
-    std::env::var(ENWIRO_ENV_VAR).ok().filter(|v| !v.is_empty())
-}
-
 fn classify_env<W: Write>(ctx: &CommandContext<W>, name: &str) -> Option<String> {
     if Environment::get_one(&ctx.config.workspaces_directory, name).is_ok() {
         return Some("environment".into());
@@ -60,7 +52,10 @@ pub fn env_info<W: Write>(ctx: &mut CommandContext<W>, args: EnvInfoArgs) -> any
         anyhow::bail!("Plain text output is not yet implemented. Use --json to get JSON output.");
     }
 
-    let env_name = args.name.or_else(resolve_env_name);
+    let env_name = args
+        .name
+        .or_else(|| ctx.resolve_environment_name(&None).ok())
+        .or_else(resolve_env_name_from_daemon);
     let env_type = env_name.as_deref().and_then(|name| classify_env(ctx, name));
 
     let output = EnvInfoOutput {

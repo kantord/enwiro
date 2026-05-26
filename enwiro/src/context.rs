@@ -201,7 +201,7 @@ impl<W: Write> CommandContext<W> {
         Environment::get_one(&self.config.workspaces_directory, &flat_name)
     }
 
-    fn resolve_environment_name(&self, name: &Option<String>) -> anyhow::Result<String> {
+    pub(crate) fn resolve_environment_name(&self, name: &Option<String>) -> anyhow::Result<String> {
         if let Some(n) = name {
             return Ok(n.clone());
         }
