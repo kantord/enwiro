@@ -1,7 +1,6 @@
 use std::io::Write;
 
 use anyhow::Context;
-use enwiro_sdk::process::ENWIRO_ENV_VAR;
 use enwiro_sdk::rpc::{EnvMarkParams, EnwiroRpcClient};
 
 use crate::CommandContext;
@@ -35,8 +34,7 @@ impl MarkStatus {
 }
 
 pub fn mark<W: Write>(context: &mut CommandContext<W>, args: MarkArgs) -> anyhow::Result<()> {
-    let env_name = std::env::var(ENWIRO_ENV_VAR)
-        .context("Not inside an enwiro environment (ENWIRO_ENV is not set)")?;
+    let env_name = context.resolve_environment_name(&None)?;
     let status_label = args.status.as_str();
 
     let rt = tokio::runtime::Builder::new_current_thread()
