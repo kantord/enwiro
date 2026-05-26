@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.42](https://github.com/kantord/enwiro/compare/enwiro-v0.3.41...enwiro-v0.3.42) - 2026-05-26
+
+### Added
+
+- improve `enw ls` output format ([#536](https://github.com/kantord/enwiro/pull/536))
+
+### Fixed
+
+- --env flag ignored ([#543](https://github.com/kantord/enwiro/pull/543))
+
+### Other
+
+- add basic docs site ([#539](https://github.com/kantord/enwiro/pull/539))
+
 ## [0.3.41](https://github.com/kantord/enwiro/compare/enwiro-v0.3.40...enwiro-v0.3.41) - 2026-05-25
 
 ### Fixed
