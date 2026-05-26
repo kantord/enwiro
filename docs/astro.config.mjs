@@ -5,6 +5,8 @@ import starlightThemeFlexoki from 'starlight-theme-flexoki';
 
 // https://astro.build/config
 export default defineConfig({
+	site: 'https://kantord.github.io',
+	base: '/enwiro',
 	integrations: [
 		starlight({
 			plugins: [starlightThemeFlexoki()],
