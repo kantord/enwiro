@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.45](https://github.com/kantord/enwiro/compare/enwiro-v0.3.44...enwiro-v0.3.45) - 2026-05-27
+
+### Added
+
+- *(enw)* default `enw info` to human-readable plain text ([#576](https://github.com/kantord/enwiro/pull/576))
+
 ## [0.3.44](https://github.com/kantord/enwiro/compare/enwiro-v0.3.43...enwiro-v0.3.44) - 2026-05-27
 
 ### Added
