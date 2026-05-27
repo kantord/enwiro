@@ -1578,4 +1578,42 @@ mod tests {
         assert_eq!(result[0].name, "the-keeper");
         assert!((result[0].slot_score - 0.6).abs() < 1e-10);
     }
+
+    use proptest::prelude::*;
+
+    fn arb_cookbook() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("_".to_string()),
+            Just("git".to_string()),
+            Just("github".to_string()),
+            Just("chezmoi".to_string()),
+            Just("obsidian".to_string()),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn parse_managed_envs_includes_all_entries_with_slot_score(
+            cookbook in arb_cookbook(),
+            name in "[a-z][a-z0-9-]{0,20}",
+            slot_score in 0.0f64..=1.0,
+        ) {
+            let line = format!(
+                r#"{{"cookbook":"{}","name":"{}","sort_order":0,"scores":{{"slot":{}}}}}"#,
+                cookbook, name, slot_score,
+            );
+            let result = parse_managed_envs(&line);
+            prop_assert_eq!(
+                result.len(), 1,
+                "entry with cookbook={:?} and scores.slot must be included; got {:?}",
+                cookbook, result,
+            );
+            prop_assert_eq!(&result[0].name, &name);
+            prop_assert!(
+                (result[0].slot_score - slot_score).abs() < 1e-10,
+                "slot_score mismatch: expected {}, got {}",
+                slot_score, result[0].slot_score,
+            );
+        }
+    }
 }

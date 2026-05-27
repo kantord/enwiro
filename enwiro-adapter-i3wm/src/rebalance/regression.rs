@@ -249,9 +249,11 @@ proptest! {
 #[derive(Clone, Debug)]
 enum WorkflowStep {
     Activate { env_idx: usize, score: f64 },
+    ActivateWithGear { env_idx: usize, score: f64 },
     ListenerRebalance,
     CloseAllWindows { env_idx: usize },
     SwitchWorkspace { env_idx: usize },
+    GearWindowsArrive,
 }
 
 fn arb_initial_state() -> impl Strategy<Value = (Vec<Env>, Vec<Slot>)> {
@@ -291,11 +293,14 @@ fn arb_workflow() -> impl Strategy<Value = ((Vec<Env>, Vec<Slot>), Vec<WorkflowS
             prop_oneof![
                 3 => (0usize..8, 0.0f64..=1.0)
                     .prop_map(|(idx, score)| WorkflowStep::Activate { env_idx: idx, score }),
+                2 => (0usize..8, 0.0f64..=1.0)
+                    .prop_map(|(idx, score)| WorkflowStep::ActivateWithGear { env_idx: idx, score }),
                 1 => Just(WorkflowStep::ListenerRebalance),
                 1 => (0usize..8).prop_map(|idx| WorkflowStep::CloseAllWindows { env_idx: idx }),
                 1 => (0usize..8).prop_map(|idx| WorkflowStep::SwitchWorkspace { env_idx: idx }),
+                1 => Just(WorkflowStep::GearWindowsArrive),
             ],
-            1..=4,
+            1..=6,
         );
         (Just(init), steps)
     })
@@ -328,6 +333,7 @@ proptest! {
         }
         let mut managed = initial_managed.clone();
         let env_pool: Vec<String> = (0..8).map(|i| format!("pool-{i}")).collect();
+        let mut pending_gear: Vec<(EnvName, Slot)> = vec![];
 
         for (step_idx, step) in steps.iter().enumerate() {
             // Re-snapshot: filter out managed envs whose workspace was
@@ -336,10 +342,30 @@ proptest! {
                 model.ws.contains_key(&Handle::slotted(e.slot, &e.name))
             });
 
+            // Invariant: envs with pending gear must not have been
+            // reaped. This catches the empty-workspace reaping race
+            // (issue #557): spawn Focus creates an empty workspace,
+            // an intervening focus shift reaps it before gear windows
+            // arrive.
+            for (name, slot) in &pending_gear {
+                let handle = Handle::slotted(*slot, name);
+                prop_assert!(
+                    model.ws.contains_key(&handle),
+                    "step {}: env {:?} at slot {:?} with pending gear was reaped \
+                     before gear windows arrived (empty-workspace reaping race)",
+                    step_idx, name, slot,
+                );
+            }
+            pending_gear.retain(|(name, slot)| {
+                model.ws.contains_key(&Handle::slotted(*slot, name))
+            });
+
             let mut pipeline_env_names: Option<HashSet<EnvName>> = None;
 
             match step {
-                WorkflowStep::Activate { env_idx, score } => {
+                WorkflowStep::Activate { env_idx, score }
+                | WorkflowStep::ActivateWithGear { env_idx, score } => {
+                    let has_gear = matches!(step, WorkflowStep::ActivateWithGear { .. });
                     let env_name = &env_pool[*env_idx % env_pool.len()];
                     let already_exists = managed.iter().any(|e| e.name.0 == *env_name);
                     if already_exists {
@@ -383,12 +409,21 @@ proptest! {
                             .unwrap_or_else(|e| panic!("step {step_idx}: i3 op failed: {e:?}"));
                     }
 
-                    // After activation, the workspace has content (user opens
-                    // windows). Mark all managed workspaces as having content
-                    // so i3's empty-ws reaping doesn't eat them.
+                    // Relocated workspaces already had content.
+                    // The spawn workspace starts empty in i3 (Focus
+                    // creates it without windows).
+                    let spawn_env = plan.spawn.as_ref().map(|s| &s.env);
                     for (name, &slot) in &spec.targets {
                         let handle = Handle::slotted(slot, name);
-                        if let Some(has_content) = model.ws.get_mut(&handle) {
+                        let is_spawn = spawn_env == Some(name);
+                        if is_spawn {
+                            // Spawn workspace: empty until gear arrives.
+                            // If has_gear, track as pending so the
+                            // invariant check above catches reaping.
+                            if has_gear {
+                                pending_gear.push((name.clone(), slot));
+                            }
+                        } else if let Some(has_content) = model.ws.get_mut(&handle) {
                             *has_content = true;
                         }
                     }
@@ -461,6 +496,14 @@ proptest! {
                     let idx = *env_idx % managed.len();
                     let handle = Handle::slotted(managed[idx].slot, &managed[idx].name);
                     let _ = model.apply(&super::i3_op::I3Op::Focus { ws: handle });
+                }
+                WorkflowStep::GearWindowsArrive => {
+                    for (name, slot) in pending_gear.drain(..) {
+                        let handle = Handle::slotted(slot, &name);
+                        if let Some(has_content) = model.ws.get_mut(&handle) {
+                            *has_content = true;
+                        }
+                    }
                 }
             }
 
