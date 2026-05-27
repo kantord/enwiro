@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.20](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.19...enwiro-bridge-rofi-v0.1.20) - 2026-05-27
+
+### Added
+
+- *(rofi)* improve status support ([#570](https://github.com/kantord/enwiro/pull/570))
+
+### Other
+
+- add basic docs site ([#539](https://github.com/kantord/enwiro/pull/539))
+
 ## [0.1.19](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.18...enwiro-bridge-rofi-v0.1.19) - 2026-05-25
 
 ### Other

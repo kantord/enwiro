@@ -848,7 +848,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.43"
+version = "0.3.44"
 dependencies = [
  "anyhow",
  "assertables",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-rofi"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "anyhow",
  "enwiro-sdk",

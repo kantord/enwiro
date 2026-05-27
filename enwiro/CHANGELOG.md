@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.44](https://github.com/kantord/enwiro/compare/enwiro-v0.3.43...enwiro-v0.3.44) - 2026-05-27
+
+### Added
+
+- add `enw kanban` ([#567](https://github.com/kantord/enwiro/pull/567))
+- show notification when starting to cook environment ([#562](https://github.com/kantord/enwiro/pull/562))
+
+### Fixed
+
+- *(deps)* update rust crate crossterm to 0.29 ([#571](https://github.com/kantord/enwiro/pull/571))
+- *(deps)* update rust crate ratatui to 0.30 ([#572](https://github.com/kantord/enwiro/pull/572))
+
 ## [0.3.43](https://github.com/kantord/enwiro/compare/enwiro-v0.3.42...enwiro-v0.3.43) - 2026-05-27
 
 ### Fixed
