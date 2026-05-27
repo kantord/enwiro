@@ -548,13 +548,29 @@ async fn main() -> anyhow::Result<()> {
                 .iter()
                 .find(|ws| extract_environment_name(ws) == args.name)
             {
-                // Re-activation: gear stays silent (single-instance apps would
-                // yank focus; chromium app-mode would multiply windows).
                 tracing::info!(workspace = %existing.name, "Found existing workspace");
                 let op = I3Op::Focus {
                     ws: Handle(existing.name.clone()),
                 };
                 run_i3_command(&mut i3, &render(&op)).await?;
+
+                let web_open_command = adapter_config_path()
+                    .map(|p| load_web_open_command(&p))
+                    .unwrap_or_else(default_web_open_command);
+                let gear_commands =
+                    collect_gear_exec_commands(&payload.gear, &web_open_command, &args.name);
+                if !gear_commands.is_empty() {
+                    let tree = i3.get_tree().await?;
+                    if workspace_is_empty(&tree, &existing.name) {
+                        tracing::info!("Workspace is empty, applying gear");
+                        for cmd in &gear_commands {
+                            tracing::info!(gear = %cmd, "i3 gear exec");
+                            run_i3_command(&mut i3, cmd).await?;
+                        }
+                    } else {
+                        tracing::debug!("Workspace has content, skipping gear");
+                    }
+                }
             } else {
                 let (mut existing, mut unmanaged) =
                     snapshot_for_rebalance(&workspaces, &payload.managed_envs);
