@@ -74,7 +74,7 @@ struct EnvEntry {
     scores: Option<EnvScores>,
 }
 
-fn status_label(status: Option<&Status>) -> &'static str {
+pub fn status_label(status: Option<&Status>) -> &'static str {
     match status {
         Some(Status::Cooked {
             phase: Some(CookedPhase::Active),
