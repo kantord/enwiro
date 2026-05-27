@@ -392,9 +392,10 @@ mod tests {
         assert!(result.is_ok());
 
         let logs = notifications.borrow();
-        assert_eq!(logs.len(), 1);
-        assert!(logs[0].starts_with("ERROR:"));
-        assert!(logs[0].contains("unknown"));
+        assert_eq!(logs.len(), 2);
+        assert!(logs[0].starts_with("INFO:"));
+        assert!(logs[1].starts_with("ERROR:"));
+        assert!(logs[1].contains("unknown"));
     }
 
     /// A cookbook whose `cook()` returns a multi-level anyhow error chain so the
