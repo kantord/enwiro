@@ -29,7 +29,7 @@ tracing.workspace = true
 dirs = "6"
 dialoguer = { version = "0.12", default-features = false }
 ratatui = "0.30"
-crossterm = "0.28"
+crossterm = "0.29"
 
 [dev-dependencies]
 assertables = "10.0.0"
