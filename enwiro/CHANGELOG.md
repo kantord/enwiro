@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.43](https://github.com/kantord/enwiro/compare/enwiro-v0.3.42...enwiro-v0.3.43) - 2026-05-27
+
+### Fixed
+
+- further improve i3 stability ([#558](https://github.com/kantord/enwiro/pull/558))
+
 ## [0.3.42](https://github.com/kantord/enwiro/compare/enwiro-v0.3.41...enwiro-v0.3.42) - 2026-05-27
 
 ### Added

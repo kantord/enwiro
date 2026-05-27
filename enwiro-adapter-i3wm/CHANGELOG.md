@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.28](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.27...enwiro-adapter-i3wm-v0.1.28) - 2026-05-27
+
+### Fixed
+
+- further improve i3 stability ([#558](https://github.com/kantord/enwiro/pull/558))
+
+### Other
+
+- add basic docs site ([#539](https://github.com/kantord/enwiro/pull/539))
+
 ## [0.1.27](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.26...enwiro-adapter-i3wm-v0.1.27) - 2026-05-25
 
 ### Fixed
