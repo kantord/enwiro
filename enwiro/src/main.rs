@@ -10,6 +10,7 @@ use anyhow::Context;
 use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
 use commands::env_info::{EnvInfoArgs, env_info};
+use commands::kanban::{KanbanArgs, kanban};
 use commands::ls::{LsArgs, ls};
 use commands::mark::{MarkArgs, mark};
 use commands::prep::{PrepArgs, prep};
@@ -38,6 +39,7 @@ struct Cli {
 enum EnwiroCli {
     Activate(ActivateArgs),
     Info(EnvInfoArgs),
+    Kanban(KanbanArgs),
     Ls(LsArgs),
     Mark(MarkArgs),
     Prep(PrepArgs),
@@ -101,6 +103,7 @@ fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
         EnwiroCli::Info(args) => env_info(&mut context_object, args),
+        EnwiroCli::Kanban(args) => kanban(&mut context_object, args),
         EnwiroCli::Ls(args) => {
             let scope = args.scope();
             let status_filter = args.status.clone();
