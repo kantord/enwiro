@@ -256,27 +256,42 @@ impl<'a> WrapPayloadBuilder<'a> {
 /// Spawn the configured open command for every URL collected from gear, via
 /// `i3-msg exec -- <enw> wrap <command> <env> -- <args>`. Best-effort:
 /// failures are logged and do not interrupt activation.
-fn open_gear_urls(gear: &serde_json::Value, command_template: &[String], env_name: &str) {
+fn collect_gear_exec_commands(
+    gear: &serde_json::Value,
+    command_template: &[String],
+    env_name: &str,
+) -> Vec<String> {
+    let mut commands = Vec::new();
+
     let urls = collect_web_urls(gear);
-    if urls.is_empty() {
-        return;
-    }
-    if command_template.is_empty() {
-        tracing::warn!(skipped = urls.len(), "web_open_command is empty");
-        return;
-    }
-    let builder = WrapPayloadBuilder::new(env_name, command_template);
-    for url in urls {
-        let Some(payload) = builder.payload_for(&url) else {
-            continue;
-        };
-        match std::process::Command::new("i3-msg").arg(&payload).spawn() {
-            Ok(_) => tracing::info!(payload = %payload, "Spawned open command via i3-msg exec"),
-            Err(e) => {
-                tracing::warn!(error = %e, payload = %payload, "Failed to invoke i3-msg exec");
+    if !urls.is_empty() && !command_template.is_empty() {
+        let builder = WrapPayloadBuilder::new(env_name, command_template);
+        for url in urls {
+            if let Some(payload) = builder.payload_for(&url) {
+                commands.push(payload);
             }
         }
+    } else if !urls.is_empty() {
+        tracing::warn!(skipped = urls.len(), "web_open_command is empty");
     }
+
+    let gui_commands = collect_gui_commands(gear);
+    let enw_binary = resolve_enw_binary();
+    for argv in gui_commands {
+        if let Err(e) = which::which(&argv[0]) {
+            tracing::warn!(
+                binary = %argv[0],
+                error = %e,
+                "Skipping linux-gui spawn: binary not found on PATH",
+            );
+            continue;
+        }
+        if let Some(payload) = build_gui_payload(&enw_binary, env_name, &argv) {
+            commands.push(payload);
+        }
+    }
+
+    commands
 }
 
 /// `None` only when `argv` is empty (collectors already filter; belt-and-suspenders).
@@ -298,47 +313,6 @@ fn build_gui_payload(enw_binary: &str, env_name: &str, argv: &[String]) -> Optio
     Some(format!("exec {inner}"))
 }
 
-/// Spawn every linux-gui command collected from gear, via
-/// `i3-msg exec -- <enw> wrap <argv> <env>`. Each command's binary is
-/// PATH-resolved via `which::which` first; missing binaries are logged and
-/// skipped so partially-installed setups (e.g. obsidian present, zotero
-/// absent) still activate cleanly. Best-effort like `open_gear_urls`:
-/// activation never fails on auto-open issues.
-///
-/// Cookbooks ALSO check `which` at gear-emit time (see e.g.
-/// `enwiro-cookbook-obsidian::cmd_gear`) to keep their gear files clean.
-/// This adapter-side check is the safety net for stale gear files - a
-/// binary that was installed at emit time but removed before activation.
-/// Both layers are intentional, not redundant.
-fn spawn_gui_commands(gear: &serde_json::Value, env_name: &str) {
-    let commands = collect_gui_commands(gear);
-    if commands.is_empty() {
-        return;
-    }
-    let enw_binary = resolve_enw_binary();
-    for argv in commands {
-        if let Err(e) = which::which(&argv[0]) {
-            tracing::warn!(
-                binary = %argv[0],
-                error = %e,
-                "Skipping linux-gui spawn: binary not found on PATH",
-            );
-            continue;
-        }
-        let Some(payload) = build_gui_payload(&enw_binary, env_name, &argv) else {
-            continue;
-        };
-        match std::process::Command::new("i3-msg").arg(&payload).spawn() {
-            Ok(_) => {
-                tracing::info!(payload = %payload, "Spawned linux-gui command via i3-msg exec")
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, payload = %payload, "Failed to invoke i3-msg exec");
-            }
-        }
-    }
-}
-
 /// Parse newline-delimited JSON from `enwiro ls --json`.
 ///
 /// Each line is parsed independently as a `serde_json::Value`. Lines that are
@@ -350,10 +324,6 @@ fn parse_managed_envs(json_lines: &str) -> Vec<ManagedEnvInfo> {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| {
             let value: serde_json::Value = serde_json::from_str(line).ok()?;
-            // Only include entries managed by enwiro itself (cookbook == "_").
-            if value.get("cookbook")?.as_str()? != "_" {
-                return None;
-            }
             let name = value.get("name")?.as_str()?.to_string();
             let slot_score = value.get("scores")?.get("slot")?.as_f64()?;
             Some(ManagedEnvInfo { name, slot_score })
@@ -404,12 +374,37 @@ async fn run_i3_command(i3: &mut I3, command: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn apply_plan(i3: &mut I3, plan: &rebalance::plan::Plan) -> anyhow::Result<()> {
+async fn apply_plan(
+    i3: &mut I3,
+    plan: &rebalance::plan::Plan,
+    gear_exec_commands: &[String],
+) -> anyhow::Result<()> {
     use rebalance::compile::compile;
     use rebalance::i3_op::render;
-    for op in compile(plan) {
-        tracing::info!(op = ?op, "i3 op");
-        run_i3_command(i3, &render(&op)).await?;
+    let ops = compile(plan);
+    let has_spawn = plan.spawn.is_some();
+    let last_idx = ops.len().saturating_sub(1);
+    for (idx, op) in ops.iter().enumerate() {
+        let is_spawn_op = has_spawn && idx == last_idx;
+        if is_spawn_op && !gear_exec_commands.is_empty() {
+            let focus_cmd = render(op);
+            let combined = format!("{}; {}", focus_cmd, gear_exec_commands[0]);
+            tracing::info!(op = ?op, gear = %gear_exec_commands[0], "i3 op (combined with first gear exec)");
+            run_i3_command(i3, &combined).await?;
+            for cmd in &gear_exec_commands[1..] {
+                tracing::info!(gear = %cmd, "i3 gear exec");
+                run_i3_command(i3, cmd).await?;
+            }
+        } else {
+            tracing::info!(op = ?op, "i3 op");
+            run_i3_command(i3, &render(op)).await?;
+        }
+    }
+    if ops.is_empty() {
+        for cmd in gear_exec_commands {
+            tracing::info!(gear = %cmd, "i3 gear exec");
+            run_i3_command(i3, cmd).await?;
+        }
     }
     Ok(())
 }
@@ -597,13 +592,13 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!(env = %args.name, free_num = free_num.0, "Activating new env");
                 let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
                 let plan = derive(&current_slot_map(&existing), &spec);
-                apply_plan(&mut i3, &plan).await?;
 
                 let web_open_command = adapter_config_path()
                     .map(|p| load_web_open_command(&p))
                     .unwrap_or_else(default_web_open_command);
-                open_gear_urls(&payload.gear, &web_open_command, &args.name);
-                spawn_gui_commands(&payload.gear, &args.name);
+                let gear_commands =
+                    collect_gear_exec_commands(&payload.gear, &web_open_command, &args.name);
+                apply_plan(&mut i3, &plan, &gear_commands).await?;
             }
         }
         EnwiroAdapterI3WmCLI::Run(_) => {
@@ -666,7 +661,7 @@ async fn main() -> anyhow::Result<()> {
                 if plan.relocations.is_empty() && plan.spawn.is_none() {
                     tracing::debug!("No rebalance needed");
                 }
-                apply_plan(&mut i3_cmd, &plan).await?;
+                apply_plan(&mut i3_cmd, &plan, &[]).await?;
                 last_rebalance = Some(std::time::Instant::now());
             }
         }
@@ -1442,17 +1437,20 @@ mod tests {
         );
     }
 
-    /// A recipe entry (cookbook != "_") is excluded even if it has a scores.slot.
+    /// Any entry with scores.slot is included regardless of cookbook value.
     #[test]
-    fn test_parse_managed_envs_excludes_recipe_entry() {
+    fn test_parse_managed_envs_includes_any_cookbook_with_slot_score() {
         let input =
             r#"{"cookbook":"github","name":"some-repo","sort_order":0,"scores":{"slot":0.5}}"#;
         let result = parse_managed_envs(input);
-        assert!(
-            result.is_empty(),
-            "recipe entries (cookbook != \"_\") must be excluded; got {:?}",
+        assert_eq!(
+            result.len(),
+            1,
+            "entries with scores.slot must be included regardless of cookbook; got {:?}",
             result
         );
+        assert_eq!(result[0].name, "some-repo");
+        assert!((result[0].slot_score - 0.5).abs() < 1e-10);
     }
 
     /// An environment entry with `cookbook == "_"` but without any `scores` field
@@ -1577,5 +1575,43 @@ mod tests {
         );
         assert_eq!(result[0].name, "the-keeper");
         assert!((result[0].slot_score - 0.6).abs() < 1e-10);
+    }
+
+    use proptest::prelude::*;
+
+    fn arb_cookbook() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("_".to_string()),
+            Just("git".to_string()),
+            Just("github".to_string()),
+            Just("chezmoi".to_string()),
+            Just("obsidian".to_string()),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn parse_managed_envs_includes_all_entries_with_slot_score(
+            cookbook in arb_cookbook(),
+            name in "[a-z][a-z0-9-]{0,20}",
+            slot_score in 0.0f64..=1.0,
+        ) {
+            let line = format!(
+                r#"{{"cookbook":"{}","name":"{}","sort_order":0,"scores":{{"slot":{}}}}}"#,
+                cookbook, name, slot_score,
+            );
+            let result = parse_managed_envs(&line);
+            prop_assert_eq!(
+                result.len(), 1,
+                "entry with cookbook={:?} and scores.slot must be included; got {:?}",
+                cookbook, result,
+            );
+            prop_assert_eq!(&result[0].name, &name);
+            prop_assert!(
+                (result[0].slot_score - slot_score).abs() < 1e-10,
+                "slot_score mismatch: expected {}, got {}",
+                slot_score, result[0].slot_score,
+            );
+        }
     }
 }

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 71a751f910ad3e261b4d6cbeedc101d5d6c47b5b421f79a800ec55e31c0e279f # shrinks to cookbook = "git", name = "a", slot_score = 0.0
