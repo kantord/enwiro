@@ -6,6 +6,14 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Deserialize)]
+struct EntryStatus {
+    #[serde(rename = "type")]
+    status_type: String,
+    #[serde(default)]
+    phase: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct CacheEntry {
     cookbook: String,
     name: String,
@@ -14,6 +22,51 @@ struct CacheEntry {
     #[serde(default)]
     #[allow(dead_code)]
     sort_order: u32,
+    #[serde(default)]
+    status: Option<EntryStatus>,
+    #[serde(default)]
+    scores: Option<serde_json::Value>,
+}
+
+fn status_label(entry: &CacheEntry) -> &str {
+    let is_env = entry.scores.is_some();
+    match &entry.status {
+        Some(s) => match s.status_type.as_str() {
+            "cooked" => match s.phase.as_deref() {
+                Some("active") => "active",
+                Some("waiting") => "waiting",
+                _ => "ready",
+            },
+            "done" => "done",
+            "evergreen" => "evergreen",
+            "uncooked" => "*",
+            _ => {
+                if is_env {
+                    "active"
+                } else {
+                    ""
+                }
+            }
+        },
+        None => {
+            if is_env {
+                "active"
+            } else {
+                ""
+            }
+        }
+    }
+}
+
+fn sort_tier(entry: &CacheEntry) -> u8 {
+    let is_env = entry.scores.is_some();
+    if !is_env {
+        return 1;
+    }
+    match &entry.status {
+        Some(s) if s.status_type == "done" => 2,
+        _ => 0,
+    }
 }
 fn enwiro_bin() -> anyhow::Result<PathBuf> {
     if let Ok(path) = env::var("ENWIRO_BIN") {
@@ -27,27 +80,32 @@ fn enwiro_bin() -> anyhow::Result<PathBuf> {
     Ok(bin)
 }
 
-/// Format raw `enwiro ls --json` JSON lines output into rofi script-mode entries.
-/// Deduplicates by name and formats as tab-separated columns with rofi metadata.
 fn format_entries(input: &str) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut entries = Vec::new();
-    for line in input.lines() {
+    let mut parsed: Vec<(usize, CacheEntry)> = Vec::new();
+    for (i, line) in input.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<CacheEntry>(line) {
-            let description = entry.description.as_deref().unwrap_or("");
-            if seen.insert(entry.name.clone()) {
-                entries.push(format!(
-                    "{}\t{}\t{}\0info\x1f{}",
-                    entry.cookbook, entry.name, description, entry.cookbook
-                ));
-            }
+        if let Ok(entry) = serde_json::from_str::<CacheEntry>(line)
+            && seen.insert(entry.name.clone())
+        {
+            parsed.push((i, entry));
         }
     }
-    entries
+    parsed.sort_by_key(|(i, entry)| (sort_tier(entry), *i));
+    parsed
+        .iter()
+        .map(|(_, entry)| {
+            let description = entry.description.as_deref().unwrap_or("");
+            let status = status_label(entry);
+            format!(
+                "{}\t{}\t{}\t{}\0info\x1f{}",
+                status, entry.cookbook, entry.name, description, entry.cookbook
+            )
+        })
+        .collect()
 }
 
 fn list_entries() -> anyhow::Result<()> {
@@ -72,15 +130,12 @@ fn list_entries() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Strip the source and description columns from a rofi selection.
-/// Rofi passes back "source\tname\tdescription" but enwiro expects just "name".
 fn extract_recipe_name(selection: &str) -> &str {
-    let after_source = selection
+    let rest = selection
         .split_once('\t')
         .map_or(selection, |(_, rest)| rest);
-    after_source
-        .split_once('\t')
-        .map_or(after_source, |(name, _)| name)
+    let rest = rest.split_once('\t').map_or(rest, |(_, rest)| rest);
+    rest.split_once('\t').map_or(rest, |(name, _)| name)
 }
 
 fn activate_selection(selection: &str) -> anyhow::Result<()> {
@@ -113,8 +168,8 @@ mod tests {
         let entries = format_entries(input);
         assert_eq!(entries.len(), 1);
         assert!(
-            entries[0].starts_with("git\tmy-project\t"),
-            "Expected tab-separated columns, got: {}",
+            entries[0].contains("\tgit\tmy-project\t"),
+            "Expected tab-separated columns with cookbook and name, got: {}",
             entries[0]
         );
     }
@@ -147,7 +202,7 @@ mod tests {
         let input = "{\"cookbook\":\"_\",\"name\":\"my-project\"}\n{\"cookbook\":\"git\",\"name\":\"my-project\"}\n";
         let entries = format_entries(input);
         assert!(
-            entries[0].starts_with("_\tmy-project"),
+            entries[0].contains("\t_\tmy-project"),
             "First occurrence should win, got: {}",
             entries[0]
         );
@@ -161,14 +216,17 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_recipe_name_strips_source_column() {
-        assert_eq!(extract_recipe_name("git\tmy-project\t"), "my-project");
+    fn test_extract_recipe_name_strips_columns() {
+        assert_eq!(
+            extract_recipe_name("active\tgit\tmy-project\t"),
+            "my-project"
+        );
     }
 
     #[test]
-    fn test_extract_recipe_name_strips_description_column() {
+    fn test_extract_recipe_name_strips_all_columns() {
         assert_eq!(
-            extract_recipe_name("github\towner/repo#42\tFix auth bug"),
+            extract_recipe_name("active\tgithub\towner/repo#42\tFix auth bug"),
             "owner/repo#42"
         );
     }
@@ -183,9 +241,9 @@ mod tests {
         let input = "{\"cookbook\":\"git\",\"name\":\"project-a\"}\n{\"cookbook\":\"chezmoi\",\"name\":\"chezmoi\"}\n{\"cookbook\":\"git\",\"name\":\"project-b\"}\n";
         let entries = format_entries(input);
         assert_eq!(entries.len(), 3);
-        assert!(entries[0].starts_with("git\tproject-a\t"));
-        assert!(entries[1].starts_with("chezmoi\tchezmoi\t"));
-        assert!(entries[2].starts_with("git\tproject-b\t"));
+        assert!(entries[0].contains("\tgit\tproject-a\t"));
+        assert!(entries[1].contains("\tchezmoi\tchezmoi\t"));
+        assert!(entries[2].contains("\tgit\tproject-b\t"));
     }
 
     #[test]
@@ -194,8 +252,8 @@ mod tests {
         let entries = format_entries(input);
         assert_eq!(entries.len(), 1);
         assert!(
-            entries[0].starts_with("github\towner/repo#42\tFix auth bug"),
-            "Expected description in third column, got: {}",
+            entries[0].contains("\tgithub\towner/repo#42\tFix auth bug"),
+            "Expected description column, got: {}",
             entries[0]
         );
     }
@@ -205,7 +263,7 @@ mod tests {
         let input = r#"{"cookbook":"git","name":"my-project"}"#;
         let entries = format_entries(input);
         assert!(
-            entries[0].starts_with("git\tmy-project\t\0"),
+            entries[0].contains("\tgit\tmy-project\t\0"),
             "Expected empty description column, got: {}",
             entries[0]
         );
@@ -220,6 +278,121 @@ mod tests {
             1,
             "Should deduplicate by name: {:?}",
             entries
+        );
+    }
+
+    #[test]
+    fn test_format_entries_env_without_status_falls_back_to_active() {
+        let input = r#"{"cookbook":"git","name":"proj","scores":{"launcher":0.5,"slot":0.1}}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("active\t"),
+            "Env without status should fall back to active (legacy env with work in progress), got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_env_active_status() {
+        let input = r#"{"cookbook":"git","name":"proj","status":{"type":"cooked","phase":"active"},"scores":{"launcher":0.5,"slot":0.1}}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("active\t"),
+            "Expected active status, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_env_waiting_status() {
+        let input = r#"{"cookbook":"git","name":"proj","status":{"type":"cooked","phase":"waiting"},"scores":{"launcher":0.5,"slot":0.1}}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("waiting\t"),
+            "Expected waiting status, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_env_ready_status() {
+        let input = r#"{"cookbook":"git","name":"proj","status":{"type":"cooked"},"scores":{"launcher":0.5,"slot":0.1}}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("ready\t"),
+            "Expected ready status, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_env_done_status() {
+        let input = r#"{"cookbook":"git","name":"proj","status":{"type":"done"},"scores":{"launcher":0.5,"slot":0.1}}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("done\t"),
+            "Expected done status, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_env_evergreen_status() {
+        let input = r#"{"cookbook":"git","name":"proj","status":{"type":"evergreen"},"scores":{"launcher":0.5,"slot":0.1}}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("evergreen\t"),
+            "Expected evergreen status, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_env_uncooked_status() {
+        let input = r#"{"cookbook":"git","name":"proj","status":{"type":"uncooked"},"scores":{"launcher":0.5,"slot":0.1}}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("*\t"),
+            "Uncooked env should have * status, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_recipe_has_empty_status() {
+        let input = r#"{"cookbook":"git","name":"my-recipe"}"#;
+        let entries = format_entries(input);
+        assert!(
+            entries[0].starts_with("\tgit\t"),
+            "Recipe should have empty status column, got: {}",
+            entries[0]
+        );
+    }
+
+    #[test]
+    fn test_format_entries_done_envs_after_recipes() {
+        let input = [
+            r#"{"cookbook":"","name":"done-env","status":{"type":"done"},"scores":{"launcher":0.9,"slot":0.1}}"#,
+            r#"{"cookbook":"","name":"active-env","status":{"type":"cooked","phase":"active"},"scores":{"launcher":0.5,"slot":0.1}}"#,
+            r#"{"cookbook":"git","name":"recipe-a"}"#,
+        ]
+        .join("\n");
+        let entries = format_entries(&input);
+        assert_eq!(entries.len(), 3);
+        assert!(
+            entries[0].contains("\tactive-env\t"),
+            "Active env should be first, got: {}",
+            entries[0]
+        );
+        assert!(
+            entries[1].contains("\trecipe-a\t"),
+            "Recipe should be second, got: {}",
+            entries[1]
+        );
+        assert!(
+            entries[2].contains("\tdone-env\t"),
+            "Done env should be last, got: {}",
+            entries[2]
         );
     }
 }
