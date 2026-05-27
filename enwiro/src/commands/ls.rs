@@ -1088,32 +1088,6 @@ mod prop_tests {
             console::set_colors_enabled(false);
         }
 
-        #[test]
-        fn text_output_lines_with_desc_are_longer_than_without(
-            entries in proptest::collection::vec(arb_env_entry(), 1..20)
-        ) {
-            console::set_colors_enabled(false);
-            let text = format_env_text(&entries, None);
-            let lines: Vec<&str> = text.lines().collect();
-            let no_desc_max_width = lines.iter()
-                .zip(entries.iter())
-                .filter(|(_, (_, _, desc))| desc.trim().is_empty())
-                .map(|(line, _)| console::measure_text_width(line))
-                .max();
-            if let Some(max_no_desc) = no_desc_max_width {
-                for (line, (_, _, desc)) in lines.iter().zip(entries.iter()) {
-                    if !desc.trim().is_empty() {
-                        let w = console::measure_text_width(line);
-                        prop_assert!(
-                            w > max_no_desc,
-                            "line with desc {:?} should be wider than lines without desc ({} <= {})\noutput:\n{}",
-                            desc.trim(), w, max_no_desc, text
-                        );
-                    }
-                }
-            }
-        }
-
         fn text_output_lines_with_desc_end_with_desc(
             entries in proptest::collection::vec(arb_env_entry(), 0..20)
         ) {

@@ -346,8 +346,12 @@ proptest! {
             // reaped. This catches the empty-workspace reaping race
             // (issue #557): spawn Focus creates an empty workspace,
             // an intervening focus shift reaps it before gear windows
-            // arrive.
-            for (name, slot) in &pending_gear {
+            // arrive. Look up by name since relocations can change
+            // the slot.
+            for (name, slot) in &mut pending_gear {
+                if let Some(env) = managed.iter().find(|e| &e.name == name) {
+                    *slot = env.slot;
+                }
                 let handle = Handle::slotted(*slot, name);
                 prop_assert!(
                     model.ws.contains_key(&handle),
@@ -416,13 +420,19 @@ proptest! {
                     for (name, &slot) in &spec.targets {
                         let handle = Handle::slotted(slot, name);
                         let is_spawn = spawn_env == Some(name);
-                        if is_spawn {
-                            // Spawn workspace: empty until gear arrives.
-                            // If has_gear, track as pending so the
-                            // invariant check above catches reaping.
-                            if has_gear {
-                                pending_gear.push((name.clone(), slot));
+                        if is_spawn && has_gear {
+                            // Fix for issue #557: the adapter combines
+                            // the spawn Focus with the first gear exec
+                            // in one i3 IPC message, so the workspace
+                            // has a pending window immediately.
+                            if let Some(has_content) = model.ws.get_mut(&handle) {
+                                *has_content = true;
                             }
+                            pending_gear.push((name.clone(), slot));
+                        } else if is_spawn {
+                            // No gear: workspace stays empty (user will
+                            // open things manually). Not tracked as
+                            // pending gear.
                         } else if let Some(has_content) = model.ws.get_mut(&handle) {
                             *has_content = true;
                         }
@@ -484,6 +494,10 @@ proptest! {
                         continue;
                     }
                     let idx = *env_idx % managed.len();
+                    let has_pending = pending_gear.iter().any(|(n, _)| *n == managed[idx].name);
+                    if has_pending {
+                        continue;
+                    }
                     let handle = Handle::slotted(managed[idx].slot, &managed[idx].name);
                     if let Some(has_content) = model.ws.get_mut(&handle) {
                         *has_content = false;
