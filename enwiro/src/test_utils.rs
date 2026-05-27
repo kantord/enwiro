@@ -35,7 +35,11 @@ pub mod test_utilities {
     }
 
     impl Notifier for MockNotifier {
-        fn notify_success(&self, message: &str) {
+        fn notify_info(&self, _env_name: &str, message: &str) {
+            self.log.borrow_mut().push(format!("INFO: {}", message));
+        }
+
+        fn notify_success(&self, _env_name: &str, message: &str) {
             self.log.borrow_mut().push(format!("SUCCESS: {}", message));
         }
 

@@ -64,6 +64,8 @@ impl<W: Write> CommandContext<W> {
     }
 
     pub fn cook_environment(&self, name: &str, cfg: &CookConfig) -> anyhow::Result<Environment> {
+        self.notifier
+            .notify_info(name, &format!("Preparing environment: {}", name));
         let (cookbook_name, description) = self.find_recipe_in_cache(name).ok_or_else(|| {
             tracing::error!(name = %name, "Recipe not in daemon cache");
             anyhow!(
@@ -197,7 +199,7 @@ impl<W: Write> CommandContext<W> {
         }
         symlink(Path::new(env_path), &inner_symlink)?;
         self.notifier
-            .notify_success(&format!("Created environment: {}", name));
+            .notify_success(name, &format!("Created environment: {}", name));
         Environment::get_one(&self.config.workspaces_directory, &flat_name)
     }
 
@@ -956,9 +958,11 @@ mod tests {
         assert!(result.is_ok());
 
         let logs = notifications.borrow();
-        assert_eq!(logs.len(), 1);
-        assert!(logs[0].starts_with("SUCCESS:"));
+        assert_eq!(logs.len(), 2);
+        assert!(logs[0].starts_with("INFO:"));
         assert!(logs[0].contains("my-project"));
+        assert!(logs[1].starts_with("SUCCESS:"));
+        assert!(logs[1].contains("my-project"));
     }
 
     #[rstest]
@@ -977,7 +981,11 @@ mod tests {
         assert!(result.is_err());
 
         let logs = notifications.borrow();
-        assert_eq!(logs.len(), 0);
+        assert_eq!(logs.len(), 1);
+        assert!(
+            logs[0].starts_with("INFO:"),
+            "only the info notification should fire on failure"
+        );
     }
 
     #[rstest]
