@@ -12,6 +12,23 @@ export default defineConfig({
 			plugins: [starlightThemeFlexoki()],
 			title: 'enwiro',
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/kantord/enwiro' }],
+			sidebar: [
+				{ slug: 'index' },
+				{
+					label: 'Adapters',
+					items: [
+						{ slug: 'adapters' },
+						{
+							label: 'Available Adapters',
+							items: [
+								{ slug: 'adapters/available-adapters/i3wm' },
+								{ slug: 'adapters/available-adapters/tmux' },
+							],
+						},
+						{ slug: 'adapters/creating-an-adapter' },
+					],
+				},
+			],
 		}),
 	],
 });
