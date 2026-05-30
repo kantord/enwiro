@@ -100,9 +100,15 @@ fn format_entries(input: &str) -> Vec<String> {
         .map(|(_, entry)| {
             let description = entry.description.as_deref().unwrap_or("");
             let status = status_label(entry);
+            // `\t` separates the display columns, `\0` ends the display value, and
+            // `\x1f` separates the `info` option key from its value (rofi script
+            // protocol). The recipe name rides in `info` so activation never has to
+            // re-parse the columns. This assumes names are free of `\t`, `\0`, and
+            // `\x1f`; recipe names come from git refs and github owner/repo#N, which
+            // cannot contain control characters, so no escaping is needed.
             format!(
                 "{}\t{}\t{}\t{}\0info\x1f{}",
-                status, entry.cookbook, entry.name, description, entry.cookbook
+                status, entry.cookbook, entry.name, description, entry.name
             )
         })
         .collect()
@@ -138,9 +144,22 @@ fn extract_recipe_name(selection: &str) -> &str {
     rest.split_once('\t').map_or(rest, |(name, _)| name)
 }
 
-fn activate_selection(selection: &str) -> anyhow::Result<()> {
-    let recipe_name = extract_recipe_name(selection);
-    tracing::debug!(selection = %selection, recipe = %recipe_name, "Activating selection");
+/// Resolve the recipe name to activate from what rofi hands back on selection:
+/// the row's display value (argv) and the `info` row option (`ROFI_INFO`).
+///
+/// `info` carries the bare recipe name (see `format_entries`), decoupled from
+/// the displayed columns, so it is authoritative when present. The column-parsing
+/// fallback only fires for direct CLI invocation with a bare argument, where
+/// there is no `info` payload.
+fn resolve_recipe_name(argv_selection: &str, rofi_info: Option<&str>) -> String {
+    match rofi_info {
+        Some(info) if !info.is_empty() => info.to_string(),
+        _ => extract_recipe_name(argv_selection.trim()).to_string(),
+    }
+}
+
+fn activate_selection(recipe_name: &str) -> anyhow::Result<()> {
+    tracing::debug!(recipe = %recipe_name, "Activating selection");
     // We intentionally spawn without calling .wait(). This lets the bridge
     // exit immediately so rofi can close, while enwiro activate continues
     // in the background (e.g. cooking an environment from a git recipe may
@@ -179,8 +198,8 @@ mod tests {
         let input = r#"{"cookbook":"git","name":"my-project"}"#;
         let entries = format_entries(input);
         assert!(
-            entries[0].contains("\0info\x1fgit"),
-            "Expected rofi info metadata, got: {}",
+            entries[0].contains("\0info\x1fmy-project"),
+            "Expected rofi info metadata to carry the recipe name, got: {}",
             entries[0]
         );
     }
@@ -397,6 +416,117 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Model of rofi's selection passback: on selection rofi hands the script the
+    /// row's *value* (text before the first NUL) as argv, and the `info` row
+    /// option (if present) as the `ROFI_INFO` environment variable.
+    fn simulate_passback(row: &str) -> (String, Option<String>) {
+        let (value, opts) = row.split_once('\0').unwrap_or((row, ""));
+        let info = opts
+            .split('\0')
+            .find_map(|o| o.strip_prefix("info\x1f"))
+            .map(str::to_string);
+        (value.to_string(), info)
+    }
+
+    fn entry_json(
+        cookbook: &str,
+        name: &str,
+        description: Option<&str>,
+        status: Option<&str>,
+        is_env: bool,
+    ) -> String {
+        let mut obj = serde_json::Map::new();
+        obj.insert("cookbook".into(), cookbook.into());
+        obj.insert("name".into(), name.into());
+        if let Some(d) = description {
+            obj.insert("description".into(), d.into());
+        }
+        if let Some(s) = status {
+            obj.insert("status".into(), serde_json::json!({ "type": s }));
+        }
+        if is_env {
+            obj.insert(
+                "scores".into(),
+                serde_json::json!({ "launcher": 0.5, "slot": 0.1 }),
+            );
+        }
+        serde_json::Value::Object(obj).to_string()
+    }
+
+    proptest! {
+        /// The recipe name the bridge activates must equal the entry's name for
+        /// any entry, after a full trip through rofi's (value, info) channels.
+        /// This is the contract the isolated `format_entries`/`extract_recipe_name`
+        /// tests never crossed - exactly where issue #583 hid.
+        #[test]
+        fn recipe_name_survives_rofi_roundtrip(
+            cookbook in "[a-z]{1,10}",
+            name in "[A-Za-z0-9#/@._-]{1,40}",
+            description in proptest::option::of("[^\t\n\r\0\x1f]{1,40}"),
+            status in proptest::option::of(prop_oneof![
+                Just("cooked"),
+                Just("done"),
+                Just("evergreen"),
+                Just("uncooked"),
+            ]),
+            is_env in any::<bool>(),
+        ) {
+            let json = entry_json(&cookbook, &name, description.as_deref(), status, is_env);
+            let rows = format_entries(&json);
+            prop_assert_eq!(rows.len(), 1);
+            let (argv, info) = simulate_passback(&rows[0]);
+            prop_assert_eq!(resolve_recipe_name(&argv, info.as_deref()), name);
+        }
+    }
+
+    /// `ROFI_INFO`, when present, is authoritative even if the argv columns would
+    /// parse to something else.
+    #[test]
+    fn resolve_prefers_rofi_info_over_columns() {
+        assert_eq!(
+            resolve_recipe_name("\tgithub\tenwiro#583\t[issue] desc", Some("enwiro#583")),
+            "enwiro#583"
+        );
+    }
+
+    /// Absent `ROFI_INFO` (direct CLI invocation with a bare name) falls back to
+    /// the argv, which has no columns to strip.
+    #[test]
+    fn resolve_falls_back_to_bare_argv_when_info_absent() {
+        assert_eq!(resolve_recipe_name("my-recipe", None), "my-recipe");
+    }
+
+    /// Empty `ROFI_INFO` is treated as absent and falls back to argv parsing.
+    #[test]
+    fn resolve_empty_info_falls_back_to_argv() {
+        assert_eq!(
+            resolve_recipe_name("active\tgit\tterminal-widget\t", Some("")),
+            "terminal-widget"
+        );
+    }
+
+    /// The exact #583 shape: an uncooked recipe (empty status) with a description
+    /// must still resolve to its name, not the description.
+    #[test]
+    fn empty_status_with_description_resolves_to_name() {
+        let json = entry_json(
+            "github",
+            "enwiro#583",
+            Some("[issue] bug: rofi bridge cannot cook new environments"),
+            None,
+            false,
+        );
+        let rows = format_entries(&json);
+        let (argv, info) = simulate_passback(&rows[0]);
+        assert_eq!(resolve_recipe_name(&argv, info.as_deref()), "enwiro#583");
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-bridge-rofi.log");
 
@@ -408,10 +538,12 @@ fn main() -> anyhow::Result<()> {
     match rofi_retv.as_str() {
         "0" => list_entries()?,
         "1" | "2" => {
-            if let Some(selection) = args.get(1).map(|s| s.trim())
-                && !selection.is_empty()
-            {
-                activate_selection(selection)?;
+            if let Some(selection) = args.get(1) {
+                let rofi_info = env::var("ROFI_INFO").ok();
+                let recipe_name = resolve_recipe_name(selection, rofi_info.as_deref());
+                if !recipe_name.is_empty() {
+                    activate_selection(&recipe_name)?;
+                }
             }
         }
         _ => list_entries()?,
