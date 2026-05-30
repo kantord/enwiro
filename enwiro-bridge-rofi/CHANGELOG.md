@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.21](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.20...enwiro-bridge-rofi-v0.1.21) - 2026-05-30
+
+### Fixed
+
+- rofi bridge does not cook recipes ([#584](https://github.com/kantord/enwiro/pull/584))
+
 ## [0.1.20](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.19...enwiro-bridge-rofi-v0.1.20) - 2026-05-27
 
 ### Added
