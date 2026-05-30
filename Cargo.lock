@@ -929,6 +929,7 @@ version = "0.1.20"
 dependencies = [
  "anyhow",
  "enwiro-sdk",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

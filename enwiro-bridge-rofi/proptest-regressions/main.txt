@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8ff3c1665095677c4b1a907bdb112d246c929a2784bb3d0286f9aa096a416660 # shrinks to cookbook = "a", name = "0", description = Some("\u{e}"), status = None, is_env = false
