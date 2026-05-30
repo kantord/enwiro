@@ -54,8 +54,17 @@ pub fn activate<W: Write>(
         no_hooks: args.no_hooks,
     };
 
-    // Cook before adapter.activate so any gear written during cook is available
-    // when the adapter switches workspace and (optionally) acts on it.
+    let no_gear = std::collections::HashMap::new();
+    if let Err(e) = context
+        .adapter
+        .activate(&args.name, &managed_envs, &no_gear)
+    {
+        context
+            .notifier
+            .notify_error(&format!("Failed to activate workspace: {:#}", e));
+        return Err(e).context("Could not activate workspace");
+    }
+
     if let Err(e) = context.get_or_cook_environment(&Some(args.name.clone()), &cook_cfg) {
         context.notifier.notify_error(&format!(
             "Could not set up environment '{}': {:#}",
@@ -64,10 +73,6 @@ pub fn activate<W: Write>(
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
-    // Gear is best-effort: a missing `gear.d/` is normal (most envs have none),
-    // but any other failure (malformed file with a hard error, gear-name
-    // collision across files, I/O error) deserves a user-visible notification
-    // so it doesn't get masked by a silent default.
     let gear = match enwiro_sdk::gear::LoadedGear::from_env_dir(&env_dir) {
         Ok(g) => g.into_map(),
         Err(e) => {
@@ -78,11 +83,13 @@ pub fn activate<W: Write>(
             std::collections::HashMap::new()
         }
     };
-    if let Err(e) = context.adapter.activate(&args.name, &managed_envs, &gear) {
+    if !gear.is_empty()
+        && let Err(e) = context.adapter.activate(&args.name, &managed_envs, &gear)
+    {
         context
             .notifier
-            .notify_error(&format!("Failed to activate workspace: {:#}", e));
-        return Err(e).context("Could not activate workspace");
+            .notify_error(&format!("Failed to apply gear: {:#}", e));
+        tracing::warn!(error = %e, "Could not apply gear, workspace exists without gear");
     }
 
     if env_dir.is_dir() && !env_dir.is_symlink() {

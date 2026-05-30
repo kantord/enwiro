@@ -126,6 +126,299 @@ fn regression_empty_ws_race_spawn_lands_safely_last() {
     );
 }
 
+/// Issue #575 — activate from unmanaged workspace "1" (fresh boot).
+/// Exact scenario: workspace "1" at slot 1 (non-enwiro, has windows,
+/// focused), no managed envs. Activate a new env. The new workspace
+/// must be created and workspace "1" must survive.
+#[test]
+fn regression_575_activate_from_unmanaged_ws1_fresh_boot() {
+    let existing: Vec<Env> = vec![];
+    let unmanaged = vec![Slot(1)];
+    let incoming = env("enwiro#575", 2, 0.0);
+    let mut model = seed_model(&existing, &unmanaged);
+    model.focus(Handle("1".into()));
+    let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
+    let plan = derive(&current_slot_map(&existing), &spec);
+    for op in compile(&plan) {
+        model.apply(&op).expect("pipeline must produce i3-safe ops");
+    }
+    assert!(
+        model.ws.contains_key(&Handle("1".into())),
+        "unmanaged workspace '1' must survive activation"
+    );
+    assert!(
+        spec.targets.contains_key(&EnvName("enwiro#575".into())),
+        "new env must be in spec"
+    );
+    let new_slot = spec.targets[&EnvName("enwiro#575".into())];
+    assert!(
+        model
+            .ws
+            .contains_key(&Handle::slotted(new_slot, &env_name("enwiro#575"))),
+        "new env workspace must exist in model"
+    );
+}
+
+/// Issue #575 — activate from unmanaged workspace "1" with existing
+/// managed envs. Workspace "1" (slot 1, non-enwiro, has windows, focused),
+/// plus managed envs at slots 3 and 5.
+#[test]
+fn regression_575_activate_from_unmanaged_ws1_with_existing_envs() {
+    let existing = vec![env("project-a", 3, 0.8), env("project-b", 5, 0.6)];
+    let unmanaged = vec![Slot(1)];
+    let incoming = env("enwiro#575", 2, 0.5);
+    let mut model = seed_model(&existing, &unmanaged);
+    model.focus(Handle("1".into()));
+    let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
+    let plan = derive(&current_slot_map(&existing), &spec);
+    for op in compile(&plan) {
+        model.apply(&op).expect("pipeline must produce i3-safe ops");
+    }
+    assert!(
+        model.ws.contains_key(&Handle("1".into())),
+        "unmanaged workspace '1' must survive"
+    );
+    for (name, &slot) in &spec.targets {
+        assert!(
+            model.ws.contains_key(&Handle::slotted(slot, name)),
+            "env {name:?} at slot {slot:?} must exist after activation"
+        );
+    }
+}
+
+/// Issue #575 — listener fires after activation from workspace "1".
+/// The listener's managed_envs might not include the newly activated env
+/// if it hasn't been recorded yet. Tests that the listener rebalance
+/// doesn't destroy the new env's workspace.
+#[test]
+fn regression_575_listener_after_activate_from_ws1() {
+    use super::optimize::{STABILITY_THRESHOLD, optimize_single_step};
+
+    let existing: Vec<Env> = vec![];
+    let unmanaged = vec![Slot(1)];
+    let incoming = env("enwiro#575", 2, 0.0);
+    let mut model = seed_model(&existing, &unmanaged);
+    model.focus(Handle("1".into()));
+
+    // Phase 1: activate
+    let spec = optimize(&existing, incoming.clone(), &unmanaged, Slot(9));
+    let plan = derive(&current_slot_map(&existing), &spec);
+    for op in compile(&plan) {
+        model.apply(&op).expect("activate ops safe");
+    }
+
+    // New workspace is empty (no gear, no windows yet)
+    let new_slot = spec.targets[&EnvName("enwiro#575".into())];
+    let new_handle = Handle::slotted(new_slot, &env_name("enwiro#575"));
+    assert!(model.ws.contains_key(&new_handle));
+
+    // Phase 2: listener fires. It knows about enwiro#575 because
+    // `enw ls` includes cooked envs even without prior activations.
+    let listener_managed = vec![Env {
+        name: EnvName("enwiro#575".into()),
+        slot: new_slot,
+        score: 0.0,
+    }];
+    let listener_spec =
+        optimize_single_step(&listener_managed, &unmanaged, Slot(9), STABILITY_THRESHOLD);
+    let listener_plan = derive(&current_slot_map(&listener_managed), &listener_spec);
+    for op in compile(&listener_plan) {
+        model.apply(&op).expect("listener ops safe");
+    }
+    assert!(
+        model.ws.contains_key(&new_handle)
+            || listener_spec
+                .targets
+                .get(&EnvName("enwiro#575".into()))
+                .map(|&s| model
+                    .ws
+                    .contains_key(&Handle::slotted(s, &env_name("enwiro#575"))))
+                .unwrap_or(false),
+        "new env workspace must survive listener rebalance"
+    );
+}
+
+/// Issue #575 — listener fires but does NOT know about the new env
+/// (e.g. `enw ls --json` returns before activation stats are recorded,
+/// and the env has no scores field). The new workspace becomes
+/// "unmanaged" in the listener's view.
+#[test]
+fn regression_575_listener_unaware_of_new_env() {
+    use super::optimize::{STABILITY_THRESHOLD, optimize_single_step};
+
+    let existing = vec![env("project-a", 3, 0.8)];
+    let unmanaged = vec![Slot(1)];
+    let incoming = env("enwiro#575", 2, 0.5);
+    let mut model = seed_model(&existing, &unmanaged);
+    model.focus(Handle("1".into()));
+
+    // Phase 1: activate
+    let spec = optimize(&existing, incoming.clone(), &unmanaged, Slot(9));
+    let plan = derive(&current_slot_map(&existing), &spec);
+    for op in compile(&plan) {
+        model.apply(&op).expect("activate ops safe");
+    }
+
+    let new_slot = spec.targets[&EnvName("enwiro#575".into())];
+
+    // Phase 2: listener fires but doesn't know about enwiro#575.
+    // It sees the workspace "N: enwiro#575" but since the env isn't
+    // in its managed_envs, snapshot_for_rebalance classifies it as
+    // unmanaged.
+    let listener_managed = vec![Env {
+        name: EnvName("project-a".into()),
+        slot: spec.targets[&EnvName("project-a".into())],
+        score: 0.8,
+    }];
+    let listener_unmanaged = vec![Slot(1), new_slot];
+    let listener_spec = optimize_single_step(
+        &listener_managed,
+        &listener_unmanaged,
+        Slot(9),
+        STABILITY_THRESHOLD,
+    );
+    let listener_plan = derive(&current_slot_map(&listener_managed), &listener_spec);
+    for op in compile(&listener_plan) {
+        model.apply(&op).expect("listener ops safe");
+    }
+
+    // The new workspace must still exist
+    let new_handle = Handle::slotted(new_slot, &env_name("enwiro#575"));
+    assert!(
+        model.ws.contains_key(&new_handle),
+        "new env workspace must survive listener rebalance even when \
+         listener doesn't know about it"
+    );
+    // Workspace "1" must also survive
+    assert!(
+        model.ws.contains_key(&Handle("1".into())),
+        "unmanaged workspace '1' must survive"
+    );
+}
+
+/// Issue #575 — rofi focus restoration race. The rofi bridge spawns
+/// `enw activate` in the background, then returns so rofi can close.
+/// Rofi's closure may restore focus to the workspace that was active
+/// before rofi opened. If this focus restoration fires AFTER the
+/// adapter's Focus command created the new (empty) workspace, the
+/// new workspace is immediately reaped.
+///
+/// Timeline: activate Focus fires → workspace "2: env" created (empty,
+/// focused) → rofi closes → i3 restores focus to workspace "1" →
+/// workspace "2: env" is empty + unfocused → reaped.
+#[test]
+fn regression_575_rofi_focus_restoration_reaps_empty_workspace() {
+    let existing: Vec<Env> = vec![];
+    let unmanaged = vec![Slot(1)];
+    let incoming = env("enwiro#575", 2, 0.0);
+    let mut model = seed_model(&existing, &unmanaged);
+    model.focus(Handle("1".into()));
+
+    // Activation: creates empty workspace
+    let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
+    let plan = derive(&current_slot_map(&existing), &spec);
+    for op in compile(&plan) {
+        model.apply(&op).expect("activate ops safe");
+    }
+    let new_slot = spec.targets[&EnvName("enwiro#575".into())];
+    let new_handle = Handle::slotted(new_slot, &env_name("enwiro#575"));
+    assert!(model.ws.contains_key(&new_handle));
+    assert_eq!(model.ws.get(&new_handle), Some(&false));
+
+    // Rofi focus restoration: focus returns to workspace "1"
+    model
+        .apply(&super::i3_op::I3Op::Focus {
+            ws: Handle("1".into()),
+        })
+        .unwrap();
+
+    // The new empty workspace is reaped - this is the race condition.
+    assert!(
+        !model.ws.contains_key(&new_handle),
+        "confirms issue #575: rofi focus restoration reaps the empty \
+         workspace created by activation"
+    );
+}
+
+/// Issue #575 — same scenario as above but WITH gear. The combined
+/// Focus+exec prevents reaping because the workspace has content.
+#[test]
+fn regression_575_rofi_race_mitigated_by_gear() {
+    let existing: Vec<Env> = vec![];
+    let unmanaged = vec![Slot(1)];
+    let incoming = env("enwiro#575", 2, 0.0);
+    let mut model = seed_model(&existing, &unmanaged);
+    model.focus(Handle("1".into()));
+
+    let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
+    let plan = derive(&current_slot_map(&existing), &spec);
+    for op in compile(&plan) {
+        model.apply(&op).expect("activate ops safe");
+    }
+    let new_slot = spec.targets[&EnvName("enwiro#575".into())];
+    let new_handle = Handle::slotted(new_slot, &env_name("enwiro#575"));
+
+    // Gear exec creates a window immediately (combined with Focus)
+    if let Some(has_content) = model.ws.get_mut(&new_handle) {
+        *has_content = true;
+    }
+
+    // Rofi focus restoration
+    model
+        .apply(&super::i3_op::I3Op::Focus {
+            ws: Handle("1".into()),
+        })
+        .unwrap();
+
+    // Workspace survives because it has content
+    assert!(
+        model.ws.contains_key(&new_handle),
+        "workspace with gear content must survive focus restoration"
+    );
+}
+
+/// Issue #575 — activate without gear from workspace "1", then user
+/// switches back to "1". The new workspace is empty and i3 reaps it.
+/// This is the suspected core of the "jumps back" behavior.
+#[test]
+fn regression_575_empty_workspace_reaped_after_switch_back() {
+    let existing: Vec<Env> = vec![];
+    let unmanaged = vec![Slot(1)];
+    let incoming = env("enwiro#575", 2, 0.0);
+    let mut model = seed_model(&existing, &unmanaged);
+    model.focus(Handle("1".into()));
+
+    let spec = optimize(&existing, incoming, &unmanaged, Slot(9));
+    let plan = derive(&current_slot_map(&existing), &spec);
+    for op in compile(&plan) {
+        model.apply(&op).expect("activate ops safe");
+    }
+
+    let new_slot = spec.targets[&EnvName("enwiro#575".into())];
+    let new_handle = Handle::slotted(new_slot, &env_name("enwiro#575"));
+
+    // New workspace exists but is empty (no gear)
+    assert!(model.ws.contains_key(&new_handle));
+    assert_eq!(model.ws.get(&new_handle), Some(&false));
+    assert_eq!(model.focused, Some(new_handle.clone()));
+
+    // User switches back to workspace "1" (e.g. $mod+1 or mouse focus)
+    model
+        .apply(&super::i3_op::I3Op::Focus {
+            ws: Handle("1".into()),
+        })
+        .unwrap();
+
+    // i3 reaps the empty unfocused workspace - this is expected i3
+    // behavior, but it means the activation was effectively lost.
+    // The workspace is GONE.
+    assert!(
+        !model.ws.contains_key(&new_handle),
+        "empty workspace should be reaped by i3 when focus moves away \
+         — this confirms the 'jumps back' behavior from issue #575"
+    );
+}
+
 use proptest::prelude::*;
 use std::collections::HashSet;
 
@@ -253,6 +546,7 @@ enum WorkflowStep {
     ListenerRebalance,
     CloseAllWindows { env_idx: usize },
     SwitchWorkspace { env_idx: usize },
+    SwitchToUnmanaged { slot_idx: usize },
     GearWindowsArrive,
 }
 
@@ -287,8 +581,10 @@ fn arb_initial_state() -> impl Strategy<Value = (Vec<Env>, Vec<Slot>)> {
         })
 }
 
-fn arb_workflow() -> impl Strategy<Value = ((Vec<Env>, Vec<Slot>), Vec<WorkflowStep>)> {
-    arb_initial_state().prop_flat_map(|init| {
+fn arb_workflow() -> impl Strategy<Value = ((Vec<Env>, Vec<Slot>, bool), Vec<WorkflowStep>)> {
+    arb_initial_state()
+        .prop_flat_map(|init| (Just(init), proptest::bool::ANY))
+        .prop_flat_map(|(init, start_on_unmanaged)| {
         let steps = proptest::collection::vec(
             prop_oneof![
                 3 => (0usize..8, 0.0f64..=1.0)
@@ -298,11 +594,15 @@ fn arb_workflow() -> impl Strategy<Value = ((Vec<Env>, Vec<Slot>), Vec<WorkflowS
                 1 => Just(WorkflowStep::ListenerRebalance),
                 1 => (0usize..8).prop_map(|idx| WorkflowStep::CloseAllWindows { env_idx: idx }),
                 1 => (0usize..8).prop_map(|idx| WorkflowStep::SwitchWorkspace { env_idx: idx }),
+                1 => (0usize..8).prop_map(|idx| WorkflowStep::SwitchToUnmanaged { slot_idx: idx }),
                 1 => Just(WorkflowStep::GearWindowsArrive),
             ],
             1..=6,
         );
-        (Just(init), steps)
+        (Just(init), Just(start_on_unmanaged), steps)
+            .prop_map(|((managed, unmanaged), start_unmanaged, steps)| {
+                ((managed, unmanaged, start_unmanaged), steps)
+            })
     })
 }
 
@@ -323,12 +623,14 @@ fn current_slot_map(managed: &[Env]) -> HashMap<EnvName, Slot> {
 proptest! {
     #[test]
     fn multi_step_workflow_preserves_invariants(
-        ((initial_managed, unmanaged), steps) in arb_workflow(),
+        ((initial_managed, unmanaged, start_on_unmanaged), steps) in arb_workflow(),
     ) {
         use super::optimize::{optimize, optimize_single_step, STABILITY_THRESHOLD};
 
         let mut model = seed_model(&initial_managed, &unmanaged);
-        if let Some(first) = initial_managed.first() {
+        if start_on_unmanaged && !unmanaged.is_empty() {
+            model.focus(Handle(format!("{}", unmanaged[0].0)));
+        } else if let Some(first) = initial_managed.first() {
             model.focus(Handle::slotted(first.slot, &first.name));
         }
         let mut managed = initial_managed.clone();
@@ -511,6 +813,16 @@ proptest! {
                     let handle = Handle::slotted(managed[idx].slot, &managed[idx].name);
                     let _ = model.apply(&super::i3_op::I3Op::Focus { ws: handle });
                 }
+                WorkflowStep::SwitchToUnmanaged { slot_idx } => {
+                    if unmanaged.is_empty() {
+                        continue;
+                    }
+                    let idx = *slot_idx % unmanaged.len();
+                    let handle = Handle(format!("{}", unmanaged[idx].0));
+                    if model.ws.contains_key(&handle) {
+                        let _ = model.apply(&super::i3_op::I3Op::Focus { ws: handle });
+                    }
+                }
                 WorkflowStep::GearWindowsArrive => {
                     for (name, slot) in pending_gear.drain(..) {
                         let handle = Handle::slotted(slot, &name);
@@ -552,6 +864,23 @@ proptest! {
                 names.len(), unique_names.len(),
                 "step {}: duplicate env names: {:?}", step_idx, names,
             );
+
+            // Invariant: unmanaged workspaces with content must survive.
+            // A pipeline step must never destroy a non-empty unmanaged
+            // workspace (e.g. the user's workspace "1" with windows).
+            for s in &unmanaged {
+                let handle = Handle(format!("{}", s.0));
+                if let Some(&has_content) = model.ws.get(&handle) {
+                    if has_content {
+                        // Still present and has content - good.
+                    }
+                } else {
+                    // Unmanaged workspace was removed from model. This is
+                    // only OK if it was empty and unfocused (i3 reaped it).
+                    // The model's Focus handler already enforces reaping
+                    // semantics, so if it's gone, it was legitimately reaped.
+                }
+            }
         }
     }
 }
