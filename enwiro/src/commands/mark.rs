@@ -84,7 +84,7 @@ mod tests {
         status: MarkStatus,
     ) -> (anyhow::Result<()>, String) {
         use enwiro_daemon::meta::{
-            EventLogEntry, EventType as ET, load_env_meta, now_utc, save_env_meta,
+            EventLogEntry, EventType as ET, StatusSource, load_env_meta, now_utc, save_env_meta,
         };
 
         let env_dir = workspaces_dir.join(env_name);
@@ -112,7 +112,7 @@ mod tests {
         meta.event_log.push(EventLogEntry {
             event_type: ET::StatusChange,
             detail: status_label.to_string(),
-            set_by: Some("user".to_string()),
+            set_by: Some(StatusSource::User),
             started: now,
             ended: Some(now),
         });

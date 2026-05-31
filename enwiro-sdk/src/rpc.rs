@@ -91,16 +91,6 @@ pub enum MarkSource {
     Auto,
 }
 
-impl MarkSource {
-    /// The `set_by` value stored on the status's event-log entry.
-    pub fn set_by(self) -> &'static str {
-        match self {
-            MarkSource::User => "user",
-            MarkSource::Auto => "auto",
-        }
-    }
-}
-
 /// Params for `env.mark`: set the status of an environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvMarkParams {

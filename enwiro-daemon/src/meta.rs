@@ -43,17 +43,81 @@ pub use enwiro_sdk::status::{
     CookedPhase, DoneOutcome, Status, StatusDetail, is_cookbook_settable,
 };
 
+/// Provenance of a status change: who set it. Lets the daemon refuse to
+/// overwrite a user-set status with an automatically-detected one (#302).
+///
+/// Serialized as a flat string for backward-compatible logs: `"user"`,
+/// `"auto"` (CLI auto-mark, no cookbook), or `"auto:<cookbook>"` (a cookbook's
+/// detector). Any unrecognized legacy value deserializes to `Auto` so it never
+/// blocks an automatic update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusSource {
+    User,
+    Auto { cookbook: Option<String> },
+}
+
+impl StatusSource {
+    /// True only for a manual user mark; the daemon must not overwrite these.
+    pub fn is_user(&self) -> bool {
+        matches!(self, StatusSource::User)
+    }
+}
+
+impl From<enwiro_sdk::rpc::MarkSource> for StatusSource {
+    /// CLI marks carry no cookbook name; an auto-mark from the CLI is plain
+    /// `Auto`. A cookbook detector sets `Auto { cookbook: Some(..) }` directly.
+    fn from(source: enwiro_sdk::rpc::MarkSource) -> Self {
+        match source {
+            enwiro_sdk::rpc::MarkSource::User => StatusSource::User,
+            enwiro_sdk::rpc::MarkSource::Auto => StatusSource::Auto { cookbook: None },
+        }
+    }
+}
+
+impl std::fmt::Display for StatusSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StatusSource::User => f.write_str("user"),
+            StatusSource::Auto { cookbook: None } => f.write_str("auto"),
+            StatusSource::Auto {
+                cookbook: Some(cookbook),
+            } => write!(f, "auto:{cookbook}"),
+        }
+    }
+}
+
+impl std::str::FromStr for StatusSource {
+    type Err = std::convert::Infallible;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "user" => StatusSource::User,
+            other => StatusSource::Auto {
+                cookbook: other.strip_prefix("auto:").map(str::to_string),
+            },
+        })
+    }
+}
+
+impl Serialize for StatusSource {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for StatusSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(raw.parse().expect("StatusSource::from_str is infallible"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventLogEntry {
     #[serde(rename = "type")]
     pub event_type: EventType,
     pub detail: String,
-    /// Who set this status: `"user"` (manual `enw mark`) or `"auto:<cookbook>"`
-    /// (automatic detection). Lets the daemon refuse to overwrite a
-    /// user-set status with an automatic one (#302). Optional for
-    /// backward-compatible deserialization of pre-existing logs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub set_by: Option<String>,
+    pub set_by: Option<StatusSource>,
     pub started: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended: Option<DateTime<Utc>>,
@@ -183,6 +247,38 @@ pub fn record_cook_metadata_per_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `StatusSource` must round-trip through the flat legacy wire strings so
+    /// existing `meta.json` logs keep deserializing unchanged.
+    #[test]
+    fn status_source_wire_format_roundtrips() {
+        let cases = [
+            (StatusSource::User, "\"user\""),
+            (StatusSource::Auto { cookbook: None }, "\"auto\""),
+            (
+                StatusSource::Auto {
+                    cookbook: Some("git".to_string()),
+                },
+                "\"auto:git\"",
+            ),
+        ];
+        for (value, json) in cases {
+            assert_eq!(serde_json::to_string(&value).unwrap(), json);
+            assert_eq!(
+                serde_json::from_str::<StatusSource>(json).unwrap(),
+                value,
+                "round-trip mismatch for {json}"
+            );
+        }
+    }
+
+    /// An unrecognized legacy `set_by` deserializes to `Auto` (never `User`)
+    /// so it can never wrongly block an automatic update.
+    #[test]
+    fn status_source_unknown_legacy_value_is_auto() {
+        let parsed: StatusSource = serde_json::from_str("\"something-else\"").unwrap();
+        assert!(!parsed.is_user());
+    }
 
     #[test]
     fn test_per_env_record_activation() {

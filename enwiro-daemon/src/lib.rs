@@ -429,8 +429,8 @@ fn last_status_change_is_user_set(meta: &crate::meta::EnvStats) -> bool {
         .iter()
         .rev()
         .find(|e| e.event_type == crate::meta::EventType::StatusChange)
-        .and_then(|e| e.set_by.as_deref())
-        == Some("user")
+        .and_then(|e| e.set_by.as_ref())
+        .is_some_and(crate::meta::StatusSource::is_user)
 }
 
 /// Event-log label for a cookbook-settable status, or `None` for one a
@@ -457,7 +457,9 @@ fn write_auto_status(
     meta.event_log.push(crate::meta::EventLogEntry {
         event_type: crate::meta::EventType::StatusChange,
         detail: label.to_string(),
-        set_by: Some(format!("auto:{cookbook}")),
+        set_by: Some(crate::meta::StatusSource::Auto {
+            cookbook: Some(cookbook.to_string()),
+        }),
         started: now,
         ended: Some(now),
     });
@@ -846,13 +848,11 @@ mod tests {
         assert_eq!(entries[1].name, "low-priority-branch");
     }
 
-    // ---- apply_auto_status (the cookbook-driven write gate, #302) ----
-
     mod apply_auto_status_tests {
         use super::super::apply_auto_status;
         use crate::meta::{
             CookedPhase, DoneOutcome, EnvStats, EventLogEntry, EventType, Status, StatusDetail,
-            load_env_meta, now_utc, save_env_meta,
+            StatusSource, load_env_meta, now_utc, save_env_meta,
         };
         use std::path::{Path, PathBuf};
 
@@ -875,14 +875,14 @@ mod tests {
         }
 
         /// Seed an existing status + a `StatusChange` event with the given `set_by`.
-        fn seed_status(env_dir: &Path, status: Status, set_by: &str) {
+        fn seed_status(env_dir: &Path, status: Status, set_by: StatusSource) {
             let mut meta = load_env_meta(env_dir);
             meta.status = Some(status);
             let now = now_utc();
             meta.event_log.push(EventLogEntry {
                 event_type: EventType::StatusChange,
                 detail: "seed".to_string(),
-                set_by: Some(set_by.to_string()),
+                set_by: Some(set_by),
                 started: now,
                 ended: Some(now),
             });
@@ -904,7 +904,12 @@ mod tests {
             assert_eq!(meta.status, Some(Status::Evergreen));
             let last = meta.event_log.last().unwrap();
             assert_eq!(last.event_type, EventType::StatusChange);
-            assert_eq!(last.set_by.as_deref(), Some("auto:git"));
+            assert_eq!(
+                last.set_by,
+                Some(StatusSource::Auto {
+                    cookbook: Some("git".to_string())
+                })
+            );
         }
 
         #[test]
@@ -925,7 +930,7 @@ mod tests {
                     phase: Some(CookedPhase::Waiting),
                     detail: None,
                 },
-                "user",
+                StatusSource::User,
             );
             apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
             assert!(matches!(
@@ -947,7 +952,9 @@ mod tests {
                     phase: None,
                     detail: None,
                 },
-                "auto:cook",
+                StatusSource::Auto {
+                    cookbook: Some("cook".to_string()),
+                },
             );
             apply_auto_status(ws.path(), "github", "p", done());
             assert_eq!(load_env_meta(&env).status, Some(done()));
@@ -1052,7 +1059,7 @@ mod tests {
                     event_log: vec![EventLogEntry {
                         event_type: EventType::StatusChange,
                         detail: "user".to_string(),
-                        set_by: Some("user".to_string()),
+                        set_by: Some(crate::meta::StatusSource::User),
                         started: now,
                         ended: Some(now),
                     }],

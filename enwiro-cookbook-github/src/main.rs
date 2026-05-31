@@ -1447,12 +1447,13 @@ mod tests {
         assert_eq!(compute_sort_order(2, 3), 100);
     }
 
-    // --- interpret_gh_output tests ---
+    mod interpret_gh_output_tests {
+        use super::*;
 
-    /// Minimal valid GraphQL JSON with one PR node, used as a fixture for the
-    /// truncation-warning tests below.
-    fn gh_output_with_one_pr() -> Vec<u8> {
-        r#"{
+        /// Minimal valid GraphQL JSON with one PR node, used as a fixture for the
+        /// truncation-warning tests below.
+        fn gh_output_with_one_pr() -> Vec<u8> {
+            r#"{
             "data": {
                 "search": {
                     "nodes": [
@@ -1467,52 +1468,53 @@ mod tests {
                 }
             }
         }"#
-        .as_bytes()
-        .to_vec()
-    }
+            .as_bytes()
+            .to_vec()
+        }
 
-    /// When gh exits non-zero AND stderr contains the 100-result truncation
-    /// warning AND stdout is valid JSON, `interpret_gh_output` must return the
-    /// parsed items instead of an error.
-    #[test]
-    fn test_interpret_gh_output_truncation_warning_returns_partial_results() {
-        let stdout = gh_output_with_one_pr();
-        let stderr =
-            b"GitHub search returned 100 results (the maximum). Some results may be missing."
-                .to_vec();
+        /// When gh exits non-zero AND stderr contains the 100-result truncation
+        /// warning AND stdout is valid JSON, `interpret_gh_output` must return the
+        /// parsed items instead of an error.
+        #[test]
+        fn test_interpret_gh_output_truncation_warning_returns_partial_results() {
+            let stdout = gh_output_with_one_pr();
+            let stderr =
+                b"GitHub search returned 100 results (the maximum). Some results may be missing."
+                    .to_vec();
 
-        // success = false simulates a non-zero exit code
-        let result = interpret_gh_output(&stdout, &stderr, false);
+            // success = false simulates a non-zero exit code
+            let result = interpret_gh_output(&stdout, &stderr, false);
 
-        assert!(
-            result.is_ok(),
-            "Expected Ok with partial results, got Err: {:?}",
-            result.unwrap_err()
-        );
-        let items = result.unwrap();
-        assert_eq!(
-            items.len(),
-            1,
-            "Expected 1 parsed item from partial results, got {}",
-            items.len()
-        );
-        assert_eq!(items[0].number, 42);
-    }
+            assert!(
+                result.is_ok(),
+                "Expected Ok with partial results, got Err: {:?}",
+                result.unwrap_err()
+            );
+            let items = result.unwrap();
+            assert_eq!(
+                items.len(),
+                1,
+                "Expected 1 parsed item from partial results, got {}",
+                items.len()
+            );
+            assert_eq!(items[0].number, 42);
+        }
 
-    /// When gh exits non-zero AND stderr does NOT contain the truncation
-    /// warning, `interpret_gh_output` must still return an error (the original
-    /// bail! behaviour must be preserved for real failures).
-    #[test]
-    fn test_interpret_gh_output_real_failure_still_errors() {
-        let stdout = gh_output_with_one_pr();
-        let stderr = b"some other gh error: authentication failed".to_vec();
+        /// When gh exits non-zero AND stderr does NOT contain the truncation
+        /// warning, `interpret_gh_output` must still return an error (the original
+        /// bail! behaviour must be preserved for real failures).
+        #[test]
+        fn test_interpret_gh_output_real_failure_still_errors() {
+            let stdout = gh_output_with_one_pr();
+            let stderr = b"some other gh error: authentication failed".to_vec();
 
-        let result = interpret_gh_output(&stdout, &stderr, false);
+            let result = interpret_gh_output(&stdout, &stderr, false);
 
-        assert!(
-            result.is_err(),
-            "Expected Err for a real gh failure, but got Ok"
-        );
+            assert!(
+                result.is_err(),
+                "Expected Err for a real gh failure, but got Ok"
+            );
+        }
     }
 
     mod gear_subcommand {
