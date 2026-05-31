@@ -119,28 +119,50 @@ fn try_detect_branch(
     verdict(&repo, branch_tip, default_tip)
 }
 
+/// Rebase / cherry-pick: every feature-side commit's patch already appears on
+/// the default branch. An empty feature side never counts as merged.
+fn all_feature_patches_present(feature_patch_ids: &[Oid], default_patch_ids: &[Oid]) -> bool {
+    !feature_patch_ids.is_empty()
+        && feature_patch_ids
+            .iter()
+            .all(|id| default_patch_ids.contains(id))
+}
+
+/// Squash (undiverged only): the cumulative `base..tip` diff collapses to a
+/// single patch whose id appears among the default branch's commits.
+fn squash_patch_present(
+    repo: &Repository,
+    base_tree: &git2::Tree,
+    tip_tree: &git2::Tree,
+    default_patch_ids: &[Oid],
+) -> anyhow::Result<bool> {
+    let cumulative = patch_id_of_tree_diff(repo, Some(base_tree), tip_tree)?;
+    Ok(cumulative.is_some_and(|id| default_patch_ids.contains(&id)))
+}
+
 /// Core decision over two commit tips in `repo`. Separated from I/O so it
-/// is unit-testable against synthetic repositories.
+/// is unit-testable against synthetic repositories. Each merge shape has its
+/// own named check; they are ordered cheapest-and-most-definitive first.
 pub fn verdict(repo: &Repository, branch_tip: Oid, default_tip: Oid) -> anyhow::Result<Verdict> {
     // The default branch itself, or an identical tip: nothing to merge.
     if branch_tip == default_tip {
         return Ok(Verdict::NotMerged);
     }
 
-    // 1. merge-commit / fast-forward: branch tip is an ancestor of default.
-    // The definitive, net-change-independent signal — checked first (a merge
-    // commit makes the branch tip its own merge-base with default, which
-    // would otherwise trip the zero-net-change guard below).
+    // Merge-commit / fast-forward: branch tip is an ancestor of default. The
+    // definitive, net-change-independent signal — checked before the
+    // zero-net-change guard (a merge commit makes the branch tip its own
+    // merge-base with default, which would otherwise trip that guard).
     if repo.graph_descendant_of(default_tip, branch_tip)? {
         return Ok(Verdict::Merged);
     }
 
     let base = repo.merge_base(branch_tip, default_tip)?;
+    let tip_tree = repo.find_commit(branch_tip)?.tree()?;
+    let base_tree = repo.find_commit(base)?.tree()?;
 
     // Zero-net-change guard: a branch whose tree equals the merge-base tree
     // (e.g. add-then-revert) would spuriously match an empty patch.
-    let tip_tree = repo.find_commit(branch_tip)?.tree()?;
-    let base_tree = repo.find_commit(base)?.tree()?;
     if tip_tree.id() == base_tree.id() {
         return Ok(Verdict::NotMerged);
     }
@@ -148,22 +170,10 @@ pub fn verdict(repo: &Repository, branch_tip: Oid, default_tip: Oid) -> anyhow::
     // Patch-ids of the commits unique to the default branch since the base —
     // the candidate pool for both the rebase and squash checks.
     let default_patch_ids = patch_ids_in_range(repo, base, default_tip)?;
-
-    // 2. rebase / cherry-pick: every feature-side commit's patch is present.
     let feature_patch_ids = patch_ids_in_range(repo, base, branch_tip)?;
-    if !feature_patch_ids.is_empty()
-        && feature_patch_ids
-            .iter()
-            .all(|id| default_patch_ids.contains(id))
-    {
-        return Ok(Verdict::Merged);
-    }
 
-    // 3. squash (undiverged only): the cumulative base..tip diff collapses to
-    // one patch whose id should equal the squash commit's patch-id.
-    let cumulative = patch_id_of_tree_diff(repo, Some(&base_tree), &tip_tree)?;
-    if let Some(id) = cumulative
-        && default_patch_ids.contains(&id)
+    if all_feature_patches_present(&feature_patch_ids, &default_patch_ids)
+        || squash_patch_present(repo, &base_tree, &tip_tree, &default_patch_ids)?
     {
         return Ok(Verdict::Merged);
     }

@@ -402,6 +402,70 @@ pub async fn run(
     Ok(())
 }
 
+/// Env dir for a recipe: stored under the recipe name with `/` flattened to `-`.
+fn env_dir_for_recipe(workspaces_directory: &Path, recipe: &str) -> PathBuf {
+    workspaces_directory.join(recipe.replace('/', "-"))
+}
+
+/// Only the cookbook that owns an env may set its status. An env with no
+/// recorded cookbook is owned by no one and so settable by any.
+fn cookbook_owns_env(meta: &crate::meta::EnvStats, cookbook: &str) -> bool {
+    meta.cookbook.as_deref().is_none_or(|c| c == cookbook)
+}
+
+/// Whether `recipe` matches the env's recorded recipe. `recipe` is only
+/// recorded since #325, so pre-#325 envs (`recipe: None`) match by env-dir
+/// name + ownership alone.
+/// TODO(legacy, revisit after 2026-06): once pre-#325 envs have aged out,
+/// tighten this to require `meta.recipe == Some(recipe)`.
+fn recipe_matches_env(meta: &crate::meta::EnvStats, recipe: &str) -> bool {
+    meta.recipe.as_deref().is_none_or(|r| r == recipe)
+}
+
+/// Manual override wins: true when the most recent status change was user-set,
+/// so an auto-status must not overwrite it.
+fn last_status_change_is_user_set(meta: &crate::meta::EnvStats) -> bool {
+    meta.event_log
+        .iter()
+        .rev()
+        .find(|e| e.event_type == crate::meta::EventType::StatusChange)
+        .and_then(|e| e.set_by.as_deref())
+        == Some("user")
+}
+
+/// Event-log label for a cookbook-settable status, or `None` for one a
+/// cookbook may not set.
+fn auto_status_label(status: &crate::meta::Status) -> Option<&'static str> {
+    match status {
+        crate::meta::Status::Done { .. } => Some("done"),
+        crate::meta::Status::Evergreen => Some("evergreen"),
+        _ => None,
+    }
+}
+
+/// Write a cookbook-reported auto-status into a loaded env `meta` and persist it.
+fn write_auto_status(
+    env_dir: &Path,
+    recipe: &str,
+    cookbook: &str,
+    mut meta: crate::meta::EnvStats,
+    status: crate::meta::Status,
+    label: &str,
+) {
+    let now = crate::meta::now_utc();
+    meta.status = Some(status);
+    meta.event_log.push(crate::meta::EventLogEntry {
+        event_type: crate::meta::EventType::StatusChange,
+        detail: label.to_string(),
+        set_by: Some(format!("auto:{cookbook}")),
+        started: now,
+        ended: Some(now),
+    });
+    if let Err(e) = crate::meta::save_env_meta(env_dir, &meta) {
+        tracing::error!(error = %e, recipe, "failed to save auto status");
+    }
+}
+
 /// Apply a cookbook-reported auto-status to the recipe's env `meta.json`.
 /// Best-effort: silently ignores statuses a cookbook may not set, recipes
 /// with no matching env, and envs whose status the user set manually.
@@ -411,43 +475,24 @@ fn apply_auto_status(
     recipe: &str,
     status: crate::meta::Status,
 ) {
-    use crate::meta::{
-        EventLogEntry, EventType, Status, is_cookbook_settable, load_env_meta, now_utc,
-        save_env_meta,
-    };
-
-    if !is_cookbook_settable(&status) {
+    if !crate::meta::is_cookbook_settable(&status) {
         tracing::debug!(recipe, "ignoring auto status a cookbook may not set");
         return;
     }
 
-    // Envs are stored under the recipe name with `/` flattened to `-`.
-    let env_dir = workspaces_directory.join(recipe.replace('/', "-"));
+    let env_dir = env_dir_for_recipe(workspaces_directory, recipe);
     if !env_dir.is_dir() {
         return;
     }
 
-    let mut meta = load_env_meta(&env_dir);
-    // Ownership guard: only the cookbook that owns this env may set its status.
-    if meta.cookbook.as_deref().is_some_and(|c| c != cookbook) {
+    let meta = crate::meta::load_env_meta(&env_dir);
+    if !cookbook_owns_env(&meta, cookbook) {
         return;
     }
-    // Identity guard. `recipe` is only recorded since #325, so pre-#325 envs
-    // have `recipe: None` and are matched by env-dir name + ownership alone.
-    // TODO(legacy, revisit after 2026-06): once pre-#325 envs have aged out,
-    // tighten this to require `meta.recipe == Some(recipe)`.
-    if meta.recipe.as_deref().is_some_and(|r| r != recipe) {
+    if !recipe_matches_env(&meta, recipe) {
         return;
     }
-    // Manual override wins: if the most recent status change was user-set,
-    // never overwrite it automatically.
-    let last_set_by = meta
-        .event_log
-        .iter()
-        .rev()
-        .find(|e| e.event_type == EventType::StatusChange)
-        .and_then(|e| e.set_by.as_deref());
-    if last_set_by == Some("user") {
+    if last_status_change_is_user_set(&meta) {
         return;
     }
     // No-op if unchanged, to avoid log spam.
@@ -455,23 +500,11 @@ fn apply_auto_status(
         return;
     }
 
-    let label = match &status {
-        Status::Done { .. } => "done",
-        Status::Evergreen => "evergreen",
-        _ => return, // unreachable given is_cookbook_settable, but be safe
+    // unreachable given is_cookbook_settable above, but stay defensive.
+    let Some(label) = auto_status_label(&status) else {
+        return;
     };
-    let now = now_utc();
-    meta.status = Some(status);
-    meta.event_log.push(EventLogEntry {
-        event_type: EventType::StatusChange,
-        detail: label.to_string(),
-        set_by: Some(format!("auto:{cookbook}")),
-        started: now,
-        ended: Some(now),
-    });
-    if let Err(e) = save_env_meta(&env_dir, &meta) {
-        tracing::error!(error = %e, recipe, "failed to save auto status");
-    }
+    write_auto_status(&env_dir, recipe, cookbook, meta, status, label);
 }
 
 #[cfg(test)]

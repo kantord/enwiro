@@ -52,26 +52,28 @@ and `sort_order`:
 - Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
 
-**Sorting matters.** Enwiro uses `sort_order` to interleave recipes from all
-cookbooks into a single globally sorted list. Within the same `sort_order`,
-recipes are further sorted by cookbook priority (see `metadata`) and then
-alphabetically by name.
-
-Within a cookbook, a good default is: most relevant or most recently used items
-first, with `sort_order` assigned linearly based on position.
+**Ordering within your cookbook:** a good default is to list the most relevant
+or most recently used items first. How that ranking is then combined with other
+cookbooks' recipes is what `sort_order` controls — see below.
 
 #### Global sort order
 
 The `sort_order` field (0–100) lets enwiro merge recipes from different
 cookbooks into a single relevance-ranked list. Without it, all recipes from a
 higher-priority cookbook would appear before any recipe from a lower-priority
-one, regardless of individual relevance.
+one, regardless of individual relevance. Ties within the same `sort_order` are
+broken by cookbook priority (see [`metadata`](#metadata)) and then
+alphabetically by name.
 
 **Convention:** After sorting your recipes internally, assign `sort_order`
-linearly based on position:
+linearly based on position. For a list of `total` recipes, the recipe at
+position `index` (starting from 0) gets:
 
 ```
-sort_order = if total <= 1 { 0 } else { (index * 100) / (total - 1) }
+if total <= 1:
+    sort_order = 0
+else:
+    sort_order = (index * 100) / (total - 1)
 ```
 
 This maps the first recipe to 0 and the last to 100, with intermediate values
@@ -144,27 +146,36 @@ fields for forward compatibility.
 enwiro-cookbook-yourname listen
 ```
 
-**Optional.** A long-running subcommand: the daemon keeps it alive and reads
-newline-delimited JSON from its stdout. Emit a batch when your recipes or
-their statuses change, then sleep. Each line is one of:
+**Optional.** A long-running subcommand: instead of exiting, your binary stays
+running and the daemon reads newline-delimited JSON from its stdout. Use it to
+keep enwiro up to date when things change in the background - a repo gets a new
+branch, a pull request is merged, and so on. Print an update line whenever
+something changes, then go back to sleep. Each line is one of two kinds:
 
-- `{"type":"recipes","data":[ ...recipes... ]}` — the full current recipe
-  list (the same objects as [`list-recipes`](#list-recipes)), replacing the
-  previous one.
-- `{"type":"status_changed","recipe":"<name>","status":{ ... }}` — an
-  auto-detected status for one env, so it appears in `enw ls` without the user
-  running `enw mark`. `status` is the object stored in the env's `meta.json`
-  (e.g. `{"type":"done"}`, `{"type":"evergreen"}`).
+- **Updated recipe list:**
+  `{"type":"recipes","data":[ ...recipes... ]}` - the full current set of
+  recipes (the same objects [`list-recipes`](#list-recipes) prints), replacing
+  whatever was sent before.
+- **Status update:**
+  `{"type":"status_changed","recipe":"<name>","status":{ ... }}` - marks one
+  environment as finished or always-on, so its state shows up in `enw ls`
+  without the user running `enw mark` by hand. The two statuses a cookbook may
+  send are `{"type":"done"}` (the work is finished, e.g. the branch was merged)
+  and `{"type":"evergreen"}` (an environment that is never "finished", like a
+  dotfiles or notes directory).
 
-A cookbook may only set the *derived* statuses **`done`** and **`evergreen`**-----it's unclear to users what derived tstaus woudl mean. please ask a subagent to revie the entire docs (withotu knowledg eof the project) and understand what parts woudl be confusing/irrelevant to most new users
-— never `active`/`waiting`, which are the user's to set. When unsure, emit
-nothing: re-emitting an unchanged status is a no-op, and an auto-status never
-overwrites one the user set manually.  -- odd way to phrase it. aain, cookbook atuhors may know little about this, we shoudl explain that simply  "cookbook do not set "Active" or "waiting", those are set by the user manually. that's it, nothign else is needed
-—
-#### Rust SDK helper
+**Cookbooks only ever set `done` or `evergreen`.** The `active` and `waiting`
+statuses are the user's - they set those by hand with `enw mark`, and a cookbook
+must never send them. If you're not sure an environment is done, send nothing.
 
-If your cookbook is in Rust, `enwiro_sdk::listen::{serve, serve_updates}`
-implement this loop (and the JSON framing) for you, so you don't hand-roll it.
+#### A note for Rust cookbooks
+
+If you write your cookbook in Rust, you don't have to implement this loop or the
+JSON formatting yourself. The `enwiro_sdk` crate provides two helpers in its
+`listen` module, `serve` and `serve_updates`, that run the loop, format each
+line correctly, and skip sending an update when nothing actually changed. Wrap
+your "what are the current recipes and statuses?" logic in one of them and the
+SDK handles the rest.
 
 ## Output Encoding
 
@@ -286,26 +297,25 @@ When a user activates a recipe:
 2. The returned path is symlinked into `~/.enwiro_envs/<recipe_name>/`.
 3. The window manager workspace is switched to the new environment.
 
-## Extending another cookbook
+## Advanced: building on another cookbook
 
-Cookbooks may build on each other - e.g. the GitHub cookbook produces
-enriched versions of what the git cookbook does, and both share git-native
-logic like "is this branch merged?". There are two ways to reuse another
-cookbook, and which one applies depends only on how your cookbook is built:
+Most cookbooks are self-contained, so you can skip this section unless you need
+it. Sometimes one cookbook wants to reuse another - for example, the GitHub
+cookbook builds on what the git cookbook does, and both need git logic like "is
+this branch merged?".
 
-- **Library linking (same language).** If your cookbook is written in the
-  same language as the one you want to reuse and can depend on it as a
-  library, just import its code directly. The GitHub cookbook does this with
-  the git cookbook (a normal crate dependency) to reuse the merge-detection
-  helper. This is plain code reuse — nothing enwiro-specific.
-- **Subprocess delegation (any language).** When you *can't* link (different
-  language, or you only have the other cookbook's binary), call it as a
-  subprocess. The daemon exposes `cookbook.invoke` over its RPC socket so a
-  cookbook can ask another cookbook to run an operation and read its result —
-  works regardless of implementation language. See ADR-0002. --- this is good, but there is no need to link to the adr, and also we can emphasize the subprocess creation as  the main flow, and the library linking asw a nice to know for code reuse
+The general-purpose way to do this, **which works no matter what language each
+cookbook is written in**, is subprocess delegation: ask the other cookbook to do
+something by running it and reading its output. The daemon exposes a
+`cookbook.invoke` call over its socket so one cookbook can have another run an
+operation and hand back the result. Because it only relies on running a binary
+and reading its output, it works across any language boundary.
 
-Use library linking when you can (simplest, no IPC), and subprocess
-delegation when you must cross a language boundary.
+If both cookbooks happen to be written in the same language and one can depend on
+the other as a library, you can also just import its code directly - plain code
+reuse, nothing enwiro-specific. The GitHub cookbook does this with the git
+cookbook to share the merge-detection helper. This is simpler when it applies,
+but subprocess delegation is the option that always works.
 
 ## Tips
 
