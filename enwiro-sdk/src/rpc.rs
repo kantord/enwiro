@@ -79,11 +79,37 @@ pub struct EnvCurrentResult {
     pub timestamp: Option<String>,
 }
 
+/// Who set a status, so the daemon can protect explicit user marks from
+/// being overwritten by automatic detection (#302). `User` covers manual
+/// channels (`enw mark`, kanban); `Auto` covers system marks (on cook/prep)
+/// and is overridable by cookbook-reported status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkSource {
+    #[default]
+    User,
+    Auto,
+}
+
+impl MarkSource {
+    /// The `set_by` value stored on the status's event-log entry.
+    pub fn set_by(self) -> &'static str {
+        match self {
+            MarkSource::User => "user",
+            MarkSource::Auto => "auto",
+        }
+    }
+}
+
 /// Params for `env.mark`: set the status of an environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvMarkParams {
     pub env_name: String,
     pub status: String,
+    /// Provenance of this mark. Defaults to `User` for wire-compatibility
+    /// with older clients that don't send it.
+    #[serde(default)]
+    pub source: MarkSource,
 }
 
 /// Result shape for `env.mark`.

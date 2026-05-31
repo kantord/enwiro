@@ -1614,8 +1614,8 @@ fn main() -> anyhow::Result<()> {
         EnwiroCookbookGithub::Listen => {
             let payload = CookbookPayload::read_first_line_from_stdin()
                 .context("Could not read cookbook payload from stdin")?;
-            let config: ConfigurationValues =
-                serde_json::from_value(payload.config).unwrap_or_default();
+            let config: ConfigurationValues = serde_json::from_value(payload.config)
+                .context("Could not deserialize cookbook-github configuration")?;
             enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, move || {
                 let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
                     data: collect_recipes(),

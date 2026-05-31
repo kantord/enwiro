@@ -51,6 +51,7 @@ pub fn mark<W: Write>(context: &mut CommandContext<W>, args: MarkArgs) -> anyhow
             EnvMarkParams {
                 env_name: env_name.clone(),
                 status: status_label.to_string(),
+                source: enwiro_sdk::rpc::MarkSource::User,
             },
         )
         .await

@@ -94,7 +94,7 @@ impl<W: Write> CommandContext<W> {
         self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
         self.write_garnish_gear(&env_path, &flat_name, cfg);
-        mark_via_daemon(&flat_name, "active");
+        mark_via_daemon(&flat_name, "active", enwiro_sdk::rpc::MarkSource::Auto);
         Ok(env)
     }
 
@@ -237,7 +237,7 @@ impl<W: Write> CommandContext<W> {
     }
 }
 
-pub(crate) fn mark_via_daemon(env_name: &str, status: &str) {
+pub(crate) fn mark_via_daemon(env_name: &str, status: &str, source: enwiro_sdk::rpc::MarkSource) {
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -251,6 +251,7 @@ pub(crate) fn mark_via_daemon(env_name: &str, status: &str) {
             EnvMarkParams {
                 env_name: env_name.to_string(),
                 status: status.to_string(),
+                source,
             },
         )
         .await

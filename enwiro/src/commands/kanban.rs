@@ -163,7 +163,7 @@ pub fn kanban<W: Write>(context: &mut CommandContext<W>, _args: KanbanArgs) -> a
             Action::Quit => break None,
             Action::Activate(name) => break Some(name),
             Action::Mark(name, status) => {
-                crate::context::mark_via_daemon(&name, status);
+                crate::context::mark_via_daemon(&name, status, enwiro_sdk::rpc::MarkSource::User);
                 state = load_board(context, Some(&state))?;
             }
         }
