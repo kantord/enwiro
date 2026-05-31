@@ -377,6 +377,14 @@ pub async fn run(
                                     last_cache_content = Some(new_cache);
                                 }
                             }
+                            Ok(RecipeUpdate::StatusChanged { recipe, status }) => {
+                                apply_auto_status(
+                                    &workspaces_directory,
+                                    &item.key.key,
+                                    &recipe,
+                                    status,
+                                );
+                            }
                             Err(e) => {
                                 tracing::debug!(cookbook = %item.key.key, error = %e, line = %item.line, "Could not parse RecipeUpdate from cookbook stdout");
                             }
@@ -392,6 +400,71 @@ pub async fn run(
     remove_pid_file(&dir);
     let _ = std::fs::remove_file(&rpc_socket_path);
     Ok(())
+}
+
+/// Apply a cookbook-reported auto-status to the recipe's env `meta.json`.
+/// Best-effort: silently ignores statuses a cookbook may not set, recipes
+/// with no matching env, and envs whose status the user set manually.
+fn apply_auto_status(
+    workspaces_directory: &Path,
+    cookbook: &str,
+    recipe: &str,
+    status: crate::meta::Status,
+) {
+    use crate::meta::{
+        EventLogEntry, EventType, Status, is_cookbook_settable, load_env_meta, now_utc,
+        save_env_meta,
+    };
+
+    if !is_cookbook_settable(&status) {
+        tracing::debug!(recipe, "ignoring auto status a cookbook may not set");
+        return;
+    }
+
+    // Envs are stored under the recipe name with `/` flattened to `-`.
+    let env_dir = workspaces_directory.join(recipe.replace('/', "-"));
+    if !env_dir.is_dir() {
+        return;
+    }
+
+    let mut meta = load_env_meta(&env_dir);
+    // Only act on the env actually cooked from this recipe.
+    if meta.recipe.as_deref() != Some(recipe) {
+        return;
+    }
+    // Manual override wins: if the most recent status change was user-set,
+    // never overwrite it automatically.
+    let last_set_by = meta
+        .event_log
+        .iter()
+        .rev()
+        .find(|e| e.event_type == EventType::StatusChange)
+        .and_then(|e| e.set_by.as_deref());
+    if last_set_by == Some("user") {
+        return;
+    }
+    // No-op if unchanged, to avoid log spam.
+    if meta.status.as_ref() == Some(&status) {
+        return;
+    }
+
+    let label = match &status {
+        Status::Done { .. } => "done",
+        Status::Evergreen => "evergreen",
+        _ => return, // unreachable given is_cookbook_settable, but be safe
+    };
+    let now = now_utc();
+    meta.status = Some(status);
+    meta.event_log.push(EventLogEntry {
+        event_type: EventType::StatusChange,
+        detail: label.to_string(),
+        set_by: Some(format!("auto:{cookbook}")),
+        started: now,
+        ended: Some(now),
+    });
+    if let Err(e) = save_env_meta(&env_dir, &meta) {
+        tracing::error!(error = %e, recipe, "failed to save auto status");
+    }
 }
 
 #[cfg(test)]

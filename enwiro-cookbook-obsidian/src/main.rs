@@ -263,10 +263,23 @@ fn main() -> Result<()> {
         EnwiroCookbookObsidian::Listen => {
             let _ = CookbookPayload::read_first_line_from_stdin()
                 .context("Could not read cookbook payload from stdin")?;
-            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || {
-                read_obsidian_json()
+            // Vaults are the canonical evergreen workspace (never "done") ->
+            // mark every vault recipe evergreen (#302).
+            enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, || {
+                use enwiro_sdk::listen::RecipeUpdate;
+                use enwiro_sdk::status::Status;
+                let recipes = read_obsidian_json()
                     .and_then(|json| list_recipes_from_json(&json))
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let mut updates: Vec<RecipeUpdate> = recipes
+                    .iter()
+                    .map(|r| RecipeUpdate::StatusChanged {
+                        recipe: r.name.clone(),
+                        status: Status::Evergreen,
+                    })
+                    .collect();
+                updates.push(RecipeUpdate::Recipes { data: recipes });
+                updates
             });
         }
     }

@@ -403,6 +403,49 @@ fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
         .collect()
 }
 
+/// Auto-detected status events for the current recipes (#302). Base-repo
+/// recipes (no `@`) are `evergreen`; branch recipes are `done` when the
+/// branch is merged into the default branch. Recipes with no firm verdict
+/// emit nothing, so the daemon never auto-marks on a guess.
+fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
+    use enwiro_cookbook_git::detect::{self, Verdict};
+    use enwiro_sdk::listen::RecipeUpdate;
+    use enwiro_sdk::status::{DoneOutcome, Status};
+
+    let Ok(repos) = build_repository_hashmap(config) else {
+        return Vec::new();
+    };
+    let done = || Status::Done {
+        outcome: Some(DoneOutcome::Completed),
+    };
+
+    repos
+        .iter()
+        .filter_map(|(name, info)| {
+            let status = if !name.contains('@') {
+                Some(Status::Evergreen)
+            } else {
+                let verdict = match info {
+                    RecipeInfo::ExistingRepo { repo, .. } => {
+                        repo.workdir().map_or(Verdict::Stray, detect::detect_auto)
+                    }
+                    RecipeInfo::Branch {
+                        repo_path,
+                        branch_name,
+                        is_remote,
+                        ..
+                    } => detect::detect_branch(repo_path, branch_name, *is_remote),
+                };
+                matches!(verdict, Verdict::Merged).then(done)
+            };
+            status.map(|status| RecipeUpdate::StatusChanged {
+                recipe: name.clone(),
+                status,
+            })
+        })
+        .collect()
+}
+
 /// Cooks a recipe. It returns the path to the already existing local
 /// clone of the repository, or creates a worktree for a branch recipe.
 fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
@@ -1249,7 +1292,13 @@ fn main() -> anyhow::Result<()> {
                 .context("Could not read cookbook payload from stdin")?;
             let config: ConfigurationValues = serde_json::from_value(payload.config)
                 .context("Could not deserialize cookbook-git configuration")?;
-            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || collect_recipes(&config));
+            enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, || {
+                let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
+                    data: collect_recipes(&config),
+                }];
+                updates.extend(collect_status_events(&config));
+                updates
+            });
         }
     };
 

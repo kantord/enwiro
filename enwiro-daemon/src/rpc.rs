@@ -233,6 +233,7 @@ impl EnwiroRpcServer for DaemonRpc {
         meta.event_log.push(EventLogEntry {
             event_type: EventType::StatusChange,
             detail: params.status.clone(),
+            set_by: Some("user".to_string()),
             started: now,
             ended: Some(now),
         });

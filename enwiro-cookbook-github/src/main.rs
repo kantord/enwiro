@@ -385,6 +385,110 @@ fn list_recipes() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Auto-detected `done` events for the PR/issue envs this cookbook has
+/// actually cooked (#302). We only check items that *could* need closing --
+/// the cookbook's own worktrees -- never a broad forge search (GitHub's
+/// search API is score-rate-limited). For each cooked env: try free
+/// git-native detection first; only fall back to a targeted `gh` REST
+/// lookup for the ones git can't confirm (e.g. squash-merged on GitHub).
+fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
+    use enwiro_cookbook_git::detect::{self, Verdict};
+    use enwiro_sdk::listen::RecipeUpdate;
+    use enwiro_sdk::status::{DoneOutcome, Status};
+
+    let Ok(repos) = discover_github_repos() else {
+        return Vec::new();
+    };
+    let done = || Status::Done {
+        outcome: Some(DoneOutcome::Completed),
+    };
+    let mut events = Vec::new();
+
+    for repo_config in &repos {
+        // The repo's worktree directory is the parent of any cooked env path.
+        let Ok(sample) = worktree_path(config, repo_config, &repo_config.repo, "pr", 0) else {
+            continue;
+        };
+        let Some(repo_dir) = sample.parent() else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(repo_dir) else {
+            continue; // nothing cooked for this repo yet
+        };
+
+        for entry in entries.flatten() {
+            let dir_name = entry.file_name().to_string_lossy().into_owned();
+            let (kind, number) = match parse_cooked_env_dir(&dir_name) {
+                Some(parsed) => parsed,
+                None => continue,
+            };
+            let recipe = format!("{}#{}", repo_config.repo, number);
+
+            // 1. Free git-native check on the cooked worktree.
+            if detect::detect_auto(&entry.path()) == Verdict::Merged {
+                events.push(RecipeUpdate::StatusChanged {
+                    recipe,
+                    status: done(),
+                });
+                continue;
+            }
+            // 2. Targeted forge lookup (REST, not the score-limited search),
+            //    only for the items git couldn't confirm.
+            if forge_item_is_done(&repo_config.repo, kind, number) {
+                events.push(RecipeUpdate::StatusChanged {
+                    recipe,
+                    status: done(),
+                });
+            }
+        }
+    }
+
+    events
+}
+
+/// Parse a cooked-env directory name (`pr-123` / `issue-45`) into
+/// `(kind, number)`. `None` for anything else (e.g. stray files).
+fn parse_cooked_env_dir(dir_name: &str) -> Option<(&'static str, u64)> {
+    for (prefix, kind) in [("pr-", "pr"), ("issue-", "issue")] {
+        if let Some(rest) = dir_name.strip_prefix(prefix)
+            && let Ok(number) = rest.parse::<u64>()
+        {
+            return Some((kind, number));
+        }
+    }
+    None
+}
+
+/// Targeted, single-item forge state check via `gh` REST (not search).
+/// A PR counts as done when merged; an issue when closed. Any error ->
+/// `false` (stay silent; the daemon won't auto-mark).
+fn forge_item_is_done(repo: &str, kind: &str, number: u64) -> bool {
+    let (subcommand, done_state) = match kind {
+        "pr" => ("pr", "MERGED"),
+        "issue" => ("issue", "CLOSED"),
+        _ => return false,
+    };
+    let output = Command::new("gh")
+        .args([
+            subcommand,
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state",
+            "-q",
+            ".state",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim() == done_state
+        }
+        _ => false,
+    }
+}
+
 fn resolve_repo_config(repo_str: &str) -> anyhow::Result<RepoConfig> {
     let repos = discover_github_repos()?;
     let matching: Vec<_> = repos
@@ -1502,9 +1606,17 @@ fn main() -> anyhow::Result<()> {
             );
         }
         EnwiroCookbookGithub::Listen => {
-            let _ = CookbookPayload::read_first_line_from_stdin()
+            let payload = CookbookPayload::read_first_line_from_stdin()
                 .context("Could not read cookbook payload from stdin")?;
-            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, collect_recipes);
+            let config: ConfigurationValues =
+                serde_json::from_value(payload.config).unwrap_or_default();
+            enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, move || {
+                let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
+                    data: collect_recipes(),
+                }];
+                updates.extend(collect_status_events(&config));
+                updates
+            });
         }
     };
 

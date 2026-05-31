@@ -16,6 +16,7 @@ pub mod logging;
 pub mod plugin;
 pub mod process;
 pub mod rpc;
+pub mod status;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;

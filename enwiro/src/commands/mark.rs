@@ -111,6 +111,7 @@ mod tests {
         meta.event_log.push(EventLogEntry {
             event_type: ET::StatusChange,
             detail: status_label.to_string(),
+            set_by: Some("user".to_string()),
             started: now,
             ended: Some(now),
         });
