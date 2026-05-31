@@ -156,11 +156,11 @@ their statuses change, then sleep. Each line is one of:
   running `enw mark`. `status` is the object stored in the env's `meta.json`
   (e.g. `{"type":"done"}`, `{"type":"evergreen"}`).
 
-A cookbook may only set the *derived* statuses **`done`** and **`evergreen`**
+A cookbook may only set the *derived* statuses **`done`** and **`evergreen`**-----it's unclear to users what derived tstaus woudl mean. please ask a subagent to revie the entire docs (withotu knowledg eof the project) and understand what parts woudl be confusing/irrelevant to most new users
 — never `active`/`waiting`, which are the user's to set. When unsure, emit
 nothing: re-emitting an unchanged status is a no-op, and an auto-status never
-overwrites one the user set manually.
-
+overwrites one the user set manually.  -- odd way to phrase it. aain, cookbook atuhors may know little about this, we shoudl explain that simply  "cookbook do not set "Active" or "waiting", those are set by the user manually. that's it, nothign else is needed
+—
 #### Rust SDK helper
 
 If your cookbook is in Rust, `enwiro_sdk::listen::{serve, serve_updates}`

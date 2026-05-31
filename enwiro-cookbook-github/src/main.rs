@@ -392,60 +392,56 @@ fn list_recipes() -> anyhow::Result<()> {
 /// git-native detection first; only fall back to a targeted `gh` REST
 /// lookup for the ones git can't confirm (e.g. squash-merged on GitHub).
 fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
-    use enwiro_cookbook_git::detect::{self, Verdict};
-    use enwiro_sdk::listen::RecipeUpdate;
-    use enwiro_sdk::status::{DoneOutcome, Status};
-
     let Ok(repos) = discover_github_repos() else {
         return Vec::new();
     };
-    let done = || Status::Done {
-        outcome: Some(DoneOutcome::Completed),
+    repos
+        .iter()
+        .flat_map(|repo_config| repo_status_events(config, repo_config))
+        .collect()
+}
+
+/// `status_changed{done}` events for one repo's cooked PR/issue worktrees.
+fn repo_status_events(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
+    use enwiro_sdk::listen::RecipeUpdate;
+    use enwiro_sdk::status::{DoneOutcome, Status};
+
+    // Worktrees are stored under the SHORT repo name (the recipe name `cook`
+    // uses), not the full `owner/repo`.
+    let short_repo = extract_short_repo_name(repo_config.repo.clone());
+    let Ok(repo_dir) = repo_worktree_dir(config, repo_config, &short_repo) else {
+        return Vec::new();
     };
-    let mut events = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&repo_dir) else {
+        return Vec::new(); // nothing cooked for this repo yet
+    };
 
-    for repo_config in &repos {
-        // Cooked worktrees are keyed by the SHORT repo name (matching `cook`,
-        // which uses the short recipe name), not the full `owner/repo`.
-        let short_repo = extract_short_repo_name(repo_config.repo.clone());
-        let Ok(repo_dir) = repo_worktree_dir(config, repo_config, &short_repo) else {
-            continue;
-        };
-        let Ok(entries) = std::fs::read_dir(&repo_dir) else {
-            continue; // nothing cooked for this repo yet
-        };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let (kind, number) = parse_cooked_env_dir(&entry.file_name().to_string_lossy())?;
+            env_is_done(repo_config, kind, number, &entry.path()).then(|| {
+                RecipeUpdate::StatusChanged {
+                    recipe: format!("{short_repo}#{number}"),
+                    status: Status::Done {
+                        outcome: Some(DoneOutcome::Completed),
+                    },
+                }
+            })
+        })
+        .collect()
+}
 
-        for entry in entries.flatten() {
-            let dir_name = entry.file_name().to_string_lossy().into_owned();
-            let (kind, number) = match parse_cooked_env_dir(&dir_name) {
-                Some(parsed) => parsed,
-                None => continue,
-            };
-            // Recipe names use the SHORT repo name (matching `collect_recipes`
-            // and the env dir name), while `gh --repo` needs the full
-            // `owner/repo` (repo_config.repo).
-            let recipe = format!("{}#{}", short_repo, number);
-
-            // 1. Free git-native check on the cooked worktree.
-            if detect::detect_auto(&entry.path()) == Verdict::Merged {
-                events.push(RecipeUpdate::StatusChanged {
-                    recipe,
-                    status: done(),
-                });
-                continue;
-            }
-            // 2. Targeted forge lookup (REST, not the score-limited search),
-            //    only for the items git couldn't confirm.
-            if forge_item_is_done(&repo_config.repo, kind, number) {
-                events.push(RecipeUpdate::StatusChanged {
-                    recipe,
-                    status: done(),
-                });
-            }
-        }
-    }
-
-    events
+/// Is a cooked env's PR merged / its issue closed? Tries the free git-native
+/// check on the worktree first, then falls back to a targeted `gh` lookup
+/// only for what git can't confirm (e.g. a GitHub squash-merge not pulled
+/// locally).
+fn env_is_done(repo_config: &RepoConfig, kind: &str, number: u64, worktree: &Path) -> bool {
+    use enwiro_cookbook_git::detect::{Verdict, detect_auto};
+    detect_auto(worktree) == Verdict::Merged || forge_item_is_done(&repo_config.repo, kind, number)
 }
 
 /// Parse a cooked-env directory name (`pr-123` / `issue-45`) into

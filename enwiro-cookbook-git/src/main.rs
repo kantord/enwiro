@@ -403,16 +403,10 @@ fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
         .collect()
 }
 
-/// Auto-detected status events for the current recipes (#302). Base-repo
-/// recipes (no `@`) are standing workspaces -> `evergreen`. This is cheap
-/// (a name check, no git inspection) so it never blocks recipe emission.
-///
-/// Branch-recipe merge detection (`detect::detect_branch`) is intentionally
-/// NOT done here: running it for every branch across every configured repo
-/// on each `listen` tick is far too slow and would stall the whole stream.
-/// The `detect` module still provides it (and the github cookbook uses it on
-/// its own bounded set of worktrees); doing it for git branch envs needs to
-/// be scoped to *cooked* worktrees + mtime-gated -- tracked as a follow-up.
+/// Auto-detected status for git recipes (#302): a base repo is a standing
+/// workspace, so it is `evergreen`. Branch recipes get no auto-status here;
+/// detecting whether a branch was merged is deferred to a follow-up (it must
+/// be scoped to cooked worktrees rather than run for every branch each tick).
 fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
     use enwiro_sdk::listen::RecipeUpdate;
     use enwiro_sdk::status::Status;
@@ -423,12 +417,18 @@ fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen
 
     repos
         .keys()
-        .filter(|name| !name.contains('@'))
+        .filter(|name| is_base_repo_recipe(name))
         .map(|name| RecipeUpdate::StatusChanged {
             recipe: name.clone(),
             status: Status::Evergreen,
         })
         .collect()
+}
+
+/// A base-repo recipe (the repository itself) rather than a `repo@branch`
+/// worktree recipe.
+fn is_base_repo_recipe(recipe: &str) -> bool {
+    !recipe.contains('@')
 }
 
 /// Cooks a recipe. It returns the path to the already existing local
