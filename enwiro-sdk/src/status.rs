@@ -1,4 +1,4 @@
-//! Environment status types — the canonical schema for the `status` field
+//! Environment status types - the canonical schema for the `status` field
 //! of per-env `meta.json`, AND the payload of the `status_changed`
 //! cookbook->daemon wire event (#302).
 //!
@@ -53,8 +53,8 @@ pub struct StatusDetail {
 }
 
 /// Whether a cookbook is allowed to set this status automatically.
-/// Cookbooks may only report *derived facts* — `Done` (work merged/closed)
-/// and `Evergreen` (long-lived) — never workflow *intent* (`Cooked`'s
+/// Cookbooks may only report *derived facts* - `Done` (work merged/closed)
+/// and `Evergreen` (long-lived) - never workflow *intent* (`Cooked`'s
 /// active/waiting/ready), which is the user's to set. The daemon rejects
 /// auto-writes that fail this guard.
 pub fn is_cookbook_settable(status: &Status) -> bool {

@@ -1,7 +1,7 @@
 # Creating an Enwiro Cookbook
 
 A cookbook is a standalone program that tells enwiro how to discover and set up
-project environments. You can write one in any language — Python, Bash, Go,
+project environments. You can write one in any language - Python, Bash, Go,
 Rust, JavaScript, etc. Enwiro communicates with cookbooks by running them as
 subprocesses and reading their stdout.
 
@@ -54,11 +54,11 @@ and `sort_order`:
 
 **Ordering within your cookbook:** a good default is to list the most relevant
 or most recently used items first. How that ranking is then combined with other
-cookbooks' recipes is what `sort_order` controls — see below.
+cookbooks' recipes is what `sort_order` controls - see below.
 
 #### Global sort order
 
-The `sort_order` field (0–100) lets enwiro merge recipes from different
+The `sort_order` field (0-100) lets enwiro merge recipes from different
 cookbooks into a single relevance-ranked list. Without it, all recipes from a
 higher-priority cookbook would appear before any recipe from a lower-priority
 one, regardless of individual relevance. Ties within the same `sort_order` are
@@ -99,7 +99,7 @@ The path should be absolute. Enwiro trims surrounding whitespace.
 /home/user/projects/my-project
 ```
 
-This subcommand is where your cookbook does its real work — cloning a repo,
+This subcommand is where your cookbook does its real work - cloning a repo,
 creating a worktree, setting up a directory, etc. If the environment already
 exists (e.g., a previously cloned repo), just print the existing path.
 
@@ -113,7 +113,7 @@ enwiro-cookbook-yourname metadata
 ```
 
 Print a JSON object to stdout describing your cookbook. This subcommand is
-**optional** — if your binary doesn't support it (exits non-zero or doesn't
+**optional** - if your binary doesn't support it (exits non-zero or doesn't
 recognize the command), enwiro uses sensible defaults.
 
 Currently the only field is `defaultPriority`:
@@ -184,8 +184,8 @@ enwiro treats it as an error.
 
 ## Error Handling
 
-- **Exit code 0** means success — stdout is parsed as results.
-- **Non-zero exit code** means failure — stdout is discarded and stderr is
+- **Exit code 0** means success - stdout is parsed as results.
+- **Non-zero exit code** means failure - stdout is discarded and stderr is
   shown to the user as the error message.
 - If `list-recipes` fails, enwiro skips your cookbook and continues with the
   others. Your cookbook failing does not break the overall recipe list.
@@ -323,11 +323,11 @@ but subprocess delegation is the option that always works.
   daemon, but the first call (or a cache miss) runs synchronously. Avoid
   network calls in `list-recipes` if possible, or cache results yourself.
 - **`cook` can be slow.** It's fine for `cook` to clone a repo, create a
-  worktree, or do other setup work — the user expects to wait.
+  worktree, or do other setup work - the user expects to wait.
 - **Idempotent cooking.** If `cook` is called for a recipe that was already
   cooked, just return the existing path. Don't fail or recreate.
 - **Don't worry about metadata.** If you skip the `metadata` subcommand
-  entirely, your cookbook will still work — it just gets the default priority of
+  entirely, your cookbook will still work - it just gets the default priority of
   50.
 - **Recipe names are identifiers.** Users type them (e.g., `enw activate
   my-project`), so keep them short and filesystem-friendly. Avoid spaces.

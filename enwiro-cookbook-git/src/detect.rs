@@ -1,6 +1,6 @@
 //! Git-native "is this branch's work already merged into the default
 //! branch?" detection, shared by the git and github cookbooks (the latter
-//! imports this crate as a library — see #302).
+//! imports this crate as a library - see #302).
 //!
 //! Three merge styles, in increasing difficulty:
 //! - merge-commit / fast-forward -> ancestry (`graph_descendant_of`)
@@ -10,7 +10,7 @@
 //!   branch's cumulative diff (fails after the target diverges; that
 //!   case is forge-only and handled by the github cookbook).
 //!
-//! Any uncertainty or error yields [`Verdict::Stray`] — the caller emits
+//! Any uncertainty or error yields [`Verdict::Stray`] - the caller emits
 //! no status rather than guessing, so a wrong guess never marks an env
 //! `done`.
 
@@ -22,7 +22,7 @@ use git2::{Oid, Repository};
 pub enum Verdict {
     /// Branch work is present in the default branch (any merge style).
     Merged,
-    /// Cannot prove merged or not — caller stays silent.
+    /// Cannot prove merged or not - caller stays silent.
     Stray,
     /// Branch has unmerged work, or is not a feature branch.
     NotMerged,
@@ -87,7 +87,7 @@ fn resolve_branch_tip(repo: &Repository, branch: &str) -> anyhow::Result<Oid> {
 }
 
 /// Decide merge status of a named branch directly in `repo_path`, without
-/// needing a checked-out worktree — used by the git cookbook for branch
+/// needing a checked-out worktree - used by the git cookbook for branch
 /// recipes (whose enwiro-managed worktrees are otherwise invisible). Both
 /// the branch tip and the default-branch tip live in the same repo, so a
 /// plain [`verdict`] suffices. Errors / no default branch -> [`Verdict::Stray`].
@@ -150,7 +150,7 @@ pub fn verdict(repo: &Repository, branch_tip: Oid, default_tip: Oid) -> anyhow::
     }
 
     // Merge-commit / fast-forward: branch tip is an ancestor of default. The
-    // definitive, net-change-independent signal — checked before the
+    // definitive, net-change-independent signal - checked before the
     // zero-net-change guard (a merge commit makes the branch tip its own
     // merge-base with default, which would otherwise trip that guard).
     if repo.graph_descendant_of(default_tip, branch_tip)? {
@@ -167,7 +167,7 @@ pub fn verdict(repo: &Repository, branch_tip: Oid, default_tip: Oid) -> anyhow::
         return Ok(Verdict::NotMerged);
     }
 
-    // Patch-ids of the commits unique to the default branch since the base —
+    // Patch-ids of the commits unique to the default branch since the base -
     // the candidate pool for both the rebase and squash checks.
     let default_patch_ids = patch_ids_in_range(repo, base, default_tip)?;
     let feature_patch_ids = patch_ids_in_range(repo, base, branch_tip)?;
@@ -380,7 +380,7 @@ mod tests {
             &[&repo.find_commit(base).unwrap()],
         )
         .unwrap();
-        // Detect by branch name against the bare-ish repo path — no worktree.
+        // Detect by branch name against the bare-ish repo path - no worktree.
         assert_eq!(detect_branch(dir.path(), "feature", false), Verdict::Merged);
         // An unmerged branch name -> Stray (default-branch `main` exists).
         branch_at(&repo, "lonely", base);
