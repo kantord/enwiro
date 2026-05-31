@@ -404,44 +404,29 @@ fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
 }
 
 /// Auto-detected status events for the current recipes (#302). Base-repo
-/// recipes (no `@`) are `evergreen`; branch recipes are `done` when the
-/// branch is merged into the default branch. Recipes with no firm verdict
-/// emit nothing, so the daemon never auto-marks on a guess.
+/// recipes (no `@`) are standing workspaces -> `evergreen`. This is cheap
+/// (a name check, no git inspection) so it never blocks recipe emission.
+///
+/// Branch-recipe merge detection (`detect::detect_branch`) is intentionally
+/// NOT done here: running it for every branch across every configured repo
+/// on each `listen` tick is far too slow and would stall the whole stream.
+/// The `detect` module still provides it (and the github cookbook uses it on
+/// its own bounded set of worktrees); doing it for git branch envs needs to
+/// be scoped to *cooked* worktrees + mtime-gated -- tracked as a follow-up.
 fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
-    use enwiro_cookbook_git::detect::{self, Verdict};
     use enwiro_sdk::listen::RecipeUpdate;
-    use enwiro_sdk::status::{DoneOutcome, Status};
+    use enwiro_sdk::status::Status;
 
     let Ok(repos) = build_repository_hashmap(config) else {
         return Vec::new();
     };
-    let done = || Status::Done {
-        outcome: Some(DoneOutcome::Completed),
-    };
 
     repos
-        .iter()
-        .filter_map(|(name, info)| {
-            let status = if !name.contains('@') {
-                Some(Status::Evergreen)
-            } else {
-                let verdict = match info {
-                    RecipeInfo::ExistingRepo { repo, .. } => {
-                        repo.workdir().map_or(Verdict::Stray, detect::detect_auto)
-                    }
-                    RecipeInfo::Branch {
-                        repo_path,
-                        branch_name,
-                        is_remote,
-                        ..
-                    } => detect::detect_branch(repo_path, branch_name, *is_remote),
-                };
-                matches!(verdict, Verdict::Merged).then(done)
-            };
-            status.map(|status| RecipeUpdate::StatusChanged {
-                recipe: name.clone(),
-                status,
-            })
+        .keys()
+        .filter(|name| !name.contains('@'))
+        .map(|name| RecipeUpdate::StatusChanged {
+            recipe: name.clone(),
+            status: Status::Evergreen,
         })
         .collect()
 }

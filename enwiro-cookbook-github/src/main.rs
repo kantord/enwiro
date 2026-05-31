@@ -406,7 +406,10 @@ fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen
 
     for repo_config in &repos {
         // The repo's worktree directory is the parent of any cooked env path.
-        let Ok(sample) = worktree_path(config, repo_config, &repo_config.repo, "pr", 0) else {
+        // Worktrees are keyed by the SHORT repo name (matching `cook`, which
+        // uses the short recipe name), not the full `owner/repo`.
+        let short_repo = extract_short_repo_name(repo_config.repo.clone());
+        let Ok(sample) = worktree_path(config, repo_config, &short_repo, "pr", 0) else {
             continue;
         };
         let Some(repo_dir) = sample.parent() else {
@@ -422,7 +425,10 @@ fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen
                 Some(parsed) => parsed,
                 None => continue,
             };
-            let recipe = format!("{}#{}", repo_config.repo, number);
+            // Recipe names use the SHORT repo name (matching `collect_recipes`
+            // and the env dir name), while `gh --repo` needs the full
+            // `owner/repo` (repo_config.repo).
+            let recipe = format!("{}#{}", short_repo, number);
 
             // 1. Free git-native check on the cooked worktree.
             if detect::detect_auto(&entry.path()) == Verdict::Merged {

@@ -428,8 +428,15 @@ fn apply_auto_status(
     }
 
     let mut meta = load_env_meta(&env_dir);
-    // Only act on the env actually cooked from this recipe.
-    if meta.recipe.as_deref() != Some(recipe) {
+    // Ownership guard: only the cookbook that owns this env may set its status.
+    if meta.cookbook.as_deref().is_some_and(|c| c != cookbook) {
+        return;
+    }
+    // Identity guard. `recipe` is only recorded since #325, so pre-#325 envs
+    // have `recipe: None` and are matched by env-dir name + ownership alone.
+    // TODO(legacy, revisit after 2026-06): once pre-#325 envs have aged out,
+    // tighten this to require `meta.recipe == Some(recipe)`.
+    if meta.recipe.as_deref().is_some_and(|r| r != recipe) {
         return;
     }
     // Manual override wins: if the most recent status change was user-set,
