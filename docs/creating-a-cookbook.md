@@ -144,30 +144,27 @@ fields for forward compatibility.
 enwiro-cookbook-yourname listen
 ```
 
-**Optional.** A long-running subcommand the daemon keeps alive and reads as a
-stream of newline-delimited JSON updates on stdout. Use it instead of
-re-running `list-recipes` on a timer: emit a fresh batch whenever your
-recipes or their status change, then sleep.
-
-Each line is a tagged `RecipeUpdate`:
+**Optional.** A long-running subcommand: the daemon keeps it alive and reads
+newline-delimited JSON from its stdout. Emit a batch when your recipes or
+their statuses change, then sleep. Each line is one of:
 
 - `{"type":"recipes","data":[ ...recipes... ]}` — the full current recipe
-  list (replaces the previous one).
+  list (the same objects as [`list-recipes`](#list-recipes)), replacing the
+  previous one.
 - `{"type":"status_changed","recipe":"<name>","status":{ ... }}` — an
-  auto-detected status for one env, so it shows up in `enw ls` without the
-  user running `enw mark`. `status` is the same shape stored in an env's
-  `meta.json` (`{"type":"done",...}`, `{"type":"evergreen"}`, ...).
+  auto-detected status for one env, so it appears in `enw ls` without the user
+  running `enw mark`. `status` is the object stored in the env's `meta.json`
+  (e.g. `{"type":"done"}`, `{"type":"evergreen"}`).
 
-Cookbooks may only auto-set the *derived* statuses **`done`** and
-**`evergreen`** — never workflow intent like `active`/`waiting` (the daemon
-ignores those from a cookbook). When you can't tell, **emit nothing**: a
-missing status never overwrites what's there, and auto-status is monotonic
-(it only ever sets `done`/`evergreen`, never reverts a user's manual mark).
+A cookbook may only set the *derived* statuses **`done`** and **`evergreen`**
+— never `active`/`waiting`, which are the user's to set. When unsure, emit
+nothing: re-emitting an unchanged status is a no-op, and an auto-status never
+overwrites one the user set manually.
 
-The Rust SDK provides `enwiro_sdk::listen::serve` (recipes only) and
-`serve_updates` (recipes + `status_changed`) so you don't hand-roll the loop.
-A cookbook with no `listen` subcommand simply falls back to periodic
-`list-recipes` and never reports status — all of this is opt-in.
+#### Rust SDK helper
+
+If your cookbook is in Rust, `enwiro_sdk::listen::{serve, serve_updates}`
+implement this loop (and the JSON framing) for you, so you don't hand-roll it.
 
 ## Output Encoding
 
@@ -291,7 +288,7 @@ When a user activates a recipe:
 
 ## Extending another cookbook
 
-Cookbooks often build on each other — e.g. the GitHub cookbook produces
+Cookbooks may build on each other - e.g. the GitHub cookbook produces
 enriched versions of what the git cookbook does, and both share git-native
 logic like "is this branch merged?". There are two ways to reuse another
 cookbook, and which one applies depends only on how your cookbook is built:
@@ -305,7 +302,7 @@ cookbook, and which one applies depends only on how your cookbook is built:
   language, or you only have the other cookbook's binary), call it as a
   subprocess. The daemon exposes `cookbook.invoke` over its RPC socket so a
   cookbook can ask another cookbook to run an operation and read its result —
-  works regardless of implementation language. See ADR-0002.
+  works regardless of implementation language. See ADR-0002. --- this is good, but there is no need to link to the adr, and also we can emphasize the subprocess creation as  the main flow, and the library linking asw a nice to know for code reuse
 
 Use library linking when you can (simplest, no IPC), and subprocess
 delegation when you must cross a language boundary.
