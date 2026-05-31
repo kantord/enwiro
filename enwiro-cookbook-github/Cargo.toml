@@ -13,9 +13,6 @@ serde = "1.0.197"
 serde_derive = "1.0.197"
 serde_json = "1"
 enwiro-sdk.workspace = true
-# Reuse git-native merge detection (helper-home option B, #302) instead of
-# duplicating the git2 logic.
-enwiro-cookbook-git = { path = "../enwiro-cookbook-git" }
 tracing.workspace = true
 dirs = "6"
 sha2 = "0.11"

@@ -300,22 +300,18 @@ When a user activates a recipe:
 ## Advanced: building on another cookbook
 
 Most cookbooks are self-contained, so you can skip this section unless you need
-it. Sometimes one cookbook wants to reuse another - for example, the GitHub
-cookbook builds on what the git cookbook does, and both need git logic like "is
-this branch merged?".
+it. Occasionally one cookbook wants to reuse an operation another already
+implements.
 
 The general-purpose way to do this, **which works no matter what language each
-cookbook is written in**, is subprocess delegation: ask the other cookbook to do
-something by running it and reading its output. The daemon exposes a
-`cookbook.invoke` call over its socket so one cookbook can have another run an
+cookbook is written in**, is subprocess delegation: the daemon exposes a
+`cookbook.invoke` call over its socket so one cookbook can ask another to run an
 operation and hand back the result. Because it only relies on running a binary
 and reading its output, it works across any language boundary.
 
-If both cookbooks happen to be written in the same language and one can depend on
-the other as a library, you can also just import its code directly - plain code
-reuse, nothing enwiro-specific. The GitHub cookbook does this with the git
-cookbook to share the merge-detection helper. This is simpler when it applies,
-but subprocess delegation is the option that always works.
+If both cookbooks happen to be written in the same language, you can instead
+depend on the other as a normal library and call its code directly - simpler
+when it applies, but subprocess delegation is the option that always works.
 
 ## Tips
 

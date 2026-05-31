@@ -423,7 +423,11 @@ fn repo_status_events(
         .flatten()
         .filter_map(|entry| {
             let (kind, number) = parse_cooked_env_dir(&entry.file_name().to_string_lossy())?;
-            env_is_done(repo_config, kind, number, &entry.path()).then(|| {
+            // The forge is authoritative for "is it merged/closed?": a GitHub
+            // squash-merge is not detectable from local git history once the
+            // default branch moves on, and walking history on large upstream
+            // repos is far more expensive than one `gh` point-query (#302).
+            forge_item_is_done(&repo_config.repo, kind, number).then(|| {
                 RecipeUpdate::StatusChanged {
                     recipe: format!("{short_repo}#{number}"),
                     status: Status::Done {
@@ -433,15 +437,6 @@ fn repo_status_events(
             })
         })
         .collect()
-}
-
-/// Is a cooked env's PR merged / its issue closed? Tries the free git-native
-/// check on the worktree first, then falls back to a targeted `gh` lookup
-/// only for what git can't confirm (e.g. a GitHub squash-merge not pulled
-/// locally).
-fn env_is_done(repo_config: &RepoConfig, kind: &str, number: u64, worktree: &Path) -> bool {
-    use enwiro_cookbook_git::detect::{Verdict, detect_auto};
-    detect_auto(worktree) == Verdict::Merged || forge_item_is_done(&repo_config.repo, kind, number)
 }
 
 /// Parse a cooked-env directory name (`pr-123` / `issue-45`) into

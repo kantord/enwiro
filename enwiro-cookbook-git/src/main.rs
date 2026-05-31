@@ -467,97 +467,32 @@ fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
         .collect()
 }
 
-/// Auto-detected status for git recipes (#302). Two kinds:
-/// - a base repo is a standing workspace -> `evergreen`;
-/// - a cooked branch whose work is already merged into the default branch ->
-///   `done` (see [`cooked_branch_done_events`]).
+/// Auto-detected status for git recipes (#302): a base repo is a standing
+/// workspace, so it is `evergreen`. Branch recipes get no auto-status here -
+/// "is this branch merged?" is answered by the forge (the github cookbook's
+/// `gh` check), because a squash-merge is undetectable from local history once
+/// the default branch moves on and walking large repos on a timer is too slow.
 fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
     use enwiro_sdk::listen::RecipeUpdate;
     use enwiro_sdk::status::Status;
 
-    let mut events = Vec::new();
-    if let Ok(repos) = build_repository_hashmap(config) {
-        events.extend(
-            repos
-                .keys()
-                .filter(|name| is_base_repo_recipe(name))
-                .map(|name| RecipeUpdate::StatusChanged {
-                    recipe: name.clone(),
-                    status: Status::Evergreen,
-                }),
-        );
-    }
-    events.extend(cooked_branch_done_events(config));
-    events
+    let Ok(repos) = build_repository_hashmap(config) else {
+        return Vec::new();
+    };
+    repos
+        .keys()
+        .filter(|name| is_base_repo_recipe(name))
+        .map(|name| RecipeUpdate::StatusChanged {
+            recipe: name.clone(),
+            status: Status::Evergreen,
+        })
+        .collect()
 }
 
 /// A base-repo recipe (the repository itself) rather than a `repo@branch`
 /// worktree recipe.
 fn is_base_repo_recipe(recipe: &str) -> bool {
     !recipe.contains('@')
-}
-
-/// The branch checked out in a worktree, via its `HEAD` shorthand.
-fn worktree_branch(wt: &git2::Worktree) -> Option<String> {
-    let wt_repo = Repository::open(wt.path()).ok()?;
-    let head = wt_repo.head().ok()?;
-    head.shorthand().map(str::to_string)
-}
-
-/// `done` events for cooked branch worktrees whose work is already merged into
-/// the repo's default branch. Scoped to this cookbook's own `enwiro-*`
-/// worktrees - i.e. the branches actually cooked - so detection stays cheap and
-/// never runs over every branch in every repo. The reconstructed recipe name
-/// `repo@<branch>` matches what `cook` registered, so the daemon maps it to the
-/// right env. Merge detection itself lives in [`detect::detect_auto`]; anything
-/// it can't prove merged stays silent.
-fn cooked_branch_done_events(
-    config: &ConfigurationValues,
-) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
-    use enwiro_cookbook_git::detect::{Verdict, detect_auto};
-    use enwiro_sdk::listen::RecipeUpdate;
-    use enwiro_sdk::status::{DoneOutcome, Status};
-
-    let mut events = Vec::new();
-    for glob_from_config in config.repo_globs.iter() {
-        let Ok(paths) = glob::glob(glob_from_config) else {
-            continue;
-        };
-        for path in paths.flatten() {
-            let Ok(repo) = Repository::open(&path) else {
-                continue;
-            };
-            if repo.is_worktree() {
-                continue;
-            }
-            let Some(repo_name) = repo_display_name(&repo) else {
-                continue;
-            };
-            let Ok(worktrees) = repo.worktrees() else {
-                continue;
-            };
-            for wt_name in worktrees.iter().flatten() {
-                if !wt_name.starts_with("enwiro-") {
-                    continue;
-                }
-                let Ok(wt) = repo.find_worktree(wt_name) else {
-                    continue;
-                };
-                let Some(branch) = worktree_branch(&wt) else {
-                    continue;
-                };
-                if detect_auto(wt.path()) == Verdict::Merged {
-                    events.push(RecipeUpdate::StatusChanged {
-                        recipe: format!("{repo_name}@{branch}"),
-                        status: Status::Done {
-                            outcome: Some(DoneOutcome::Completed),
-                        },
-                    });
-                }
-            }
-        }
-    }
-    events
 }
 
 /// Cooks a recipe. It returns the path to the already existing local
@@ -1365,111 +1300,6 @@ mod tests {
             sorted[1].1, 100,
             "Second repo gets sort_order=100 from position"
         );
-    }
-
-    mod cooked_branch_done {
-        use super::*;
-        use enwiro_sdk::listen::RecipeUpdate;
-        use enwiro_sdk::status::Status;
-
-        /// Commit an (empty) change on the current HEAD branch with `parent` as
-        /// its parent, returning the new commit's oid.
-        fn commit_on_head(repo: &Repository, parent: &git2::Commit, msg: &str) -> git2::Oid {
-            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-            let tree = repo
-                .find_tree(repo.index().unwrap().write_tree().unwrap())
-                .unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[parent])
-                .unwrap()
-        }
-
-        /// Add a cooked-style worktree (named `enwiro-*`) checked out on `branch`.
-        fn add_enwiro_worktree(repo: &Repository, branch: &str, wt_path: &Path) {
-            let b = repo.find_branch(branch, git2::BranchType::Local).unwrap();
-            let reference = b.into_reference();
-            let mut opts = git2::WorktreeAddOptions::new();
-            opts.reference(Some(&reference));
-            repo.worktree(&format!("enwiro-{branch}"), wt_path, Some(&opts))
-                .unwrap();
-        }
-
-        fn done_recipes(events: &[RecipeUpdate]) -> Vec<String> {
-            events
-                .iter()
-                .filter_map(|e| match e {
-                    RecipeUpdate::StatusChanged {
-                        recipe,
-                        status: Status::Done { .. },
-                    } => Some(recipe.clone()),
-                    _ => None,
-                })
-                .collect()
-        }
-
-        #[test]
-        fn merged_cooked_branch_emits_done_with_recipe_name() {
-            let tmp = TempDir::new().unwrap();
-            let repo_path = tmp.path().join("proj");
-            fs::create_dir(&repo_path).unwrap();
-            let repo = create_repo_with_commit(&repo_path);
-
-            // Branch "feature" at the initial commit, then advance the default
-            // branch past it so feature is a strict ancestor (i.e. merged).
-            let c1 = repo.head().unwrap().peel_to_commit().unwrap();
-            repo.branch("feature", &c1, false).unwrap();
-            commit_on_head(&repo, &c1, "advance default");
-
-            let wt_path = tmp.path().join("feature-wt");
-            add_enwiro_worktree(&repo, "feature", &wt_path);
-
-            let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
-            let events = cooked_branch_done_events(&config);
-
-            assert_eq!(
-                done_recipes(&events),
-                vec!["proj@feature".to_string()],
-                "a cooked, merged branch should emit exactly one done event for its recipe"
-            );
-        }
-
-        #[test]
-        fn unmerged_cooked_branch_emits_nothing() {
-            let tmp = TempDir::new().unwrap();
-            let repo_path = tmp.path().join("proj");
-            fs::create_dir(&repo_path).unwrap();
-            let repo = create_repo_with_commit(&repo_path);
-
-            // Advance "feature" past the default branch (which stays at C1) so
-            // it has unmerged work. Commit straight onto the branch ref, since
-            // it isn't checked out anywhere yet.
-            let c1 = repo.head().unwrap().peel_to_commit().unwrap();
-            repo.branch("feature", &c1, false).unwrap();
-            let sig = git2::Signature::now("Test", "test@test.com").unwrap();
-            let tree = repo
-                .find_tree(repo.index().unwrap().write_tree().unwrap())
-                .unwrap();
-            repo.commit(
-                Some("refs/heads/feature"),
-                &sig,
-                &sig,
-                "feature work",
-                &tree,
-                &[&c1],
-            )
-            .unwrap();
-
-            let wt_path = tmp.path().join("feature-wt");
-            add_enwiro_worktree(&repo, "feature", &wt_path);
-
-            let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
-            let events = cooked_branch_done_events(&config);
-
-            assert!(
-                done_recipes(&events).is_empty(),
-                "an unmerged cooked branch must not emit a done event, got: {:?}",
-                done_recipes(&events)
-            );
-        }
     }
 }
 

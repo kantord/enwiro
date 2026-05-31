@@ -973,7 +973,6 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
- "enwiro-cookbook-git",
  "enwiro-sdk",
  "git2",
  "glob",
