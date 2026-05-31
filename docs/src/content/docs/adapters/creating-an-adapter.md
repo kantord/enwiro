@@ -81,7 +81,7 @@ Enwiro pipes a JSON payload to the adapter's stdin with the following shape:
   this to handle future protocol changes gracefully.
 - **`managed_envs`** - List of all environments enwiro currently manages, each
   with a `slot_score` (a float used for workspace ordering/placement). For
-  example, the [i3wm adapter](/enwiro/adapters/available-adapters/i3wm/) uses
+  example, the [i3wm adapter](/adapters/available-adapters/i3wm/) uses
   this for workspace rebalancing. Adapters that don't need it can ignore it.
 - **`gear`** - Opaque JSON object containing per-environment gear data. Adapters
   that support auto-opening URLs or GUI applications can walk this structure
