@@ -29,6 +29,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 tracing.workspace = true
 
 [dev-dependencies]
+proptest = "1"
 enwiro-sdk = { workspace = true, features = ["test-helpers"] }
 filetime = "0.2"
 tempfile = "3.25.0"

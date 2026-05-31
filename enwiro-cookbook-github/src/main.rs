@@ -815,6 +815,37 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn parse_cooked_env_dir_examples() {
+        assert_eq!(parse_cooked_env_dir("pr-123"), Some(("pr", 123)));
+        assert_eq!(parse_cooked_env_dir("issue-45"), Some(("issue", 45)));
+        assert_eq!(parse_cooked_env_dir("issue-0"), Some(("issue", 0)));
+        // Rejected: missing number, non-numeric, wrong prefix, overflow, junk.
+        assert_eq!(parse_cooked_env_dir("pr-"), None);
+        assert_eq!(parse_cooked_env_dir("pr-abc"), None);
+        assert_eq!(parse_cooked_env_dir("pr-12x"), None);
+        assert_eq!(parse_cooked_env_dir("random"), None);
+        assert_eq!(parse_cooked_env_dir("branch-7"), None);
+        assert_eq!(parse_cooked_env_dir("pr-99999999999999999999999999"), None);
+    }
+
+    proptest! {
+        // P2: total over arbitrary input (never panics, incl. overflow/unicode).
+        #[test]
+        fn parse_cooked_env_dir_never_panics(s in ".*") {
+            let _ = parse_cooked_env_dir(&s);
+        }
+
+        // P2: round-trips with the worktree dir naming (`{prefix}-{number}`).
+        #[test]
+        fn parse_cooked_env_dir_round_trips(n in any::<u64>(), is_pr in any::<bool>()) {
+            let kind = if is_pr { "pr" } else { "issue" };
+            let dir = format!("{kind}-{n}");
+            prop_assert_eq!(parse_cooked_env_dir(&dir), Some((kind, n)));
+        }
+    }
 
     #[test]
     fn test_parse_recipe_name_valid() {

@@ -812,4 +812,227 @@ mod tests {
         );
         assert_eq!(entries[1].name, "low-priority-branch");
     }
+
+    // ---- apply_auto_status (the cookbook-driven write gate, #302) ----
+
+    mod apply_auto_status_tests {
+        use super::super::apply_auto_status;
+        use crate::meta::{
+            CookedPhase, DoneOutcome, EnvStats, EventLogEntry, EventType, Status, StatusDetail,
+            load_env_meta, now_utc, save_env_meta,
+        };
+        use std::path::{Path, PathBuf};
+
+        /// Create an env dir under `ws` with the given cookbook/recipe metadata.
+        fn make_env(
+            ws: &Path,
+            name: &str,
+            cookbook: Option<&str>,
+            recipe: Option<&str>,
+        ) -> PathBuf {
+            let env_dir = ws.join(name);
+            std::fs::create_dir_all(&env_dir).unwrap();
+            let meta = EnvStats {
+                cookbook: cookbook.map(str::to_string),
+                recipe: recipe.map(str::to_string),
+                ..Default::default()
+            };
+            save_env_meta(&env_dir, &meta).unwrap();
+            env_dir
+        }
+
+        /// Seed an existing status + a `StatusChange` event with the given `set_by`.
+        fn seed_status(env_dir: &Path, status: Status, set_by: &str) {
+            let mut meta = load_env_meta(env_dir);
+            meta.status = Some(status);
+            let now = now_utc();
+            meta.event_log.push(EventLogEntry {
+                event_type: EventType::StatusChange,
+                detail: "seed".to_string(),
+                set_by: Some(set_by.to_string()),
+                started: now,
+                ended: Some(now),
+            });
+            save_env_meta(env_dir, &meta).unwrap();
+        }
+
+        fn done() -> Status {
+            Status::Done {
+                outcome: Some(DoneOutcome::Completed),
+            }
+        }
+
+        #[test]
+        fn happy_path_writes_status_and_provenance() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            let meta = load_env_meta(&env);
+            assert_eq!(meta.status, Some(Status::Evergreen));
+            let last = meta.event_log.last().unwrap();
+            assert_eq!(last.event_type, EventType::StatusChange);
+            assert_eq!(last.set_by.as_deref(), Some("auto:git"));
+        }
+
+        #[test]
+        fn recipe_none_still_matches_legacy_env() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), None);
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).status, Some(Status::Evergreen));
+        }
+
+        #[test]
+        fn user_set_status_is_never_overwritten() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            seed_status(
+                &env,
+                Status::Cooked {
+                    phase: Some(CookedPhase::Waiting),
+                    detail: None,
+                },
+                "user",
+            );
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert!(matches!(
+                load_env_meta(&env).status,
+                Some(Status::Cooked {
+                    phase: Some(CookedPhase::Waiting),
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn auto_set_status_can_be_updated_by_auto() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "p", Some("github"), Some("p"));
+            seed_status(
+                &env,
+                Status::Cooked {
+                    phase: None,
+                    detail: None,
+                },
+                "auto:cook",
+            );
+            apply_auto_status(ws.path(), "github", "p", done());
+            assert_eq!(load_env_meta(&env).status, Some(done()));
+        }
+
+        #[test]
+        fn ownership_mismatch_is_ignored() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "p", Some("github"), Some("p"));
+            apply_auto_status(ws.path(), "git", "p", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).status, None);
+        }
+
+        #[test]
+        fn recipe_mismatch_is_ignored() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("other"));
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).status, None);
+        }
+
+        #[test]
+        fn non_cookbook_settable_status_is_ignored() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            apply_auto_status(
+                ws.path(),
+                "git",
+                "jq",
+                Status::Cooked {
+                    phase: Some(CookedPhase::Active),
+                    detail: Some(StatusDetail {
+                        source: "x".into(),
+                        label: "active".into(),
+                        info: None,
+                    }),
+                },
+            );
+            assert_eq!(load_env_meta(&env).status, None);
+        }
+
+        #[test]
+        fn unchanged_status_appends_no_event() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            let n = load_env_meta(&env).event_log.len();
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).event_log.len(), n, "no-op must not log");
+        }
+
+        #[test]
+        fn missing_env_dir_is_a_noop() {
+            let ws = tempfile::tempdir().unwrap();
+            // No env created; must not panic or create anything.
+            apply_auto_status(ws.path(), "git", "ghost", Status::Evergreen);
+            assert!(!ws.path().join("ghost").exists());
+        }
+    }
+
+    // P1: the override invariant the army review flagged as B1's acceptance gate.
+    // For any random sequence of auto marks applied after a user mark, the
+    // user's status must survive untouched.
+    mod override_invariant {
+        use super::super::apply_auto_status;
+        use crate::meta::{
+            DoneOutcome, EnvStats, EventLogEntry, EventType, Status, load_env_meta, now_utc,
+            save_env_meta,
+        };
+        use proptest::prelude::*;
+
+        fn settable_status() -> impl Strategy<Value = Status> {
+            prop_oneof![
+                Just(Status::Evergreen),
+                Just(Status::Done { outcome: None }),
+                Just(Status::Done {
+                    outcome: Some(DoneOutcome::Completed)
+                }),
+                Just(Status::Done {
+                    outcome: Some(DoneOutcome::Abandoned)
+                }),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+            #[test]
+            fn user_mark_survives_any_auto_sequence(
+                user_status in settable_status(),
+                autos in prop::collection::vec(("[a-z]{1,5}", settable_status()), 0..12),
+            ) {
+                let ws = tempfile::tempdir().unwrap();
+                let env_dir = ws.path().join("env");
+                std::fs::create_dir_all(&env_dir).unwrap();
+                // A user mark: status + StatusChange event with set_by="user"
+                // (this is exactly what env_mark writes for MarkSource::User).
+                let now = now_utc();
+                let meta = EnvStats {
+                    cookbook: Some("git".to_string()),
+                    recipe: Some("env".to_string()),
+                    status: Some(user_status.clone()),
+                    event_log: vec![EventLogEntry {
+                        event_type: EventType::StatusChange,
+                        detail: "user".to_string(),
+                        set_by: Some("user".to_string()),
+                        started: now,
+                        ended: Some(now),
+                    }],
+                    ..Default::default()
+                };
+                save_env_meta(&env_dir, &meta).unwrap();
+
+                for (cookbook, status) in autos {
+                    apply_auto_status(ws.path(), &cookbook, "env", status);
+                }
+
+                prop_assert_eq!(load_env_meta(&env_dir).status, Some(user_status));
+            }
+        }
+    }
 }
