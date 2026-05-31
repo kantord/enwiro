@@ -405,17 +405,13 @@ fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen
     let mut events = Vec::new();
 
     for repo_config in &repos {
-        // The repo's worktree directory is the parent of any cooked env path.
-        // Worktrees are keyed by the SHORT repo name (matching `cook`, which
-        // uses the short recipe name), not the full `owner/repo`.
+        // Cooked worktrees are keyed by the SHORT repo name (matching `cook`,
+        // which uses the short recipe name), not the full `owner/repo`.
         let short_repo = extract_short_repo_name(repo_config.repo.clone());
-        let Ok(sample) = worktree_path(config, repo_config, &short_repo, "pr", 0) else {
+        let Ok(repo_dir) = repo_worktree_dir(config, repo_config, &short_repo) else {
             continue;
         };
-        let Some(repo_dir) = sample.parent() else {
-            continue;
-        };
-        let Ok(entries) = std::fs::read_dir(repo_dir) else {
+        let Ok(entries) = std::fs::read_dir(&repo_dir) else {
             continue; // nothing cooked for this repo yet
         };
 
@@ -535,6 +531,19 @@ fn print_worktree_path(wt_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The directory under which a repo's cooked PR/issue worktrees live:
+/// `<worktree_base>/<repo_str>-<path_hash>`. `repo_str` is the recipe's
+/// short repo name (e.g. `enwiro`).
+fn repo_worktree_dir(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+) -> anyhow::Result<PathBuf> {
+    let wt_base = worktree_base_dir(config)?;
+    let path_hash = short_path_hash(&repo_config.local_path);
+    Ok(wt_base.join(format!("{}-{}", repo_str, path_hash)))
+}
+
 fn worktree_path(
     config: &ConfigurationValues,
     repo_config: &RepoConfig,
@@ -542,11 +551,7 @@ fn worktree_path(
     prefix: &str,
     number: u64,
 ) -> anyhow::Result<PathBuf> {
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
-    Ok(wt_base
-        .join(format!("{}-{}", repo_str, path_hash))
-        .join(format!("{}-{}", prefix, number)))
+    Ok(repo_worktree_dir(config, repo_config, repo_str)?.join(format!("{}-{}", prefix, number)))
 }
 
 /// Create a worktree for a PR. Assumes the ref `pr-{number}` was already
@@ -580,6 +585,10 @@ fn cook_pr(
     print_worktree_path(&wt_path)
 }
 
+// NOTE: deliberately NOT shared with `detect::default_branch_name`. That one
+// is local-preferred (for comparing a checked-out branch); this one resolves
+// the *remote* default (origin/HEAD -> remote origin/main|master) and errors
+// when there's no remote default, which is what issue-branch creation needs.
 fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
     // Try origin/HEAD symbolic ref
     if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
@@ -692,12 +701,9 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     }
 
     // Also check old worktree path format for backward compatibility (PR only)
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
     let old_repo_name = repo_config.repo.replace('/', "-");
-    let old_pr_wt_path = wt_base
-        .join(format!("{}-{}", old_repo_name, path_hash))
-        .join(format!("pr-{}", number));
+    let old_pr_wt_path =
+        repo_worktree_dir(config, &repo_config, &old_repo_name)?.join(format!("pr-{}", number));
     if old_pr_wt_path.exists() {
         return print_worktree_path(&old_pr_wt_path);
     }
