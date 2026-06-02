@@ -388,23 +388,28 @@ fn list_recipes() -> anyhow::Result<()> {
 /// Auto-detected `done` events for the PR/issue envs this cookbook has
 /// actually cooked (#302). We only check items that *could* need closing --
 /// the cookbook's own worktrees -- never a broad forge search (GitHub's
-/// search API is score-rate-limited). For each cooked env: try free
-/// git-native detection first; only fall back to a targeted `gh` REST
-/// lookup for the ones git can't confirm (e.g. squash-merged on GitHub).
-fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
+/// search API is score-rate-limited). `done` is asked of the forge (`gh`),
+/// which is authoritative. `done_cache` carries already-confirmed-done recipes
+/// across listen ticks so we stop re-querying `gh` for them.
+fn collect_status_events(
+    config: &ConfigurationValues,
+    done_cache: &mut std::collections::HashSet<String>,
+) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
     let Ok(repos) = discover_github_repos() else {
         return Vec::new();
     };
-    repos
-        .iter()
-        .flat_map(|repo_config| repo_status_events(config, repo_config))
-        .collect()
+    let mut events = Vec::new();
+    for repo_config in &repos {
+        events.extend(repo_status_events(config, repo_config, done_cache));
+    }
+    events
 }
 
 /// `status_changed{done}` events for one repo's cooked PR/issue worktrees.
 fn repo_status_events(
     config: &ConfigurationValues,
     repo_config: &RepoConfig,
+    done_cache: &mut std::collections::HashSet<String>,
 ) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
     use enwiro_sdk::listen::RecipeUpdate;
     use enwiro_sdk::status::{DoneOutcome, Status};
@@ -419,24 +424,32 @@ fn repo_status_events(
         return Vec::new(); // nothing cooked for this repo yet
     };
 
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let (kind, number) = parse_cooked_env_dir(&entry.file_name().to_string_lossy())?;
-            // The forge is authoritative for "is it merged/closed?": a GitHub
-            // squash-merge is not detectable from local git history once the
-            // default branch moves on, and walking history on large upstream
-            // repos is far more expensive than one `gh` point-query (#302).
-            forge_item_is_done(&repo_config.repo, kind, number).then(|| {
-                RecipeUpdate::StatusChanged {
-                    recipe: format!("{short_repo}#{number}"),
-                    status: Status::Done {
-                        outcome: Some(DoneOutcome::Completed),
-                    },
-                }
-            })
-        })
-        .collect()
+    let mut events = Vec::new();
+    for entry in entries.flatten() {
+        let Some((kind, number)) = parse_cooked_env_dir(&entry.file_name().to_string_lossy())
+        else {
+            continue;
+        };
+        let recipe = format!("{short_repo}#{number}");
+        // The forge is authoritative for "is it merged/closed?" (a GitHub
+        // squash-merge is undetectable from local git history once the default
+        // branch moves on, #302). A `done` result never reverts, so once we've
+        // confirmed it we cache the recipe and stop calling `gh` for it - that
+        // re-query of every cooked env each tick is the bulk of the cost.
+        if !done_cache.contains(&recipe) {
+            if !forge_item_is_done(&repo_config.repo, kind, number) {
+                continue;
+            }
+            done_cache.insert(recipe.clone());
+        }
+        events.push(RecipeUpdate::StatusChanged {
+            recipe,
+            status: Status::Done {
+                outcome: Some(DoneOutcome::Completed),
+            },
+        });
+    }
+    events
 }
 
 /// Parse a cooked-env directory name (`pr-123` / `issue-45`) into
@@ -1646,11 +1659,15 @@ fn main() -> anyhow::Result<()> {
                 .context("Could not read cookbook payload from stdin")?;
             let config: ConfigurationValues = serde_json::from_value(payload.config)
                 .context("Could not deserialize cookbook-github configuration")?;
+            // Recipes already confirmed done are cached so we stop re-querying
+            // `gh` for them on every tick (#302).
+            let mut done_cache: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, move || {
                 let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
                     data: collect_recipes(),
                 }];
-                updates.extend(collect_status_events(&config));
+                updates.extend(collect_status_events(&config, &mut done_cache));
                 updates
             });
         }
