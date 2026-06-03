@@ -385,6 +385,116 @@ fn list_recipes() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Auto-detected `done` events for the PR/issue envs this cookbook has
+/// actually cooked (#302). We only check items that *could* need closing --
+/// the cookbook's own worktrees -- never a broad forge search (GitHub's
+/// search API is score-rate-limited). `done` is asked of the forge (`gh`),
+/// which is authoritative. `done_cache` carries already-confirmed-done recipes
+/// across listen ticks so we stop re-querying `gh` for them.
+fn collect_status_events(
+    config: &ConfigurationValues,
+    done_cache: &mut std::collections::HashSet<String>,
+) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
+    let Ok(repos) = discover_github_repos() else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for repo_config in &repos {
+        events.extend(repo_status_events(config, repo_config, done_cache));
+    }
+    events
+}
+
+/// `status_changed{done}` events for one repo's cooked PR/issue worktrees.
+fn repo_status_events(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    done_cache: &mut std::collections::HashSet<String>,
+) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
+    use enwiro_sdk::listen::RecipeUpdate;
+    use enwiro_sdk::status::{DoneOutcome, Status};
+
+    // Worktrees are stored under the SHORT repo name (the recipe name `cook`
+    // uses), not the full `owner/repo`.
+    let short_repo = extract_short_repo_name(repo_config.repo.clone());
+    let Ok(repo_dir) = repo_worktree_dir(config, repo_config, &short_repo) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&repo_dir) else {
+        return Vec::new(); // nothing cooked for this repo yet
+    };
+
+    let mut events = Vec::new();
+    for entry in entries.flatten() {
+        let Some((kind, number)) = parse_cooked_env_dir(&entry.file_name().to_string_lossy())
+        else {
+            continue;
+        };
+        let recipe = format!("{short_repo}#{number}");
+        // The forge is authoritative for "is it merged/closed?" (a GitHub
+        // squash-merge is undetectable from local git history once the default
+        // branch moves on, #302). A `done` result never reverts, so once we've
+        // confirmed it we cache the recipe and stop calling `gh` for it - that
+        // re-query of every cooked env each tick is the bulk of the cost.
+        if !done_cache.contains(&recipe) {
+            if !forge_item_is_done(&repo_config.repo, kind, number) {
+                continue;
+            }
+            done_cache.insert(recipe.clone());
+        }
+        events.push(RecipeUpdate::StatusChanged {
+            recipe,
+            status: Status::Done {
+                outcome: Some(DoneOutcome::Completed),
+            },
+        });
+    }
+    events
+}
+
+/// Parse a cooked-env directory name (`pr-123` / `issue-45`) into
+/// `(kind, number)`. `None` for anything else (e.g. stray files).
+fn parse_cooked_env_dir(dir_name: &str) -> Option<(&'static str, u64)> {
+    for (prefix, kind) in [("pr-", "pr"), ("issue-", "issue")] {
+        if let Some(rest) = dir_name.strip_prefix(prefix)
+            && let Ok(number) = rest.parse::<u64>()
+        {
+            return Some((kind, number));
+        }
+    }
+    None
+}
+
+/// Targeted, single-item forge state check via `gh` REST (not search).
+/// A PR counts as done when merged; an issue when closed. Any error ->
+/// `false` (stay silent; the daemon won't auto-mark).
+fn forge_item_is_done(repo: &str, kind: &str, number: u64) -> bool {
+    let (subcommand, done_state) = match kind {
+        "pr" => ("pr", "MERGED"),
+        "issue" => ("issue", "CLOSED"),
+        _ => return false,
+    };
+    let output = Command::new("gh")
+        .args([
+            subcommand,
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state",
+            "-q",
+            ".state",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim() == done_state
+        }
+        _ => false,
+    }
+}
+
 fn resolve_repo_config(repo_str: &str) -> anyhow::Result<RepoConfig> {
     let repos = discover_github_repos()?;
     let matching: Vec<_> = repos
@@ -425,6 +535,19 @@ fn print_worktree_path(wt_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The directory under which a repo's cooked PR/issue worktrees live:
+/// `<worktree_base>/<repo_str>-<path_hash>`. `repo_str` is the recipe's
+/// short repo name (e.g. `enwiro`).
+fn repo_worktree_dir(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+) -> anyhow::Result<PathBuf> {
+    let wt_base = worktree_base_dir(config)?;
+    let path_hash = short_path_hash(&repo_config.local_path);
+    Ok(wt_base.join(format!("{}-{}", repo_str, path_hash)))
+}
+
 fn worktree_path(
     config: &ConfigurationValues,
     repo_config: &RepoConfig,
@@ -432,11 +555,7 @@ fn worktree_path(
     prefix: &str,
     number: u64,
 ) -> anyhow::Result<PathBuf> {
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
-    Ok(wt_base
-        .join(format!("{}-{}", repo_str, path_hash))
-        .join(format!("{}-{}", prefix, number)))
+    Ok(repo_worktree_dir(config, repo_config, repo_str)?.join(format!("{}-{}", prefix, number)))
 }
 
 /// Create a worktree for a PR. Assumes the ref `pr-{number}` was already
@@ -470,6 +589,10 @@ fn cook_pr(
     print_worktree_path(&wt_path)
 }
 
+// NOTE: deliberately NOT shared with `detect::default_branch_name`. That one
+// is local-preferred (for comparing a checked-out branch); this one resolves
+// the *remote* default (origin/HEAD -> remote origin/main|master) and errors
+// when there's no remote default, which is what issue-branch creation needs.
 fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
     // Try origin/HEAD symbolic ref
     if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
@@ -582,12 +705,9 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     }
 
     // Also check old worktree path format for backward compatibility (PR only)
-    let wt_base = worktree_base_dir(config)?;
-    let path_hash = short_path_hash(&repo_config.local_path);
     let old_repo_name = repo_config.repo.replace('/', "-");
-    let old_pr_wt_path = wt_base
-        .join(format!("{}-{}", old_repo_name, path_hash))
-        .join(format!("pr-{}", number));
+    let old_pr_wt_path =
+        repo_worktree_dir(config, &repo_config, &old_repo_name)?.join(format!("pr-{}", number));
     if old_pr_wt_path.exists() {
         return print_worktree_path(&old_pr_wt_path);
     }
@@ -705,6 +825,37 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn parse_cooked_env_dir_examples() {
+        assert_eq!(parse_cooked_env_dir("pr-123"), Some(("pr", 123)));
+        assert_eq!(parse_cooked_env_dir("issue-45"), Some(("issue", 45)));
+        assert_eq!(parse_cooked_env_dir("issue-0"), Some(("issue", 0)));
+        // Rejected: missing number, non-numeric, wrong prefix, overflow, junk.
+        assert_eq!(parse_cooked_env_dir("pr-"), None);
+        assert_eq!(parse_cooked_env_dir("pr-abc"), None);
+        assert_eq!(parse_cooked_env_dir("pr-12x"), None);
+        assert_eq!(parse_cooked_env_dir("random"), None);
+        assert_eq!(parse_cooked_env_dir("branch-7"), None);
+        assert_eq!(parse_cooked_env_dir("pr-99999999999999999999999999"), None);
+    }
+
+    proptest! {
+        // P2: total over arbitrary input (never panics, incl. overflow/unicode).
+        #[test]
+        fn parse_cooked_env_dir_never_panics(s in ".*") {
+            let _ = parse_cooked_env_dir(&s);
+        }
+
+        // P2: round-trips with the worktree dir naming (`{prefix}-{number}`).
+        #[test]
+        fn parse_cooked_env_dir_round_trips(n in any::<u64>(), is_pr in any::<bool>()) {
+            let kind = if is_pr { "pr" } else { "issue" };
+            let dir = format!("{kind}-{n}");
+            prop_assert_eq!(parse_cooked_env_dir(&dir), Some((kind, n)));
+        }
+    }
 
     #[test]
     fn test_parse_recipe_name_valid() {
@@ -1304,12 +1455,13 @@ mod tests {
         assert_eq!(compute_sort_order(2, 3), 100);
     }
 
-    // --- interpret_gh_output tests ---
+    mod interpret_gh_output_tests {
+        use super::*;
 
-    /// Minimal valid GraphQL JSON with one PR node, used as a fixture for the
-    /// truncation-warning tests below.
-    fn gh_output_with_one_pr() -> Vec<u8> {
-        r#"{
+        /// Minimal valid GraphQL JSON with one PR node, used as a fixture for the
+        /// truncation-warning tests below.
+        fn gh_output_with_one_pr() -> Vec<u8> {
+            r#"{
             "data": {
                 "search": {
                     "nodes": [
@@ -1324,52 +1476,53 @@ mod tests {
                 }
             }
         }"#
-        .as_bytes()
-        .to_vec()
-    }
+            .as_bytes()
+            .to_vec()
+        }
 
-    /// When gh exits non-zero AND stderr contains the 100-result truncation
-    /// warning AND stdout is valid JSON, `interpret_gh_output` must return the
-    /// parsed items instead of an error.
-    #[test]
-    fn test_interpret_gh_output_truncation_warning_returns_partial_results() {
-        let stdout = gh_output_with_one_pr();
-        let stderr =
-            b"GitHub search returned 100 results (the maximum). Some results may be missing."
-                .to_vec();
+        /// When gh exits non-zero AND stderr contains the 100-result truncation
+        /// warning AND stdout is valid JSON, `interpret_gh_output` must return the
+        /// parsed items instead of an error.
+        #[test]
+        fn test_interpret_gh_output_truncation_warning_returns_partial_results() {
+            let stdout = gh_output_with_one_pr();
+            let stderr =
+                b"GitHub search returned 100 results (the maximum). Some results may be missing."
+                    .to_vec();
 
-        // success = false simulates a non-zero exit code
-        let result = interpret_gh_output(&stdout, &stderr, false);
+            // success = false simulates a non-zero exit code
+            let result = interpret_gh_output(&stdout, &stderr, false);
 
-        assert!(
-            result.is_ok(),
-            "Expected Ok with partial results, got Err: {:?}",
-            result.unwrap_err()
-        );
-        let items = result.unwrap();
-        assert_eq!(
-            items.len(),
-            1,
-            "Expected 1 parsed item from partial results, got {}",
-            items.len()
-        );
-        assert_eq!(items[0].number, 42);
-    }
+            assert!(
+                result.is_ok(),
+                "Expected Ok with partial results, got Err: {:?}",
+                result.unwrap_err()
+            );
+            let items = result.unwrap();
+            assert_eq!(
+                items.len(),
+                1,
+                "Expected 1 parsed item from partial results, got {}",
+                items.len()
+            );
+            assert_eq!(items[0].number, 42);
+        }
 
-    /// When gh exits non-zero AND stderr does NOT contain the truncation
-    /// warning, `interpret_gh_output` must still return an error (the original
-    /// bail! behaviour must be preserved for real failures).
-    #[test]
-    fn test_interpret_gh_output_real_failure_still_errors() {
-        let stdout = gh_output_with_one_pr();
-        let stderr = b"some other gh error: authentication failed".to_vec();
+        /// When gh exits non-zero AND stderr does NOT contain the truncation
+        /// warning, `interpret_gh_output` must still return an error (the original
+        /// bail! behaviour must be preserved for real failures).
+        #[test]
+        fn test_interpret_gh_output_real_failure_still_errors() {
+            let stdout = gh_output_with_one_pr();
+            let stderr = b"some other gh error: authentication failed".to_vec();
 
-        let result = interpret_gh_output(&stdout, &stderr, false);
+            let result = interpret_gh_output(&stdout, &stderr, false);
 
-        assert!(
-            result.is_err(),
-            "Expected Err for a real gh failure, but got Ok"
-        );
+            assert!(
+                result.is_err(),
+                "Expected Err for a real gh failure, but got Ok"
+            );
+        }
     }
 
     mod gear_subcommand {
@@ -1502,9 +1655,21 @@ fn main() -> anyhow::Result<()> {
             );
         }
         EnwiroCookbookGithub::Listen => {
-            let _ = CookbookPayload::read_first_line_from_stdin()
+            let payload = CookbookPayload::read_first_line_from_stdin()
                 .context("Could not read cookbook payload from stdin")?;
-            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, collect_recipes);
+            let config: ConfigurationValues = serde_json::from_value(payload.config)
+                .context("Could not deserialize cookbook-github configuration")?;
+            // Recipes already confirmed done are cached so we stop re-querying
+            // `gh` for them on every tick (#302).
+            let mut done_cache: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, move || {
+                let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
+                    data: collect_recipes(),
+                }];
+                updates.extend(collect_status_events(&config, &mut done_cache));
+                updates
+            });
         }
     };
 

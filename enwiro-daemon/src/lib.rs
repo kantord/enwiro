@@ -377,6 +377,14 @@ pub async fn run(
                                     last_cache_content = Some(new_cache);
                                 }
                             }
+                            Ok(RecipeUpdate::StatusChanged { recipe, status }) => {
+                                apply_auto_status(
+                                    &workspaces_directory,
+                                    &item.key.key,
+                                    &recipe,
+                                    status,
+                                );
+                            }
                             Err(e) => {
                                 tracing::debug!(cookbook = %item.key.key, error = %e, line = %item.line, "Could not parse RecipeUpdate from cookbook stdout");
                             }
@@ -392,6 +400,113 @@ pub async fn run(
     remove_pid_file(&dir);
     let _ = std::fs::remove_file(&rpc_socket_path);
     Ok(())
+}
+
+/// Env dir for a recipe: stored under the recipe name with `/` flattened to `-`.
+fn env_dir_for_recipe(workspaces_directory: &Path, recipe: &str) -> PathBuf {
+    workspaces_directory.join(recipe.replace('/', "-"))
+}
+
+/// Only the cookbook that owns an env may set its status. An env with no
+/// recorded cookbook is owned by no one and so settable by any.
+fn cookbook_owns_env(meta: &crate::meta::EnvStats, cookbook: &str) -> bool {
+    meta.cookbook.as_deref().is_none_or(|c| c == cookbook)
+}
+
+/// Whether `recipe` matches the env's recorded recipe. `recipe` is only
+/// recorded since #325, so pre-#325 envs (`recipe: None`) match by env-dir
+/// name + ownership alone.
+/// TODO(legacy, revisit after 2026-06): once pre-#325 envs have aged out,
+/// tighten this to require `meta.recipe == Some(recipe)`.
+fn recipe_matches_env(meta: &crate::meta::EnvStats, recipe: &str) -> bool {
+    meta.recipe.as_deref().is_none_or(|r| r == recipe)
+}
+
+/// Manual override wins: true when the most recent status change was user-set,
+/// so an auto-status must not overwrite it.
+fn last_status_change_is_user_set(meta: &crate::meta::EnvStats) -> bool {
+    meta.event_log
+        .iter()
+        .rev()
+        .find(|e| e.event_type == crate::meta::EventType::StatusChange)
+        .and_then(|e| e.set_by.as_ref())
+        .is_some_and(crate::meta::StatusSource::is_user)
+}
+
+/// Event-log label for a cookbook-settable status, or `None` for one a
+/// cookbook may not set.
+fn auto_status_label(status: &crate::meta::Status) -> Option<&'static str> {
+    match status {
+        crate::meta::Status::Done { .. } => Some("done"),
+        crate::meta::Status::Evergreen => Some("evergreen"),
+        _ => None,
+    }
+}
+
+/// Write a cookbook-reported auto-status into a loaded env `meta` and persist it.
+fn write_auto_status(
+    env_dir: &Path,
+    recipe: &str,
+    cookbook: &str,
+    mut meta: crate::meta::EnvStats,
+    status: crate::meta::Status,
+    label: &str,
+) {
+    let now = crate::meta::now_utc();
+    meta.status = Some(status);
+    meta.event_log.push(crate::meta::EventLogEntry {
+        event_type: crate::meta::EventType::StatusChange,
+        detail: label.to_string(),
+        set_by: Some(crate::meta::StatusSource::Auto {
+            cookbook: Some(cookbook.to_string()),
+        }),
+        started: now,
+        ended: Some(now),
+    });
+    if let Err(e) = crate::meta::save_env_meta(env_dir, &meta) {
+        tracing::error!(error = %e, recipe, "failed to save auto status");
+    }
+}
+
+/// Apply a cookbook-reported auto-status to the recipe's env `meta.json`.
+/// Best-effort: silently ignores statuses a cookbook may not set, recipes
+/// with no matching env, and envs whose status the user set manually.
+fn apply_auto_status(
+    workspaces_directory: &Path,
+    cookbook: &str,
+    recipe: &str,
+    status: crate::meta::Status,
+) {
+    if !crate::meta::is_cookbook_settable(&status) {
+        tracing::debug!(recipe, "ignoring auto status a cookbook may not set");
+        return;
+    }
+
+    let env_dir = env_dir_for_recipe(workspaces_directory, recipe);
+    if !env_dir.is_dir() {
+        return;
+    }
+
+    let meta = crate::meta::load_env_meta(&env_dir);
+    if !cookbook_owns_env(&meta, cookbook) {
+        return;
+    }
+    if !recipe_matches_env(&meta, recipe) {
+        return;
+    }
+    if last_status_change_is_user_set(&meta) {
+        return;
+    }
+    // No-op if unchanged, to avoid log spam.
+    if meta.status.as_ref() == Some(&status) {
+        return;
+    }
+
+    // unreachable given is_cookbook_settable above, but stay defensive.
+    let Some(label) = auto_status_label(&status) else {
+        return;
+    };
+    write_auto_status(&env_dir, recipe, cookbook, meta, status, label);
 }
 
 #[cfg(test)]
@@ -731,5 +846,233 @@ mod tests {
             "Lower sort_order should come first regardless of cookbook priority"
         );
         assert_eq!(entries[1].name, "low-priority-branch");
+    }
+
+    mod apply_auto_status_tests {
+        use super::super::apply_auto_status;
+        use crate::meta::{
+            CookedPhase, DoneOutcome, EnvStats, EventLogEntry, EventType, Status, StatusDetail,
+            StatusSource, load_env_meta, now_utc, save_env_meta,
+        };
+        use std::path::{Path, PathBuf};
+
+        /// Create an env dir under `ws` with the given cookbook/recipe metadata.
+        fn make_env(
+            ws: &Path,
+            name: &str,
+            cookbook: Option<&str>,
+            recipe: Option<&str>,
+        ) -> PathBuf {
+            let env_dir = ws.join(name);
+            std::fs::create_dir_all(&env_dir).unwrap();
+            let meta = EnvStats {
+                cookbook: cookbook.map(str::to_string),
+                recipe: recipe.map(str::to_string),
+                ..Default::default()
+            };
+            save_env_meta(&env_dir, &meta).unwrap();
+            env_dir
+        }
+
+        /// Seed an existing status + a `StatusChange` event with the given `set_by`.
+        fn seed_status(env_dir: &Path, status: Status, set_by: StatusSource) {
+            let mut meta = load_env_meta(env_dir);
+            meta.status = Some(status);
+            let now = now_utc();
+            meta.event_log.push(EventLogEntry {
+                event_type: EventType::StatusChange,
+                detail: "seed".to_string(),
+                set_by: Some(set_by),
+                started: now,
+                ended: Some(now),
+            });
+            save_env_meta(env_dir, &meta).unwrap();
+        }
+
+        fn done() -> Status {
+            Status::Done {
+                outcome: Some(DoneOutcome::Completed),
+            }
+        }
+
+        #[test]
+        fn happy_path_writes_status_and_provenance() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            let meta = load_env_meta(&env);
+            assert_eq!(meta.status, Some(Status::Evergreen));
+            let last = meta.event_log.last().unwrap();
+            assert_eq!(last.event_type, EventType::StatusChange);
+            assert_eq!(
+                last.set_by,
+                Some(StatusSource::Auto {
+                    cookbook: Some("git".to_string())
+                })
+            );
+        }
+
+        #[test]
+        fn recipe_none_still_matches_legacy_env() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), None);
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).status, Some(Status::Evergreen));
+        }
+
+        #[test]
+        fn user_set_status_is_never_overwritten() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            seed_status(
+                &env,
+                Status::Cooked {
+                    phase: Some(CookedPhase::Waiting),
+                    detail: None,
+                },
+                StatusSource::User,
+            );
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert!(matches!(
+                load_env_meta(&env).status,
+                Some(Status::Cooked {
+                    phase: Some(CookedPhase::Waiting),
+                    ..
+                })
+            ));
+        }
+
+        #[test]
+        fn auto_set_status_can_be_updated_by_auto() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "p", Some("github"), Some("p"));
+            seed_status(
+                &env,
+                Status::Cooked {
+                    phase: None,
+                    detail: None,
+                },
+                StatusSource::Auto {
+                    cookbook: Some("cook".to_string()),
+                },
+            );
+            apply_auto_status(ws.path(), "github", "p", done());
+            assert_eq!(load_env_meta(&env).status, Some(done()));
+        }
+
+        #[test]
+        fn ownership_mismatch_is_ignored() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "p", Some("github"), Some("p"));
+            apply_auto_status(ws.path(), "git", "p", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).status, None);
+        }
+
+        #[test]
+        fn recipe_mismatch_is_ignored() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("other"));
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).status, None);
+        }
+
+        #[test]
+        fn non_cookbook_settable_status_is_ignored() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            apply_auto_status(
+                ws.path(),
+                "git",
+                "jq",
+                Status::Cooked {
+                    phase: Some(CookedPhase::Active),
+                    detail: Some(StatusDetail {
+                        source: "x".into(),
+                        label: "active".into(),
+                        info: None,
+                    }),
+                },
+            );
+            assert_eq!(load_env_meta(&env).status, None);
+        }
+
+        #[test]
+        fn unchanged_status_appends_no_event() {
+            let ws = tempfile::tempdir().unwrap();
+            let env = make_env(ws.path(), "jq", Some("git"), Some("jq"));
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            let n = load_env_meta(&env).event_log.len();
+            apply_auto_status(ws.path(), "git", "jq", Status::Evergreen);
+            assert_eq!(load_env_meta(&env).event_log.len(), n, "no-op must not log");
+        }
+
+        #[test]
+        fn missing_env_dir_is_a_noop() {
+            let ws = tempfile::tempdir().unwrap();
+            // No env created; must not panic or create anything.
+            apply_auto_status(ws.path(), "git", "ghost", Status::Evergreen);
+            assert!(!ws.path().join("ghost").exists());
+        }
+    }
+
+    // P1: the override invariant the army review flagged as B1's acceptance gate.
+    // For any random sequence of auto marks applied after a user mark, the
+    // user's status must survive untouched.
+    mod override_invariant {
+        use super::super::apply_auto_status;
+        use crate::meta::{
+            DoneOutcome, EnvStats, EventLogEntry, EventType, Status, load_env_meta, now_utc,
+            save_env_meta,
+        };
+        use proptest::prelude::*;
+
+        fn settable_status() -> impl Strategy<Value = Status> {
+            prop_oneof![
+                Just(Status::Evergreen),
+                Just(Status::Done { outcome: None }),
+                Just(Status::Done {
+                    outcome: Some(DoneOutcome::Completed)
+                }),
+                Just(Status::Done {
+                    outcome: Some(DoneOutcome::Abandoned)
+                }),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+            #[test]
+            fn user_mark_survives_any_auto_sequence(
+                user_status in settable_status(),
+                autos in prop::collection::vec(("[a-z]{1,5}", settable_status()), 0..12),
+            ) {
+                let ws = tempfile::tempdir().unwrap();
+                let env_dir = ws.path().join("env");
+                std::fs::create_dir_all(&env_dir).unwrap();
+                // A user mark: status + StatusChange event with set_by="user"
+                // (this is exactly what env_mark writes for MarkSource::User).
+                let now = now_utc();
+                let meta = EnvStats {
+                    cookbook: Some("git".to_string()),
+                    recipe: Some("env".to_string()),
+                    status: Some(user_status.clone()),
+                    event_log: vec![EventLogEntry {
+                        event_type: EventType::StatusChange,
+                        detail: "user".to_string(),
+                        set_by: Some(crate::meta::StatusSource::User),
+                        started: now,
+                        ended: Some(now),
+                    }],
+                    ..Default::default()
+                };
+                save_env_meta(&env_dir, &meta).unwrap();
+
+                for (cookbook, status) in autos {
+                    apply_auto_status(ws.path(), &cookbook, "env", status);
+                }
+
+                prop_assert_eq!(load_env_meta(&env_dir).status, Some(user_status));
+            }
+        }
     }
 }

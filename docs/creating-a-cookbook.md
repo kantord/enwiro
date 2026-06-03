@@ -1,7 +1,7 @@
 # Creating an Enwiro Cookbook
 
 A cookbook is a standalone program that tells enwiro how to discover and set up
-project environments. You can write one in any language — Python, Bash, Go,
+project environments. You can write one in any language - Python, Bash, Go,
 Rust, JavaScript, etc. Enwiro communicates with cookbooks by running them as
 subprocesses and reading their stdout.
 
@@ -52,26 +52,28 @@ and `sort_order`:
 - Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
 
-**Sorting matters.** Enwiro uses `sort_order` to interleave recipes from all
-cookbooks into a single globally sorted list. Within the same `sort_order`,
-recipes are further sorted by cookbook priority (see `metadata`) and then
-alphabetically by name.
-
-Within a cookbook, a good default is: most relevant or most recently used items
-first, with `sort_order` assigned linearly based on position.
+**Ordering within your cookbook:** a good default is to list the most relevant
+or most recently used items first. How that ranking is then combined with other
+cookbooks' recipes is what `sort_order` controls - see below.
 
 #### Global sort order
 
-The `sort_order` field (0–100) lets enwiro merge recipes from different
+The `sort_order` field (0-100) lets enwiro merge recipes from different
 cookbooks into a single relevance-ranked list. Without it, all recipes from a
 higher-priority cookbook would appear before any recipe from a lower-priority
-one, regardless of individual relevance.
+one, regardless of individual relevance. Ties within the same `sort_order` are
+broken by cookbook priority (see [`metadata`](#metadata)) and then
+alphabetically by name.
 
 **Convention:** After sorting your recipes internally, assign `sort_order`
-linearly based on position:
+linearly based on position. For a list of `total` recipes, the recipe at
+position `index` (starting from 0) gets:
 
 ```
-sort_order = if total <= 1 { 0 } else { (index * 100) / (total - 1) }
+if total <= 1:
+    sort_order = 0
+else:
+    sort_order = (index * 100) / (total - 1)
 ```
 
 This maps the first recipe to 0 and the last to 100, with intermediate values
@@ -97,7 +99,7 @@ The path should be absolute. Enwiro trims surrounding whitespace.
 /home/user/projects/my-project
 ```
 
-This subcommand is where your cookbook does its real work — cloning a repo,
+This subcommand is where your cookbook does its real work - cloning a repo,
 creating a worktree, setting up a directory, etc. If the environment already
 exists (e.g., a previously cloned repo), just print the existing path.
 
@@ -111,7 +113,7 @@ enwiro-cookbook-yourname metadata
 ```
 
 Print a JSON object to stdout describing your cookbook. This subcommand is
-**optional** — if your binary doesn't support it (exits non-zero or doesn't
+**optional** - if your binary doesn't support it (exits non-zero or doesn't
 recognize the command), enwiro uses sensible defaults.
 
 Currently the only field is `defaultPriority`:
@@ -138,6 +140,43 @@ name.
 Unknown fields in the JSON are ignored, so you can safely add your own
 fields for forward compatibility.
 
+### `listen`
+
+```
+enwiro-cookbook-yourname listen
+```
+
+**Optional.** A long-running subcommand: instead of exiting, your binary stays
+running and the daemon reads newline-delimited JSON from its stdout. Use it to
+keep enwiro up to date when things change in the background - a repo gets a new
+branch, a pull request is merged, and so on. Print an update line whenever
+something changes, then go back to sleep. Each line is one of two kinds:
+
+- **Updated recipe list:**
+  `{"type":"recipes","data":[ ...recipes... ]}` - the full current set of
+  recipes (the same objects [`list-recipes`](#list-recipes) prints), replacing
+  whatever was sent before.
+- **Status update:**
+  `{"type":"status_changed","recipe":"<name>","status":{ ... }}` - marks one
+  environment as finished or always-on, so its state shows up in `enw ls`
+  without the user running `enw mark` by hand. The two statuses a cookbook may
+  send are `{"type":"done"}` (the work is finished, e.g. the branch was merged)
+  and `{"type":"evergreen"}` (an environment that is never "finished", like a
+  dotfiles or notes directory).
+
+**Cookbooks only ever set `done` or `evergreen`.** The `active` and `waiting`
+statuses are the user's - they set those by hand with `enw mark`, and a cookbook
+must never send them. If you're not sure an environment is done, send nothing.
+
+#### A note for Rust cookbooks
+
+If you write your cookbook in Rust, you don't have to implement this loop or the
+JSON formatting yourself. The `enwiro_sdk` crate provides two helpers in its
+`listen` module, `serve` and `serve_updates`, that run the loop, format each
+line correctly, and skip sending an update when nothing actually changed. Wrap
+your "what are the current recipes and statuses?" logic in one of them and the
+SDK handles the rest.
+
 ## Output Encoding
 
 All stdout output must be valid UTF-8. If your binary produces invalid UTF-8,
@@ -145,8 +184,8 @@ enwiro treats it as an error.
 
 ## Error Handling
 
-- **Exit code 0** means success — stdout is parsed as results.
-- **Non-zero exit code** means failure — stdout is discarded and stderr is
+- **Exit code 0** means success - stdout is parsed as results.
+- **Non-zero exit code** means failure - stdout is discarded and stderr is
   shown to the user as the error message.
 - If `list-recipes` fails, enwiro skips your cookbook and continues with the
   others. Your cookbook failing does not break the overall recipe list.
@@ -258,17 +297,33 @@ When a user activates a recipe:
 2. The returned path is symlinked into `~/.enwiro_envs/<recipe_name>/`.
 3. The window manager workspace is switched to the new environment.
 
+## Advanced: building on another cookbook
+
+Most cookbooks are self-contained, so you can skip this section unless you need
+it. Occasionally one cookbook wants to reuse an operation another already
+implements.
+
+The general-purpose way to do this, **which works no matter what language each
+cookbook is written in**, is subprocess delegation: the daemon exposes a
+`cookbook.invoke` call over its socket so one cookbook can ask another to run an
+operation and hand back the result. Because it only relies on running a binary
+and reading its output, it works across any language boundary.
+
+If both cookbooks happen to be written in the same language, you can instead
+depend on the other as a normal library and call its code directly - simpler
+when it applies, but subprocess delegation is the option that always works.
+
 ## Tips
 
 - **Keep `list-recipes` fast.** Enwiro caches recipe lists via a background
   daemon, but the first call (or a cache miss) runs synchronously. Avoid
   network calls in `list-recipes` if possible, or cache results yourself.
 - **`cook` can be slow.** It's fine for `cook` to clone a repo, create a
-  worktree, or do other setup work — the user expects to wait.
+  worktree, or do other setup work - the user expects to wait.
 - **Idempotent cooking.** If `cook` is called for a recipe that was already
   cooked, just return the existing path. Don't fail or recreate.
 - **Don't worry about metadata.** If you skip the `metadata` subcommand
-  entirely, your cookbook will still work — it just gets the default priority of
+  entirely, your cookbook will still work - it just gets the default priority of
   50.
 - **Recipe names are identifiers.** Users type them (e.g., `enw activate
   my-project`), so keep them short and filesystem-friendly. Avoid spaces.

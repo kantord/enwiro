@@ -51,85 +51,110 @@ fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyho
             branch_name,
             is_remote,
             ..
-        } => {
-            let repo = Repository::open(repo_path)
-                .context("Could not open repository for worktree creation")?;
-            let repo_name = repo_path
-                .file_name()
-                .context("Could not get repo directory name")?
-                .to_str()
-                .context("Could not convert repo name to string")?;
-            let path_hash = short_path_hash(repo_path);
-
-            // Strip remote prefix for the directory/worktree name
-            let short_name = if *is_remote {
-                branch_name.split('/').skip(1).collect::<Vec<_>>().join("/")
-            } else {
-                branch_name.clone()
-            };
-
-            let branch_hash = short_path_hash(Path::new(&short_name));
-            let flat_name = format!("{}-{}", short_name.replace('/', "-"), branch_hash);
-
-            let wt_base = worktree_base_dir(config)?;
-            let wt_path = wt_base
-                .join(format!("{}-{}", repo_name, path_hash))
-                .join(&flat_name);
-
-            // If worktree already exists, just return the path
-            if wt_path.exists() {
-                return Ok(wt_path);
-            }
-
-            // Create parent directories
-            std::fs::create_dir_all(wt_path.parent().unwrap())
-                .context("Could not create worktree directory")?;
-
-            // Resolve the branch reference
-            let reference = if *is_remote {
-                // For remote branches, find the remote tracking ref
-                let remote_branch = repo
-                    .find_branch(branch_name, git2::BranchType::Remote)
-                    .with_context(|| format!("Could not find remote branch {}", branch_name))?;
-                let commit = remote_branch
-                    .get()
-                    .peel_to_commit()
-                    .context("Could not resolve remote branch to commit")?;
-                // Create a local branch from the remote tracking branch
-                let local_branch = repo
-                    .branch(&short_name, &commit, false)
-                    .with_context(|| format!("Could not create local branch {}", short_name))?;
-                local_branch.into_reference()
-            } else {
-                let branch = repo
-                    .find_branch(branch_name, git2::BranchType::Local)
-                    .with_context(|| format!("Could not find branch {}", branch_name))?;
-                branch.into_reference()
-            };
-
-            // Worktree name must be unique within the repo
-            let wt_name = format!("enwiro-{}", flat_name);
-            let mut opts = git2::WorktreeAddOptions::new();
-            opts.reference(Some(&reference));
-            repo.worktree(&wt_name, &wt_path, Some(&opts))
-                .map_err(|err| {
-                    if err.class() == git2::ErrorClass::Worktree && err.message().contains("already checked out") {
-                        anyhow::anyhow!(
-                            "Branch '{}' is already checked out in another worktree — switch away from it first",
-                            branch_name
-                        )
-                    } else {
-                        anyhow::anyhow!(err).context(format!(
-                            "Could not create worktree for branch {}",
-                            branch_name
-                        ))
-                    }
-                })?;
-
-            tracing::debug!(path = %wt_path.display(), branch = %branch_name, "Created worktree");
-            Ok(wt_path)
-        }
+        } => resolve_branch_worktree(config, repo_path, branch_name, *is_remote),
     }
+}
+
+/// The short branch name (remote prefix stripped) and the worktree path a
+/// branch recipe cooks to. Worktrees live at
+/// `<base>/<repo>-<path_hash>/<branch>-<branch_hash>`; the hashes disambiguate
+/// same-named repos in different directories and slash-vs-dash branch names.
+fn branch_worktree_layout(
+    config: &ConfigurationValues,
+    repo_path: &Path,
+    branch_name: &str,
+    is_remote: bool,
+) -> anyhow::Result<(String, PathBuf)> {
+    let repo_name = repo_path
+        .file_name()
+        .context("Could not get repo directory name")?
+        .to_str()
+        .context("Could not convert repo name to string")?;
+    let path_hash = short_path_hash(repo_path);
+
+    let short_name = if is_remote {
+        branch_name.split('/').skip(1).collect::<Vec<_>>().join("/")
+    } else {
+        branch_name.to_string()
+    };
+    let branch_hash = short_path_hash(Path::new(&short_name));
+    let flat_name = format!("{}-{}", short_name.replace('/', "-"), branch_hash);
+
+    let wt_path = worktree_base_dir(config)?
+        .join(format!("{}-{}", repo_name, path_hash))
+        .join(&flat_name);
+    Ok((short_name, wt_path))
+}
+
+/// Resolve the git reference a new worktree should check out, creating a local
+/// branch from the remote tracking branch when the recipe is a remote branch.
+fn resolve_branch_reference<'repo>(
+    repo: &'repo Repository,
+    branch_name: &str,
+    short_name: &str,
+    is_remote: bool,
+) -> anyhow::Result<git2::Reference<'repo>> {
+    if is_remote {
+        let remote_branch = repo
+            .find_branch(branch_name, git2::BranchType::Remote)
+            .with_context(|| format!("Could not find remote branch {}", branch_name))?;
+        let commit = remote_branch
+            .get()
+            .peel_to_commit()
+            .context("Could not resolve remote branch to commit")?;
+        let local_branch = repo
+            .branch(short_name, &commit, false)
+            .with_context(|| format!("Could not create local branch {}", short_name))?;
+        Ok(local_branch.into_reference())
+    } else {
+        let branch = repo
+            .find_branch(branch_name, git2::BranchType::Local)
+            .with_context(|| format!("Could not find branch {}", branch_name))?;
+        Ok(branch.into_reference())
+    }
+}
+
+/// Cook a branch recipe: return the existing worktree path, or create a new
+/// worktree for the branch and return its path.
+fn resolve_branch_worktree(
+    config: &ConfigurationValues,
+    repo_path: &Path,
+    branch_name: &str,
+    is_remote: bool,
+) -> anyhow::Result<PathBuf> {
+    let repo =
+        Repository::open(repo_path).context("Could not open repository for worktree creation")?;
+    let (short_name, wt_path) = branch_worktree_layout(config, repo_path, branch_name, is_remote)?;
+
+    if wt_path.exists() {
+        return Ok(wt_path);
+    }
+    std::fs::create_dir_all(wt_path.parent().unwrap())
+        .context("Could not create worktree directory")?;
+
+    let reference = resolve_branch_reference(&repo, branch_name, &short_name, is_remote)?;
+
+    // Worktree name must be unique within the repo; mirror the flat dir name.
+    let wt_name = format!("enwiro-{}", wt_path.file_name().unwrap().to_string_lossy());
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&reference));
+    repo.worktree(&wt_name, &wt_path, Some(&opts))
+        .map_err(|err| {
+            if err.class() == git2::ErrorClass::Worktree
+                && err.message().contains("already checked out")
+            {
+                anyhow::anyhow!(
+                    "Branch '{}' is already checked out in another worktree - switch away from it first",
+                    branch_name
+                )
+            } else {
+                anyhow::anyhow!(err)
+                    .context(format!("Could not create worktree for branch {}", branch_name))
+            }
+        })?;
+
+    tracing::debug!(path = %wt_path.display(), branch = %branch_name, "Created worktree");
+    Ok(wt_path)
 }
 
 enum RecipeInfo {
@@ -196,6 +221,185 @@ pub struct CookArgs {
     recipe_name: String,
 }
 
+/// Insert a `repo@<worktree>` recipe for every non-enwiro worktree of `repo`.
+/// enwiro-managed worktrees are implementation details behind branch recipes
+/// and stay invisible.
+fn discover_worktree_recipes(
+    repo: &Repository,
+    repo_name: &str,
+    results: &mut HashMap<String, RecipeInfo>,
+) {
+    let Ok(worktrees) = repo.worktrees() else {
+        return;
+    };
+    for wt_name in worktrees.iter().flatten() {
+        if wt_name.starts_with("enwiro-") {
+            tracing::debug!(worktree = %wt_name, "Skipping enwiro-managed worktree");
+            continue;
+        }
+        match repo.find_worktree(wt_name) {
+            Ok(wt) => match Repository::open(wt.path()) {
+                Ok(wt_repo) => {
+                    let compound_name = format!("{}@{}", repo_name, wt_name);
+                    tracing::debug!(name = %compound_name, "Found git worktree");
+                    let epoch = head_commit_epoch(&wt_repo);
+                    results.insert(
+                        compound_name,
+                        RecipeInfo::ExistingRepo {
+                            repo: wt_repo,
+                            commit_epoch: epoch,
+                        },
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(worktree = %wt_name, error = %e, "Failed to open worktree as repository");
+                }
+            },
+            Err(e) => {
+                tracing::debug!(worktree = %wt_name, error = %e, "Failed to find worktree");
+            }
+        }
+    }
+}
+
+/// Short names of branches already checked out in the main working tree or any
+/// worktree. Creating a worktree for an already-checked-out branch would fail,
+/// so branch discovery skips these.
+fn checked_out_branch_names(repo: &Repository) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let Ok(worktrees) = repo.worktrees() else {
+        return names;
+    };
+    for wt_name in worktrees.iter().flatten() {
+        // enwiro-managed worktrees' branches stay cookable as branch recipes.
+        if wt_name.starts_with("enwiro-") {
+            continue;
+        }
+        if let Ok(wt) = repo.find_worktree(wt_name)
+            && let Ok(wt_repo) = Repository::open(wt.path())
+            && let Ok(wt_head) = wt_repo.head()
+            && let Some(name) = wt_head.shorthand()
+        {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+/// Insert a `repo@<branch>` recipe for every branch not already checked out.
+/// Local branches are iterated first so they take priority over remote
+/// tracking branches with the same short name.
+fn discover_branch_recipes(
+    repo: &Repository,
+    repo_name: &str,
+    repo_abs_path: &Path,
+    checked_out_branches: &std::collections::HashSet<String>,
+    results: &mut HashMap<String, RecipeInfo>,
+) {
+    for &bt in &[git2::BranchType::Local, git2::BranchType::Remote] {
+        let Ok(branches) = repo.branches(Some(bt)) else {
+            continue;
+        };
+        for (branch, branch_type) in branches.flatten() {
+            let Ok(Some(name)) = branch.name() else {
+                continue;
+            };
+            // Skip symbolic refs like origin/HEAD.
+            if name.ends_with("/HEAD") || name == "HEAD" {
+                continue;
+            }
+            let short_name = match branch_type {
+                // Strip remote prefix (e.g. "origin/feature" -> "feature").
+                git2::BranchType::Remote => name.split('/').skip(1).collect::<Vec<_>>().join("/"),
+                git2::BranchType::Local => name.to_string(),
+            };
+            if checked_out_branches.contains(&short_name) {
+                continue;
+            }
+            let epoch = branch
+                .get()
+                .peel_to_commit()
+                .map(|c| c.time().seconds())
+                .unwrap_or(0);
+            let compound_name = format!("{}@{}", repo_name, short_name);
+            // Don't overwrite an existing entry (a worktree, or a local branch
+            // that shadows a remote one).
+            results
+                .entry(compound_name)
+                .or_insert_with(|| RecipeInfo::Branch {
+                    repo_path: repo_abs_path.to_path_buf(),
+                    branch_name: name.to_string(),
+                    is_remote: branch_type == git2::BranchType::Remote,
+                    commit_epoch: epoch,
+                });
+        }
+    }
+}
+
+/// Add every recipe a single repo path contributes: its worktrees, its
+/// cookable branches, and (unless bare) the base repo itself. A path that
+/// isn't a repo, or is a standalone worktree, contributes nothing.
+/// A repo's display name: its directory name with the trailing `.git` (the
+/// git dir) stripped. `None` if the path has no usable file name.
+fn repo_display_name(repo: &Repository) -> Option<String> {
+    let repo_path_string = repo
+        .path()
+        .to_str()?
+        .replace("/.git", "")
+        .replace("/.git/", "");
+    Path::new(&repo_path_string)
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
+}
+
+fn register_path_recipes(
+    path: &Path,
+    results: &mut HashMap<String, RecipeInfo>,
+) -> anyhow::Result<()> {
+    let Ok(repo) = Repository::open(path) else {
+        tracing::debug!(path = %path.display(), "Skipping non-repo path");
+        return Ok(());
+    };
+
+    let repo_name = repo_display_name(&repo).context("Failed to determine repo name")?;
+
+    // Standalone worktrees are discovered via their parent repo.
+    if repo.is_worktree() {
+        tracing::debug!(name = %repo_name, "Skipping standalone worktree (discovered via parent)");
+        return Ok(());
+    }
+
+    let repo_abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+
+    discover_worktree_recipes(&repo, &repo_name, results);
+    let checked_out_branches = checked_out_branch_names(&repo);
+    discover_branch_recipes(
+        &repo,
+        &repo_name,
+        &repo_abs_path,
+        &checked_out_branches,
+        results,
+    );
+
+    if repo.is_bare() {
+        tracing::debug!(name = %repo_name, "Skipping bare repo (no working directory)");
+    } else {
+        tracing::debug!(name = %repo_name, path = %repo.path().display(), "Found git repository");
+        // Use .git/index mtime so repos rank by local activity rather than
+        // upstream commit timestamps.
+        let activity_epoch = repo_activity_epoch(&repo);
+        results.insert(
+            repo_name,
+            RecipeInfo::ExistingRepo {
+                repo,
+                commit_epoch: activity_epoch,
+            },
+        );
+    }
+    Ok(())
+}
+
 fn build_repository_hashmap(
     config: &ConfigurationValues,
 ) -> anyhow::Result<HashMap<String, RecipeInfo>> {
@@ -204,147 +408,7 @@ fn build_repository_hashmap(
         tracing::debug!(pattern = %glob_from_config, "Processing glob pattern");
         let paths = glob::glob(glob_from_config).context("Could not parse glob")?;
         for path in paths.flatten() {
-            if let Ok(repo) = Repository::open(&path) {
-                let repo_path_string = repo
-                    .path()
-                    .to_str()
-                    .context("Failed to convert repo path to string")?
-                    .replace("/.git", "")
-                    .replace("/.git/", "");
-                let repo_name = Path::new(&repo_path_string)
-                    .file_name()
-                    .context("Failed to get repo file name")?
-                    .to_str()
-                    .context("Failed to convert repo name to string")?
-                    .to_string();
-
-                // Skip standalone worktrees (they're discovered via their parent)
-                if repo.is_worktree() {
-                    tracing::debug!(name = %repo_name, "Skipping standalone worktree (discovered via parent)");
-                    continue;
-                }
-
-                let repo_abs_path = path.canonicalize().unwrap_or(path.clone());
-
-                // Discover existing worktrees
-                if let Ok(worktrees) = repo.worktrees() {
-                    for wt_name in worktrees.iter().flatten() {
-                        // Skip enwiro-managed worktrees — they are implementation
-                        // details behind branch recipes and should stay invisible.
-                        if wt_name.starts_with("enwiro-") {
-                            tracing::debug!(worktree = %wt_name, "Skipping enwiro-managed worktree");
-                            continue;
-                        }
-                        match repo.find_worktree(wt_name) {
-                            Ok(wt) => match Repository::open(wt.path()) {
-                                Ok(wt_repo) => {
-                                    let compound_name = format!("{}@{}", repo_name, wt_name);
-                                    tracing::debug!(name = %compound_name, "Found git worktree");
-                                    let epoch = head_commit_epoch(&wt_repo);
-                                    results.insert(
-                                        compound_name,
-                                        RecipeInfo::ExistingRepo {
-                                            repo: wt_repo,
-                                            commit_epoch: epoch,
-                                        },
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::debug!(worktree = %wt_name, error = %e, "Failed to open worktree as repository");
-                                }
-                            },
-                            Err(e) => {
-                                tracing::debug!(worktree = %wt_name, error = %e, "Failed to find worktree");
-                            }
-                        }
-                    }
-                }
-
-                // Collect branches that are already checked out (in main
-                // working tree or any worktree) so we can skip them during
-                // branch discovery — creating a worktree for an already
-                // checked-out branch would fail.
-                let mut checked_out_branches: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                if let Ok(worktrees) = repo.worktrees() {
-                    for wt_name in worktrees.iter().flatten() {
-                        // Skip enwiro-managed worktrees — their branches
-                        // should remain as cookable branch recipes.
-                        if wt_name.starts_with("enwiro-") {
-                            continue;
-                        }
-                        if let Ok(wt) = repo.find_worktree(wt_name)
-                            && let Ok(wt_repo) = Repository::open(wt.path())
-                            && let Ok(wt_head) = wt_repo.head()
-                            && let Some(name) = wt_head.shorthand()
-                        {
-                            checked_out_branches.insert(name.to_string());
-                        }
-                    }
-                }
-
-                // Discover branches and add them as potential worktree recipes.
-                // Local branches are iterated first so they take priority over
-                // remote tracking branches with the same short name.
-                let branch_types = [git2::BranchType::Local, git2::BranchType::Remote];
-                for &bt in &branch_types {
-                    if let Ok(branches) = repo.branches(Some(bt)) {
-                        for branch_result in branches.flatten() {
-                            let (branch, branch_type) = branch_result;
-                            if let Ok(Some(name)) = branch.name() {
-                                // Skip symbolic refs like origin/HEAD
-                                if name.ends_with("/HEAD") || name == "HEAD" {
-                                    continue;
-                                }
-                                let short_name = match branch_type {
-                                    git2::BranchType::Remote => {
-                                        // Strip remote prefix (e.g. "origin/feature" -> "feature")
-                                        name.split('/').skip(1).collect::<Vec<_>>().join("/")
-                                    }
-                                    git2::BranchType::Local => name.to_string(),
-                                };
-                                // Skip branches already checked out in main or a worktree
-                                if checked_out_branches.contains(&short_name) {
-                                    continue;
-                                }
-                                let epoch = branch
-                                    .get()
-                                    .peel_to_commit()
-                                    .map(|c| c.time().seconds())
-                                    .unwrap_or(0);
-                                let compound_name = format!("{}@{}", repo_name, short_name);
-                                // Don't overwrite existing entries (worktrees or local branches)
-                                results.entry(compound_name).or_insert_with(|| {
-                                    RecipeInfo::Branch {
-                                        repo_path: repo_abs_path.clone(),
-                                        branch_name: name.to_string(),
-                                        is_remote: branch_type == git2::BranchType::Remote,
-                                        commit_epoch: epoch,
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-
-                if repo.is_bare() {
-                    tracing::debug!(name = %repo_name, "Skipping bare repo (no working directory)");
-                } else {
-                    tracing::debug!(name = %repo_name, path = %repo_path_string, "Found git repository");
-                    // Use .git/index mtime so repos rank by local activity
-                    // rather than upstream commit timestamps.
-                    let activity_epoch = repo_activity_epoch(&repo);
-                    results.insert(
-                        repo_name,
-                        RecipeInfo::ExistingRepo {
-                            repo,
-                            commit_epoch: activity_epoch,
-                        },
-                    );
-                }
-            } else {
-                tracing::debug!(path = %path.display(), "Skipping non-repo path");
-            }
+            register_path_recipes(&path, &mut results)?;
         }
     }
 
@@ -401,6 +465,34 @@ fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
             recipe
         })
         .collect()
+}
+
+/// Auto-detected status for git recipes (#302): a base repo is a standing
+/// workspace, so it is `evergreen`. Branch recipes get no auto-status here -
+/// "is this branch merged?" is answered by the forge (the github cookbook's
+/// `gh` check), because a squash-merge is undetectable from local history once
+/// the default branch moves on and walking large repos on a timer is too slow.
+fn collect_status_events(config: &ConfigurationValues) -> Vec<enwiro_sdk::listen::RecipeUpdate> {
+    use enwiro_sdk::listen::RecipeUpdate;
+    use enwiro_sdk::status::Status;
+
+    let Ok(repos) = build_repository_hashmap(config) else {
+        return Vec::new();
+    };
+    repos
+        .keys()
+        .filter(|name| is_base_repo_recipe(name))
+        .map(|name| RecipeUpdate::StatusChanged {
+            recipe: name.clone(),
+            status: Status::Evergreen,
+        })
+        .collect()
+}
+
+/// A base-repo recipe (the repository itself) rather than a `repo@branch`
+/// worktree recipe.
+fn is_base_repo_recipe(recipe: &str) -> bool {
+    !recipe.contains('@')
 }
 
 /// Cooks a recipe. It returns the path to the already existing local
@@ -1249,7 +1341,13 @@ fn main() -> anyhow::Result<()> {
                 .context("Could not read cookbook payload from stdin")?;
             let config: ConfigurationValues = serde_json::from_value(payload.config)
                 .context("Could not deserialize cookbook-git configuration")?;
-            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || collect_recipes(&config));
+            enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, || {
+                let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
+                    data: collect_recipes(&config),
+                }];
+                updates.extend(collect_status_events(&config));
+                updates
+            });
         }
     };
 
