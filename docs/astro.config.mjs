@@ -13,6 +13,7 @@ export default defineConfig({
 			social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/kantord/enwiro' }],
 			sidebar: [
 				{ slug: 'index' },
+				{ slug: 'activating-workspaces' },
 				{
 					label: 'Adapters',
 					items: [

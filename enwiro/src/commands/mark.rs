@@ -250,6 +250,7 @@ mod tests {
             "github",
             "owner/repo#1",
             Some("Test"),
+            &[],
         );
 
         let (result, _) = run_mark_direct(workspaces, "my-env", MarkStatus::Done);

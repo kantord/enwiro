@@ -48,6 +48,10 @@ and `sort_order`:
 - The `"sort_order"` field is optional (defaults to 0). It is a number from 0
   to 100 that controls how this recipe ranks globally against recipes from other
   cookbooks. Lower values appear first. See **Global sort order** below.
+- The `"equivalent_to"` field is optional (defaults to `[]`). It lists other
+  recipe/environment names that would cook the *same* environment as this
+  recipe. enwiro uses it to hide this recipe once an equivalent environment has
+  already been cooked. See **Equivalent recipes** below.
 - Recipe names must not contain newlines or null bytes.
 - Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
@@ -83,6 +87,42 @@ spread evenly. The built-in cookbooks all use this convention.
 `sort_order` values of 0, 25, 50, 75, 100. A GitHub cookbook with 3 items would
 output 0, 50, 100. When combined, the globally sorted list interleaves them by
 relevance rather than grouping by cookbook.
+
+#### Equivalent recipes
+
+Two cookbooks can offer recipes that cook the *same* environment under
+different names. For example, the GitHub cookbook's `repo#42` (a pull request)
+and the git cookbook's `repo@pr-42` (the branch that PR created) both end up at
+the same git worktree. Cooking either one makes the other redundant — but
+because the names differ, enwiro can't tell on its own.
+
+The `equivalent_to` field bridges this. List the *other* names your recipe is
+equivalent to:
+
+```json
+{"name":"repo#42","description":"[PR] Fix login","equivalent_to":["repo@pr-42"]}
+```
+
+Rules and behaviour:
+
+- Names in `equivalent_to` are plain recipe/environment names — the same flat
+  namespace `name` lives in. No cookbook prefix; environment names are globally
+  unique, so a bare name is unambiguous.
+- A recipe is hidden from `enwiro ls` (and launchers) when its `name`, or any of
+  its `equivalent_to` entries, matches an **already-cooked** environment (by the
+  environment's own name or the `equivalent_to` it recorded when it was cooked).
+- This only hides recipes whose equivalent is *already cooked*. While nothing
+  equivalent exists yet, every recipe stays listed, so the user still chooses
+  which one to cook. The point is "don't offer to cook something that's already
+  cooked," not "pick one recipe for the user."
+- Matching is symmetric and only one side needs to declare the link. The git
+  cookbook stays passive (it lists `repo@pr-42` with no `equivalent_to`); the
+  GitHub cookbook declares `equivalent_to: ["repo@pr-42"]`. Once *either* is
+  cooked, the other is hidden, because the cooked environment carries the
+  declared alias forward.
+- If you declare another cookbook's name, you depend on that cookbook's naming
+  scheme. The GitHub cookbook reproduces the git cookbook's `<repo>@<branch>`
+  format on purpose; keep such couplings deliberate.
 
 ### `cook <recipe_name>`
 

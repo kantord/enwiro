@@ -344,11 +344,40 @@ fn compute_sort_order(index: usize, total: usize) -> u32 {
     }
 }
 
+/// The git cookbook's display name for a repo: the basename of its local
+/// working-directory path (see `enwiro-cookbook-git`'s `repo_display_name`).
+/// Used to build the `equivalent_to` alias so a github recipe is hidden once
+/// the git cookbook's `repo@<branch>` recipe has been cooked (and vice-versa).
+fn git_repo_display_name(local_path: &Path) -> Option<String> {
+    local_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+}
+
+/// The branch the cookbook checks out when cooking this item: `pr-<n>` for a
+/// pull request, `issue-<n>` for an issue (see `cook_pr` / `cook_issue`).
+fn cooked_branch_name(item: &GithubItem) -> String {
+    match item.kind {
+        GithubItemKind::PullRequest { .. } => format!("pr-{}", item.number),
+        GithubItemKind::Issue => format!("issue-{}", item.number),
+    }
+}
+
 fn collect_recipes() -> Vec<Recipe> {
     let Ok(repos) = discover_github_repos() else {
         return Vec::new();
     };
     let repo_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
+    // Map a search result's short repo name back to the local clone path so we
+    // can derive the git cookbook's display name for the equivalence alias.
+    let display_names: std::collections::HashMap<String, String> = repos
+        .iter()
+        .filter_map(|r| {
+            let short = extract_short_repo_name(r.repo.clone());
+            git_repo_display_name(&r.local_path).map(|name| (short, name))
+        })
+        .collect();
 
     let prs = search_github(&repo_names, "is:pr is:open").unwrap_or_default();
     // Issues are scoped to `assignee:@me` so only actionable work appears,
@@ -373,6 +402,12 @@ fn collect_recipes() -> Vec<Recipe> {
                 format!("{} {}", prefix, safe_title),
             );
             recipe.sort_order = compute_sort_order(index, total);
+            // Declare the git cookbook's `repo@<branch>` name for the same
+            // worktree so `ls` hides whichever recipe is left once one of them
+            // has been cooked. Omitted when the repo's local path is unknown.
+            if let Some(display) = display_names.get(&item.repo) {
+                recipe.equivalent_to = vec![format!("{}@{}", display, cooked_branch_name(item))];
+            }
             recipe
         })
         .collect()
@@ -1409,6 +1444,38 @@ mod tests {
         assert_eq!(items[0].number, 30, "Newest PR should be first");
         assert_eq!(items[1].number, 20, "Recent issue should be second");
         assert_eq!(items[2].number, 10, "Old PR should be last");
+    }
+
+    #[test]
+    fn test_cooked_branch_name_matches_worktree_branch() {
+        let pr = GithubItem {
+            number: 42,
+            title: "x".to_string(),
+            repo: "enwiro".to_string(),
+            kind: GithubItemKind::PullRequest {
+                head_ref_name: "feature-x".to_string(),
+            },
+            updated_at: String::new(),
+        };
+        let issue = GithubItem {
+            number: 7,
+            title: "x".to_string(),
+            repo: "enwiro".to_string(),
+            kind: GithubItemKind::Issue,
+            updated_at: String::new(),
+        };
+        // Must equal the branch `cook_pr`/`cook_issue` check out, so the git
+        // cookbook's `repo@<branch>` recipe matches the equivalence alias.
+        assert_eq!(cooked_branch_name(&pr), "pr-42");
+        assert_eq!(cooked_branch_name(&issue), "issue-7");
+    }
+
+    #[test]
+    fn test_git_repo_display_name_is_path_basename() {
+        assert_eq!(
+            git_repo_display_name(Path::new("/home/me/code/enwiro")).as_deref(),
+            Some("enwiro")
+        );
     }
 
     #[test]

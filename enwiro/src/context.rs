@@ -66,14 +66,15 @@ impl<W: Write> CommandContext<W> {
     pub fn cook_environment(&self, name: &str, cfg: &CookConfig) -> anyhow::Result<Environment> {
         self.notifier
             .notify_info(name, &format!("Preparing environment: {}", name));
-        let (cookbook_name, description) = self.find_recipe_in_cache(name).ok_or_else(|| {
-            tracing::error!(name = %name, "Recipe not in daemon cache");
-            anyhow!(
-                "No recipe '{}' in the daemon cache. \
+        let (cookbook_name, description, equivalent_to) =
+            self.find_recipe_in_cache(name).ok_or_else(|| {
+                tracing::error!(name = %name, "Recipe not in daemon cache");
+                anyhow!(
+                    "No recipe '{}' in the daemon cache. \
                  Check: systemctl --user status enwiro-daemon.service",
-                name
-            )
-        })?;
+                    name
+                )
+            })?;
 
         let cookbook = self
             .cookbooks
@@ -91,7 +92,13 @@ impl<W: Write> CommandContext<W> {
         let env_path = cookbook.cook(name)?;
         let env = self.create_environment_symlink(name, &env_path)?;
         let flat_name = name.replace('/', "-");
-        self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
+        self.save_cook_metadata(
+            &flat_name,
+            &cookbook_name,
+            name,
+            description.as_deref(),
+            &equivalent_to,
+        );
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
         self.write_garnish_gear(&env_path, &flat_name, cfg);
         mark_via_daemon(&flat_name, "active", enwiro_sdk::rpc::MarkSource::Auto);
@@ -102,7 +109,10 @@ impl<W: Write> CommandContext<W> {
         self.find_recipe_in_cache(recipe_name).is_some()
     }
 
-    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<(String, Option<String>)> {
+    fn find_recipe_in_cache(
+        &self,
+        recipe_name: &str,
+    ) -> Option<(String, Option<String>, Vec<String>)> {
         let cache = match &self.cache_dir {
             Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
             None => enwiro_daemon::DaemonCache::open().ok()?,
@@ -115,7 +125,7 @@ impl<W: Write> CommandContext<W> {
             if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line)
                 && entry.name == recipe_name
             {
-                return Some((entry.cookbook, entry.description));
+                return Some((entry.cookbook, entry.description, entry.equivalent_to));
             }
         }
         None
@@ -127,9 +137,16 @@ impl<W: Write> CommandContext<W> {
         cookbook: &str,
         recipe: &str,
         description: Option<&str>,
+        equivalent_to: &[String],
     ) {
         let env_dir = Path::new(&self.config.workspaces_directory).join(env_name);
-        crate::usage_stats::record_cook_metadata_per_env(&env_dir, cookbook, recipe, description);
+        crate::usage_stats::record_cook_metadata_per_env(
+            &env_dir,
+            cookbook,
+            recipe,
+            description,
+            equivalent_to,
+        );
     }
 
     /// Run every discovered Garnish plugin against the cooked project;
