@@ -13,11 +13,11 @@ which is how it can remain platform-agnostic.
 
 ## Available Adapters
 
-- **[i3wm](/enwiro/adapters/available-adapters/i3wm/)** - Makes
+- **[i3wm](/adapters/available-adapters/i3wm/)** - Makes
   [i3](https://i3wm.org/) workspaces working-directory-aware, similar to how
   tmux sessions work. Also auto-opens URLs and GUI apps on activation.
 
-- **[tmux](/enwiro/adapters/available-adapters/tmux/)** - Maps environments to
+- **[tmux](/adapters/available-adapters/tmux/)** - Maps environments to
   [tmux](https://github.com/tmux/tmux) sessions with automatic creation and
   attach/switch behavior.
 
@@ -64,5 +64,5 @@ workspace management.
 
 Adapters are fairly minimal - sometimes a simple shell script is enough. If
 your application isn't supported yet, see
-[Creating an Adapter](/enwiro/adapters/creating-an-adapter/) for the full
+[Creating an Adapter](/adapters/creating-an-adapter/) for the full
 protocol specification.

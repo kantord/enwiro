@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/kantord/enwiro/compare/enwiro-cookbook-obsidian-v0.1.10...enwiro-cookbook-obsidian-v0.1.11) - 2026-06-03
+
+### Added
+
+- automatically mark environments as done ([#589](https://github.com/kantord/enwiro/pull/589))
+
+### Other
+
+- add basic docs site ([#539](https://github.com/kantord/enwiro/pull/539))
+
 ## [0.1.10](https://github.com/kantord/enwiro/compare/enwiro-cookbook-obsidian-v0.1.9...enwiro-cookbook-obsidian-v0.1.10) - 2026-05-25
 
 ### Other

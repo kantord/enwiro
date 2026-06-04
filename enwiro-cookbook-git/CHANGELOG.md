@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.21](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.20...enwiro-cookbook-git-v0.1.21) - 2026-06-03
+
+### Added
+
+- automatically mark environments as done ([#589](https://github.com/kantord/enwiro/pull/589))
+
+### Other
+
+- add basic docs site ([#539](https://github.com/kantord/enwiro/pull/539))
+
 ## [0.1.20](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.19...enwiro-cookbook-git-v0.1.20) - 2026-05-25
 
 ### Other

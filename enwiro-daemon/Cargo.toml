@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-daemon"
-version = "0.0.9"
+version = "0.0.10"
 edition = "2024"
 description = "Background daemon for enwiro: refreshes the recipe cache and forwards workspace switch events"
 license = "GPL-3.0-or-later"
@@ -29,6 +29,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 tracing.workspace = true
 
 [dev-dependencies]
+proptest = "1"
 enwiro-sdk = { workspace = true, features = ["test-helpers"] }
 filetime = "0.2"
 tempfile = "3.25.0"

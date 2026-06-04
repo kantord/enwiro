@@ -78,7 +78,21 @@ fn main() -> anyhow::Result<()> {
         EnwiroCookbookChezmoi::Listen => {
             let _ = CookbookPayload::read_first_line_from_stdin()
                 .context("Could not read cookbook payload from stdin")?;
-            enwiro_sdk::listen::serve(LISTEN_POLL_INTERVAL, || vec![Recipe::new(RECIPE_NAME)]);
+            // The chezmoi source is a standing workspace, not a finishable
+            // task -> always evergreen (#302).
+            enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, || {
+                use enwiro_sdk::listen::RecipeUpdate;
+                use enwiro_sdk::status::Status;
+                vec![
+                    RecipeUpdate::Recipes {
+                        data: vec![Recipe::new(RECIPE_NAME)],
+                    },
+                    RecipeUpdate::StatusChanged {
+                        recipe: RECIPE_NAME.to_string(),
+                        status: Status::Evergreen,
+                    },
+                ]
+            });
         }
     };
 
