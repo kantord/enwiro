@@ -136,8 +136,8 @@ fn discover_github_repos_from_config(
             };
 
             let url = match origin.url() {
-                Some(u) => u.to_string(),
-                None => continue,
+                Ok(u) => u.to_string(),
+                Err(_) => continue,
             };
 
             if let Some(github_repo) = parse_github_remote(&url)
@@ -597,7 +597,7 @@ fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
     // Try origin/HEAD symbolic ref
     if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
         && let Ok(resolved) = reference.resolve()
-        && let Some(name) = resolved.shorthand()
+        && let Ok(name) = resolved.shorthand()
     {
         return Ok(name.strip_prefix("origin/").unwrap_or(name).to_string());
     }
