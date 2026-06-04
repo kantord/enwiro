@@ -29,12 +29,6 @@ pub struct EnvStats {
     pub cookbook: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
-    /// Names this environment is equivalent to (copied from the cooking
-    /// recipe's `equivalent_to`). Lets `ls` hide still-listed recipes that
-    /// would cook the same thing under a different name. See
-    /// `enwiro_sdk::cookbook::Recipe::equivalent_to`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub equivalent_to: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -232,21 +226,16 @@ pub fn record_prep_per_env(env_dir: &Path) {
     }
 }
 
-/// Save cookbook, recipe, description, and equivalence metadata in per-env
-/// meta.json. Best-effort. `equivalent_to` is the cooking recipe's
-/// `equivalent_to` list, recorded so `ls` can hide equivalent recipes that are
-/// still listed under other names.
+/// Save cookbook, recipe, and description metadata in per-env meta.json. Best-effort.
 pub fn record_cook_metadata_per_env(
     env_dir: &Path,
     cookbook: &str,
     recipe: &str,
     description: Option<&str>,
-    equivalent_to: &[String],
 ) {
     let mut meta = load_env_meta(env_dir);
     meta.cookbook = Some(cookbook.to_string());
     meta.recipe = Some(recipe.to_string());
-    meta.equivalent_to = equivalent_to.to_vec();
     if let Some(d) = description {
         meta.description = Some(d.to_string());
     }
@@ -370,14 +359,12 @@ mod tests {
             "github",
             "kantord/enwiro#325",
             Some("Fix auth bug"),
-            &["enwiro@pr-325".to_string()],
         );
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.cookbook, Some("github".to_string()));
         assert_eq!(meta.recipe, Some("kantord/enwiro#325".to_string()));
         assert_eq!(meta.description, Some("Fix auth bug".to_string()));
-        assert_eq!(meta.equivalent_to, vec!["enwiro@pr-325".to_string()]);
     }
 
     #[test]
@@ -386,7 +373,7 @@ mod tests {
         let env_dir = dir.path().join("my-project");
         fs::create_dir(&env_dir).unwrap();
 
-        record_cook_metadata_per_env(&env_dir, "github", "owner/repo#42", None, &[]);
+        record_cook_metadata_per_env(&env_dir, "github", "owner/repo#42", None);
 
         let raw = fs::read_to_string(env_dir.join("meta.json")).unwrap();
         assert!(
@@ -429,7 +416,7 @@ mod tests {
 
         record_activation_per_env(&env_dir);
         record_activation_per_env(&env_dir);
-        record_cook_metadata_per_env(&env_dir, "git", "my/project", Some("My project"), &[]);
+        record_cook_metadata_per_env(&env_dir, "git", "my/project", Some("My project"));
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.signals.activation_buffer.len(), 2);

@@ -112,57 +112,6 @@ pub mod test_utilities {
                 .expect("Could not create inner symlink");
         }
 
-        /// Create a mock environment whose `meta.json` records the given
-        /// `equivalent_to` names (as the cooking recipe would have persisted),
-        /// so recipe-hiding by equivalence can be exercised.
-        pub fn create_mock_environment_with_equivalents(
-            &mut self,
-            environment_name: &str,
-            equivalent_to: &[&str],
-        ) {
-            self.create_mock_environment(environment_name);
-            let env_dir = Path::new(&self.config.workspaces_directory).join(environment_name);
-            let meta = serde_json::json!({ "equivalent_to": equivalent_to });
-            std::fs::write(
-                env_dir.join("meta.json"),
-                serde_json::to_string(&meta).expect("meta must serialise"),
-            )
-            .expect("Could not write env meta.json");
-        }
-
-        /// Populate the daemon recipe cache with the given entries, in order.
-        /// Like `write_cache_entries` but each entry also carries an
-        /// `equivalent_to` list: `(cookbook, name, description, equivalents)`.
-        pub fn write_cache_entries_with_equivalents(
-            &self,
-            entries: &[(&str, &str, Option<&str>, &[&str])],
-        ) {
-            let cache_dir = self
-                .cache_dir
-                .as_ref()
-                .expect("cache_dir must be set by the fixture");
-            std::fs::create_dir_all(cache_dir).expect("Could not create cache dir");
-            let content: String = entries
-                .iter()
-                .map(|(cookbook, name, description, equivalents)| {
-                    let entry = CachedRecipe {
-                        cookbook: (*cookbook).to_string(),
-                        name: (*name).to_string(),
-                        description: description.map(|d| d.to_string()),
-                        sort_order: 0,
-                        equivalent_to: equivalents.iter().map(|e| e.to_string()).collect(),
-                        scores: None,
-                    };
-                    let mut line = serde_json::to_string(&entry)
-                        .expect("CachedRecipe should always serialise");
-                    line.push('\n');
-                    line
-                })
-                .collect();
-            std::fs::write(cache_dir.join("recipes.cache"), content)
-                .expect("Could not write cache file");
-        }
-
         /// Populate the daemon recipe cache with a single entry, overwriting any
         /// previous contents.
         pub fn write_cache_entry(&self, cookbook: &str, name: &str) {
@@ -186,7 +135,6 @@ pub mod test_utilities {
                         name: (*name).to_string(),
                         description: description.map(|d| d.to_string()),
                         sort_order: 0,
-                        equivalent_to: Vec::new(),
                         scores: None,
                     };
                     let mut line = serde_json::to_string(&entry)

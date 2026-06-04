@@ -201,7 +201,6 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
                     name: recipe.name.clone(),
                     description: recipe.description.clone(),
                     sort_order: recipe.sort_order,
-                    equivalent_to: recipe.equivalent_to.clone(),
                     scores: None,
                 },
                 priority: entry.priority,

@@ -232,7 +232,7 @@ fn discover_worktree_recipes(
     let Ok(worktrees) = repo.worktrees() else {
         return;
     };
-    for wt_name in worktrees.iter().flatten() {
+    for wt_name in worktrees.iter().flatten().flatten() {
         if wt_name.starts_with("enwiro-") {
             tracing::debug!(worktree = %wt_name, "Skipping enwiro-managed worktree");
             continue;
@@ -270,7 +270,7 @@ fn checked_out_branch_names(repo: &Repository) -> std::collections::HashSet<Stri
     let Ok(worktrees) = repo.worktrees() else {
         return names;
     };
-    for wt_name in worktrees.iter().flatten() {
+    for wt_name in worktrees.iter().flatten().flatten() {
         // enwiro-managed worktrees' branches stay cookable as branch recipes.
         if wt_name.starts_with("enwiro-") {
             continue;
@@ -278,7 +278,7 @@ fn checked_out_branch_names(repo: &Repository) -> std::collections::HashSet<Stri
         if let Ok(wt) = repo.find_worktree(wt_name)
             && let Ok(wt_repo) = Repository::open(wt.path())
             && let Ok(wt_head) = wt_repo.head()
-            && let Some(name) = wt_head.shorthand()
+            && let Ok(name) = wt_head.shorthand()
         {
             names.insert(name.to_string());
         }

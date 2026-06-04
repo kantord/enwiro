@@ -130,29 +130,22 @@ pub fn ls<W: Write>(
     json: bool,
     status_filter: Option<StatusFilter>,
 ) -> anyhow::Result<()> {
-    let cooked_keys = match scope {
+    let env_names = match scope {
         Scope::All | Scope::Envs => write_envs(context, json, status_filter.as_ref())?,
-        Scope::Recipes => collect_cooked_keys(context)?,
+        Scope::Recipes => collect_env_names(context)?,
     };
     if scope == Scope::Envs {
         return Ok(());
     }
-    write_recipes(context, json, &cooked_keys)
+    write_recipes(context, json, &env_names)
 }
 
-/// The set of names that count as "already cooked": every existing
-/// environment's name plus the `equivalent_to` names it recorded at cook time.
-/// A recipe is hidden when any of its own names (its name or its
-/// `equivalent_to`) falls in this set.
-fn collect_cooked_keys<W: Write>(context: &CommandContext<W>) -> anyhow::Result<HashSet<String>> {
-    let mut keys = HashSet::new();
-    for env in context.get_all_environments()?.into_values() {
-        let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
-        let meta = crate::usage_stats::load_env_meta(&env_dir);
-        keys.insert(env.name);
-        keys.extend(meta.equivalent_to);
-    }
-    Ok(keys)
+fn collect_env_names<W: Write>(context: &CommandContext<W>) -> anyhow::Result<HashSet<String>> {
+    Ok(context
+        .get_all_environments()?
+        .into_values()
+        .map(|e| e.name)
+        .collect())
 }
 
 struct LsRow {
@@ -283,7 +276,6 @@ fn write_envs<W: Write>(
             || meta.description.is_some()
             || meta.status.is_some()
             || meta.cookbook.is_some()
-            || !meta.equivalent_to.is_empty()
         {
             meta_map.insert(env.name.clone(), meta);
         }
@@ -370,20 +362,13 @@ fn write_envs<W: Write>(
             .context("Could not write to output")?;
     }
 
-    let mut cooked_keys: HashSet<String> = HashSet::new();
-    for env in &envs {
-        if let Some(meta) = meta_map.get(&env.name) {
-            cooked_keys.extend(meta.equivalent_to.iter().cloned());
-        }
-        cooked_keys.insert(env.name.clone());
-    }
-    Ok(cooked_keys)
+    Ok(envs.into_iter().map(|e| e.name).collect())
 }
 
 fn write_recipes<W: Write>(
     context: &mut CommandContext<W>,
     json: bool,
-    cooked_keys: &HashSet<String>,
+    env_names: &HashSet<String>,
 ) -> anyhow::Result<()> {
     let cache = match &context.cache_dir {
         Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
@@ -407,14 +392,7 @@ fn write_recipes<W: Write>(
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line) {
-            // Hide the recipe if any of its names — its own name or any
-            // `equivalent_to` alias — matches an already-cooked environment.
-            let already_cooked = cooked_keys.contains(entry.name.as_str())
-                || entry
-                    .equivalent_to
-                    .iter()
-                    .any(|alias| cooked_keys.contains(alias.as_str()));
-            if already_cooked {
+            if env_names.contains(entry.name.as_str()) {
                 continue;
             }
             raw_lines.push(line.to_string());
@@ -538,67 +516,6 @@ mod tests {
         assert!(
             output.contains("repo#99") && output.contains("Add feature"),
             "Non-matching recipe with description should still be listed"
-        );
-    }
-
-    /// An environment cooked under one name (e.g. github's `repo#42`) records
-    /// the equivalent name another cookbook would use (`repo@pr-42`). The git
-    /// recipe for that branch must be hidden, while unrelated recipes survive.
-    #[rstest]
-    fn test_ls_hides_recipe_equivalent_to_cooked_env(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (_temp_dir, mut context_object, _, _) = context_object;
-        context_object.create_mock_environment_with_equivalents("repo#42", &["repo@pr-42"]);
-        context_object
-            .write_cache_entries(&[("git", "repo@pr-42", None), ("git", "repo@other", None)]);
-
-        ls(&mut context_object, Scope::All, false, None).unwrap();
-
-        let output = context_object.get_output();
-        let pr_lines: Vec<&str> = output
-            .lines()
-            .filter(|l| l.contains("repo@pr-42"))
-            .collect();
-        assert!(
-            pr_lines.is_empty(),
-            "git recipe equivalent to the cooked env must be hidden: {:?}",
-            pr_lines
-        );
-        assert!(
-            output.contains("repo#42"),
-            "the cooked env should still show"
-        );
-        assert!(
-            output.contains("repo@other"),
-            "an unrelated git recipe should still be listed"
-        );
-    }
-
-    /// Symmetric case: when the branch was cooked first (env `repo@pr-42`), the
-    /// github recipe `repo#42` — which declares `repo@pr-42` in `equivalent_to`
-    /// — must be hidden even though its own name doesn't match any env.
-    #[rstest]
-    fn test_ls_hides_recipe_whose_equivalent_matches_cooked_env(
-        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
-    ) {
-        let (_temp_dir, mut context_object, _, _) = context_object;
-        context_object.create_mock_environment("repo@pr-42");
-        context_object.write_cache_entries_with_equivalents(&[
-            ("github", "repo#42", Some("Fix bug"), &["repo@pr-42"]),
-            ("github", "repo#99", Some("Other"), &["repo@pr-99"]),
-        ]);
-
-        ls(&mut context_object, Scope::All, false, None).unwrap();
-
-        let output = context_object.get_output();
-        assert!(
-            !output.contains("repo#42"),
-            "github recipe equivalent to the cooked env must be hidden"
-        );
-        assert!(
-            output.contains("repo#99"),
-            "a github recipe with no cooked equivalent should still be listed"
         );
     }
 

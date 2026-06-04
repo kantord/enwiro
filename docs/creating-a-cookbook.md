@@ -108,18 +108,21 @@ Rules and behaviour:
 - Names in `equivalent_to` are plain recipe/environment names — the same flat
   namespace `name` lives in. No cookbook prefix; environment names are globally
   unique, so a bare name is unambiguous.
-- A recipe is hidden from `enwiro ls` (and launchers) when its `name`, or any of
-  its `equivalent_to` entries, matches an **already-cooked** environment (by the
-  environment's own name or the `equivalent_to` it recorded when it was cooked).
+- Equivalence is declared by **recipes**, not stored on environments. enwiro
+  evaluates it fresh from the live recipe list on every `enwiro ls`, so a recipe
+  added later (for example a new GitHub issue) is deduplicated against existing
+  environments immediately, with no per-environment bookkeeping.
+- enwiro treats `equivalent_to` as undirected and transitive: all the names a
+  recipe links together form one equivalence group. When **any** name in a group
+  matches an existing environment, every recipe in that group is hidden.
 - This only hides recipes whose equivalent is *already cooked*. While nothing
   equivalent exists yet, every recipe stays listed, so the user still chooses
   which one to cook. The point is "don't offer to cook something that's already
   cooked," not "pick one recipe for the user."
-- Matching is symmetric and only one side needs to declare the link. The git
-  cookbook stays passive (it lists `repo@pr-42` with no `equivalent_to`); the
-  GitHub cookbook declares `equivalent_to: ["repo@pr-42"]`. Once *either* is
-  cooked, the other is hidden, because the cooked environment carries the
-  declared alias forward.
+- Only one side needs to declare the link. The git cookbook stays passive (it
+  lists `repo@pr-42` with no `equivalent_to`); the GitHub cookbook declares
+  `equivalent_to: ["repo@pr-42"]` on `repo#42`. Cooking *either* — so that an
+  environment named `repo#42` or `repo@pr-42` exists — hides the other.
 - If you declare another cookbook's name, you depend on that cookbook's naming
   scheme. The GitHub cookbook reproduces the git cookbook's `<repo>@<branch>`
   format on purpose; keep such couplings deliberate.

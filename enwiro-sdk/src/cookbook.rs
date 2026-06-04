@@ -111,15 +111,6 @@ pub struct Recipe {
     pub description: Option<String>,
     #[serde(default)]
     pub sort_order: u32,
-    /// Other recipe/environment names this recipe is equivalent to: cooking any
-    /// one of them produces an environment that makes the others redundant.
-    /// Names live in the single flat environment namespace, so a bare name is
-    /// enough to identify the equivalent (no cookbook prefix). Used to hide a
-    /// recipe once an equivalent environment has already been cooked, even by a
-    /// different cookbook under a different name (e.g. the github cookbook's
-    /// `repo#42` declares the git cookbook's `repo@pr-42`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub equivalent_to: Vec<String>,
 }
 
 impl Recipe {
@@ -128,7 +119,6 @@ impl Recipe {
             name: name.into(),
             description: None,
             sort_order: 0,
-            equivalent_to: Vec::new(),
         }
     }
 
@@ -137,7 +127,6 @@ impl Recipe {
             name: name.into(),
             description: Some(description.into()),
             sort_order: 0,
-            equivalent_to: Vec::new(),
         }
     }
 
