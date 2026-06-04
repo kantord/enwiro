@@ -228,7 +228,7 @@ fn build_repository_hashmap(
 
                 // Discover existing worktrees
                 if let Ok(worktrees) = repo.worktrees() {
-                    for wt_name in worktrees.iter().flatten() {
+                    for wt_name in worktrees.iter().flatten().flatten() {
                         // Skip enwiro-managed worktrees — they are implementation
                         // details behind branch recipes and should stay invisible.
                         if wt_name.starts_with("enwiro-") {
@@ -267,7 +267,7 @@ fn build_repository_hashmap(
                 let mut checked_out_branches: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 if let Ok(worktrees) = repo.worktrees() {
-                    for wt_name in worktrees.iter().flatten() {
+                    for wt_name in worktrees.iter().flatten().flatten() {
                         // Skip enwiro-managed worktrees — their branches
                         // should remain as cookable branch recipes.
                         if wt_name.starts_with("enwiro-") {
@@ -276,7 +276,7 @@ fn build_repository_hashmap(
                         if let Ok(wt) = repo.find_worktree(wt_name)
                             && let Ok(wt_repo) = Repository::open(wt.path())
                             && let Ok(wt_head) = wt_repo.head()
-                            && let Some(name) = wt_head.shorthand()
+                            && let Ok(name) = wt_head.shorthand()
                         {
                             checked_out_branches.insert(name.to_string());
                         }
