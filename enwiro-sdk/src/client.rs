@@ -44,6 +44,21 @@ pub trait CookbookTrait {
     fn gear(&self, _recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
         Ok(None)
     }
+    /// Given the working-directory paths of existing environments, return the
+    /// recipe/environment names this cookbook considers each of them
+    /// equivalent to — i.e. names that would cook the same environment. The
+    /// git cookbook, for example, maps a worktree env to `repo@branch`.
+    ///
+    /// This is how the host deduplicates recipes against already-cooked
+    /// environments without any cookbook-specific logic of its own: it unions
+    /// every cookbook's answer with the existing environment names and hides
+    /// any recipe whose name lands in that set. Because the data is derived
+    /// live from the environments on each `ls`, it works regardless of when an
+    /// environment was cooked or whether the recipe that cooked it still
+    /// exists. Default: this cookbook claims no equivalences.
+    fn env_equivalents(&self, _env_paths: &[String]) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Sort cookbooks by priority (lower first), then alphabetically by name.
@@ -353,6 +368,28 @@ impl CookbookTrait for RpcCookbookClient {
                 Ok(None)
             }
         }
+    }
+
+    /// Best-effort `equivalents <env_paths...>` via the daemon. Cookbooks that
+    /// don't implement the subcommand (or otherwise fail) contribute nothing,
+    /// exactly like `gear` — a missing capability never blocks `ls`.
+    fn env_equivalents(&self, env_paths: &[String]) -> Vec<String> {
+        if env_paths.is_empty() {
+            return Vec::new();
+        }
+        let stdout = match self.invoke("equivalents", env_paths.to_vec()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook equivalents RPC failed");
+                return Vec::new();
+            }
+        };
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 }
 

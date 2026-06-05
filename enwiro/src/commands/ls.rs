@@ -130,14 +130,15 @@ pub fn ls<W: Write>(
     json: bool,
     status_filter: Option<StatusFilter>,
 ) -> anyhow::Result<()> {
-    let env_names = match scope {
+    let mut cooked = match scope {
         Scope::All | Scope::Envs => write_envs(context, json, status_filter.as_ref())?,
         Scope::Recipes => collect_env_names(context)?,
     };
     if scope == Scope::Envs {
         return Ok(());
     }
-    write_recipes(context, json, &env_names)
+    extend_with_cookbook_equivalents(context, &mut cooked)?;
+    write_recipes(context, json, &cooked)
 }
 
 fn collect_env_names<W: Write>(context: &CommandContext<W>) -> anyhow::Result<HashSet<String>> {
@@ -146,6 +147,32 @@ fn collect_env_names<W: Write>(context: &CommandContext<W>) -> anyhow::Result<Ha
         .into_values()
         .map(|e| e.name)
         .collect())
+}
+
+/// Fold the cookbooks' equivalence claims into the set of already-cooked names.
+/// The host owns no naming logic of its own: it hands every environment's
+/// working-directory path to each cookbook and unions whatever names they
+/// report (e.g. the git cookbook maps a worktree env to `repo@branch`). A
+/// recipe whose name lands in this set is then hidden by `write_recipes`,
+/// which is how a `repo@branch` recipe disappears once that branch has been
+/// checked out as an environment — even one cooked by another cookbook under a
+/// different name, and regardless of whether the cooking recipe still exists.
+fn extend_with_cookbook_equivalents<W: Write>(
+    context: &CommandContext<W>,
+    cooked: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    let env_paths: Vec<String> = context
+        .get_all_environments()?
+        .into_values()
+        .map(|env| env.path)
+        .collect();
+    if env_paths.is_empty() {
+        return Ok(());
+    }
+    for cookbook in &context.cookbooks {
+        cooked.extend(cookbook.env_equivalents(&env_paths));
+    }
+    Ok(())
 }
 
 struct LsRow {
@@ -449,6 +476,77 @@ mod tests {
 
     fn non_empty_lines(output: &str) -> Vec<&str> {
         output.lines().filter(|l| !l.trim().is_empty()).collect()
+    }
+
+    /// A cookbook that reports a fixed set of equivalence names for any
+    /// environments, standing in for the git cookbook's `equivalents`
+    /// capability. Lets the recipe-hiding wiring be tested without spawning a
+    /// real cookbook process.
+    struct FakeEquivalenceCookbook {
+        equivalents: Vec<String>,
+    }
+
+    impl enwiro_sdk::client::CookbookTrait for FakeEquivalenceCookbook {
+        fn list_recipes(&self) -> anyhow::Result<Vec<enwiro_sdk::Recipe>> {
+            Ok(Vec::new())
+        }
+        fn cook(&self, _recipe: &str) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn env_equivalents(&self, _env_paths: &[String]) -> Vec<String> {
+            self.equivalents.clone()
+        }
+    }
+
+    /// When a cookbook reports that an existing env is equivalent to a recipe
+    /// name (e.g. git mapping the `repo#42` worktree env to `repo@pr-42`), that
+    /// recipe is hidden, while unrelated recipes and the env itself remain.
+    #[rstest]
+    fn test_ls_hides_recipe_reported_equivalent_by_cookbook(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("repo#42");
+        context_object
+            .write_cache_entries(&[("git", "repo@pr-42", None), ("git", "repo@other", None)]);
+        context_object
+            .cookbooks
+            .push(Box::new(FakeEquivalenceCookbook {
+                equivalents: vec!["repo@pr-42".to_string()],
+            }));
+
+        ls(&mut context_object, Scope::All, false, None).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            !output.lines().any(|l| l.contains("repo@pr-42")),
+            "recipe the cookbook reported as equivalent to a cooked env must be hidden"
+        );
+        assert!(output.contains("repo@other"), "unrelated recipe stays");
+        assert!(output.contains("repo#42"), "the env itself stays");
+    }
+
+    /// With no cookbook reporting equivalences, recipes are only hidden by the
+    /// existing exact-name match — equivalence adds nothing spurious.
+    #[rstest]
+    fn test_ls_keeps_recipes_without_cookbook_equivalents(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("repo#42");
+        context_object.write_cache_entries(&[("git", "repo@pr-42", None)]);
+        // No cookbook pushed → no equivalence data.
+
+        ls(&mut context_object, Scope::All, false, None).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("repo@pr-42"),
+            "without equivalence data the recipe stays listed"
+        );
     }
 
     #[rstest]
