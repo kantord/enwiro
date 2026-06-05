@@ -1,15 +1,17 @@
 ---
-title: Activating workspaces
-description: Activate any environment or recipe by name — enwiro sets it up on demand, so you never have to track what is already cooked.
+title: Activating environments
+description: Switch to any unit of work by name — enwiro brings your tools along and sets it up on demand if it doesn't exist yet.
 ---
 
-The point of enwiro is that you activate something by name and it just works —
-you should not have to know or care whether it has been "cooked" yet.
+enwiro switches you between self-contained units of work — a feature branch, a
+pull request, a vault, an experiment — each with its own folder and context. You
+activate one by name and your tools (terminal, editor, browser, agents) follow
+it together.
 
-An [environment](/#environment) is a working directory enwiro can switch your
-desktop to. A [recipe](/#recipe) is a blueprint for an environment that does not
-exist yet. Both are activated the same way; if the environment isn't there yet,
-enwiro creates ("cooks") it on the fly.
+An [environment](/#environment) is such a unit of work that already exists. A
+[recipe](/#recipe) is a blueprint enwiro can turn into one on demand. You
+activate either the same way — if it doesn't exist yet, enwiro creates it on the
+spot, so you don't have to track which is which.
 
 ## Activating
 
@@ -17,13 +19,12 @@ enwiro creates ("cooks") it on the fly.
 enw activate <NAME>
 ```
 
-`activate` switches your desktop to the matching workspace, cooking the
-environment first if it doesn't exist yet. Whether `<NAME>` was an
-already-cooked environment or a not-yet-cooked recipe is an implementation
-detail you don't have to think about — either way you end up in the workspace.
+`activate` switches to the matching unit of work, creating it first if it
+doesn't exist yet. Whether `<NAME>` already existed or enwiro had to set it up is
+invisible — either way you land in it.
 
 To run a single command inside an environment instead of switching to it, use
-`enw wrap` (it also cooks on demand):
+`enw wrap` (it sets one up on demand too):
 
 ```sh
 enw wrap <COMMAND> [-- [COMMAND_ARGS]...]
