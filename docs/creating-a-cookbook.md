@@ -25,9 +25,7 @@ co-locating your cookbook binary there works too.
 
 ## Subcommands
 
-Your cookbook binary handles subcommands passed as the first argument.
-`list-recipes` and `cook` are required; `equivalents`, `metadata`, and `listen`
-are optional.
+Your cookbook binary must handle three subcommands passed as the first argument:
 
 ### `list-recipes`
 
@@ -50,6 +48,10 @@ and `sort_order`:
 - The `"sort_order"` field is optional (defaults to 0). It is a number from 0
   to 100 that controls how this recipe ranks globally against recipes from other
   cookbooks. Lower values appear first. See **Global sort order** below.
+- The `"equivalent_to"` field is optional (a list of names; omit it when empty).
+  It declares other recipe/environment names that would cook the *same*
+  environment as this recipe. enwiro uses it to hide redundant recipes once one
+  has been cooked. See **Equivalent recipes** below.
 - Recipe names must not contain newlines or null bytes.
 - Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
@@ -86,6 +88,36 @@ spread evenly. The built-in cookbooks all use this convention.
 output 0, 50, 100. When combined, the globally sorted list interleaves them by
 relevance rather than grouping by cookbook.
 
+#### Equivalent recipes
+
+Two cookbooks can offer recipes that cook the *same* environment under different
+names — e.g. the GitHub cookbook's `repo#42` (a pull request) and the git
+cookbook's `repo@pr-42` (the branch that PR created) both end up at the same git
+worktree. The optional `"equivalent_to"` field declares the other names your
+recipe is equivalent to, so enwiro shows the thing once instead of once per
+cookbook:
+
+```json
+{"name":"repo#42","description":"[PR] Fix login","equivalent_to":["repo@pr-42"]}
+```
+
+Rules and behaviour:
+
+- Names in `equivalent_to` are plain recipe/environment names — the same flat,
+  globally-unique namespace `name` lives in. No cookbook prefix.
+- enwiro treats it as undirected and transitive: the names a recipe links
+  together form one equivalence group. When **any** name in a group matches an
+  existing environment, every recipe in the group is hidden from `enwiro ls`.
+- Hiding only happens once an equivalent has been cooked. While nothing
+  equivalent exists yet, every recipe stays listed, so the user still chooses
+  which one to cook.
+- Only one side needs to declare the link; enwiro closes over it. The git
+  cookbook can stay silent and the GitHub cookbook declare `["repo@pr-42"]` on
+  `repo#42` — cooking either one then hides the other.
+- Equivalence is evaluated from the current recipe list, so a recipe asserts its
+  equivalence only while it is listed. If you declare another cookbook's name,
+  you depend on that cookbook's naming scheme; keep such couplings deliberate.
+
 ### `cook <recipe_name>`
 
 ```
@@ -107,51 +139,6 @@ exists (e.g., a previously cloned repo), just print the existing path.
 
 Exit with code 0 on success. On failure, exit non-zero and write an error
 message to stderr.
-
-### `equivalents <env_path>...`
-
-```
-enwiro-cookbook-yourname equivalents /path/to/env-a /path/to/env-b
-```
-
-**Optional.** Given the working-directory paths of existing environments, print
-the recipe/environment **names** your cookbook considers each of them equivalent
-to — names that would cook the *same* environment. Print one name per line on
-stdout; print nothing for environments you don't recognise.
-
-This is how enwiro hides a recipe that has effectively already been cooked,
-*even when a different cookbook cooked it under a different name*. For example,
-the git cookbook implements `equivalents` by opening each path as a git working
-tree and printing `repo@<branch>`:
-
-```
-$ enwiro-cookbook-git equivalents ~/.enwiro_envs/repo#42
-repo@pr-42
-```
-
-So once a GitHub pull-request environment named `repo#42` exists (its worktree
-is checked out at branch `pr-42`), the git cookbook's own `repo@pr-42` branch
-recipe is recognised as already cooked and dropped from `enw ls`.
-
-How enwiro uses it:
-
-- enwiro hands **every** existing environment's path to **every** cookbook and
-  unions all the names it gets back with the environment names themselves. A
-  recipe whose name is in that set is hidden. enwiro itself contains no
-  cookbook-specific logic — the equivalence data comes entirely from cookbooks.
-- The data is derived live on each `enw ls`, so it works regardless of when an
-  environment was cooked or whether the recipe that originally cooked it still
-  exists. There is no per-environment bookkeeping to keep in sync.
-- Names are plain recipe/environment names — the same flat, globally-unique
-  namespace `name` lives in. No cookbook prefix.
-- This only hides recipes whose equivalent **already exists** as an environment.
-  Recipes for things not yet cooked stay listed, so the user still chooses what
-  to cook; enwiro only removes what's already done.
-- Best-effort: a cookbook that doesn't implement `equivalents` (exits non-zero
-  or doesn't recognise the command) simply contributes no equivalences.
-
-The payload is still piped on stdin as for other subcommands; ignore it if you
-don't need config.
 
 ### `metadata`
 

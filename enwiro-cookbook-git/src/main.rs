@@ -207,7 +207,6 @@ fn repo_activity_epoch(repo: &Repository) -> i64 {
 enum EnwiroCookbookGit {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
-    Equivalents(EquivalentsArgs),
     Metadata,
     Listen,
 }
@@ -220,12 +219,6 @@ pub struct ListRecipesArgs {}
 #[derive(clap::Args)]
 pub struct CookArgs {
     recipe_name: String,
-}
-
-#[derive(clap::Args)]
-pub struct EquivalentsArgs {
-    /// Working-directory paths of existing environments to identify.
-    env_paths: Vec<String>,
 }
 
 /// Insert a `repo@<worktree>` recipe for every non-enwiro worktree of `repo`.
@@ -358,34 +351,6 @@ fn repo_display_name(repo: &Repository) -> Option<String> {
         .file_name()?
         .to_str()
         .map(str::to_string)
-}
-
-/// The repo display name as seen from inside a (possibly linked) worktree.
-/// `commondir` is the shared git directory of the main repository, so this
-/// yields the same name the main repo's recipes use — letting an env that is
-/// some other cookbook's worktree match the git cookbook's `repo@<branch>`
-/// recipe for the same branch.
-fn repo_display_name_via_commondir(repo: &Repository) -> Option<String> {
-    let common = repo.commondir().to_str()?;
-    let root = common
-        .trim_end_matches('/')
-        .strip_suffix("/.git")
-        .unwrap_or(common);
-    Path::new(root).file_name()?.to_str().map(str::to_string)
-}
-
-/// The `repo@<branch>` recipe name the git cookbook would use for the
-/// environment whose working directory is at `env_path`, or `None` if the path
-/// is not a git working tree. Used by the `equivalents` capability so the host
-/// can hide a still-listed `repo@<branch>` recipe once the branch has been
-/// checked out as an environment (possibly by another cookbook, under another
-/// name).
-fn env_equivalent_name(env_path: &str) -> Option<String> {
-    let repo = Repository::open(env_path).ok()?;
-    let head = repo.head().ok()?;
-    let branch = head.shorthand().ok()?;
-    let display = repo_display_name_via_commondir(&repo)?;
-    Some(format!("{display}@{branch}"))
 }
 
 fn register_path_recipes(
@@ -727,32 +692,6 @@ mod tests {
         assert!(result.exists(), "Worktree path should exist on disk");
         let wt_repo = Repository::open(&result).unwrap();
         assert!(wt_repo.is_worktree(), "Should be a git worktree");
-    }
-
-    #[test]
-    fn test_env_equivalent_name_for_worktree() {
-        let tmp = TempDir::new().unwrap();
-        let repo_path = tmp.path().join("my-project");
-        fs::create_dir(&repo_path).unwrap();
-        let repo = create_repo_with_commit(&repo_path);
-
-        // A worktree checked out at branch `issue-42` (as another cookbook,
-        // e.g. github, would create when cooking an issue env).
-        let wt_path = tmp.path().join("some-env-dir");
-        repo.worktree("issue-42", wt_path.as_path(), None).unwrap();
-
-        // The git cookbook identifies that env as `my-project@issue-42` — the
-        // same name its own branch recipe for that branch would carry.
-        assert_eq!(
-            env_equivalent_name(wt_path.to_str().unwrap()).as_deref(),
-            Some("my-project@issue-42")
-        );
-    }
-
-    #[test]
-    fn test_env_equivalent_name_for_non_repo_is_none() {
-        let tmp = TempDir::new().unwrap();
-        assert_eq!(env_equivalent_name(tmp.path().to_str().unwrap()), None);
     }
 
     #[test]
@@ -1386,13 +1325,6 @@ fn main() -> anyhow::Result<()> {
         EnwiroCookbookGit::Cook(args) => {
             let config = read_config()?;
             cook(&config, args)?;
-        }
-        EnwiroCookbookGit::Equivalents(args) => {
-            for path in &args.env_paths {
-                if let Some(name) = env_equivalent_name(path) {
-                    println!("{name}");
-                }
-            }
         }
         EnwiroCookbookGit::Metadata => {
             println!(

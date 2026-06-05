@@ -135,6 +135,39 @@ pub mod test_utilities {
                         name: (*name).to_string(),
                         description: description.map(|d| d.to_string()),
                         sort_order: 0,
+                        equivalent_to: Vec::new(),
+                        scores: None,
+                    };
+                    let mut line = serde_json::to_string(&entry)
+                        .expect("CachedRecipe should always serialise");
+                    line.push('\n');
+                    line
+                })
+                .collect();
+            std::fs::write(cache_dir.join("recipes.cache"), content)
+                .expect("Could not write cache file");
+        }
+
+        /// Like `write_cache_entries`, but each entry also carries an
+        /// `equivalent_to` list: `(cookbook, name, description, equivalents)`.
+        pub fn write_cache_entries_with_equivalents(
+            &self,
+            entries: &[(&str, &str, Option<&str>, &[&str])],
+        ) {
+            let cache_dir = self
+                .cache_dir
+                .as_ref()
+                .expect("cache_dir must be set by the fixture");
+            std::fs::create_dir_all(cache_dir).expect("Could not create cache dir");
+            let content: String = entries
+                .iter()
+                .map(|(cookbook, name, description, equivalents)| {
+                    let entry = CachedRecipe {
+                        cookbook: (*cookbook).to_string(),
+                        name: (*name).to_string(),
+                        description: description.map(|d| d.to_string()),
+                        sort_order: 0,
+                        equivalent_to: equivalents.iter().map(|e| e.to_string()).collect(),
                         scores: None,
                     };
                     let mut line = serde_json::to_string(&entry)
