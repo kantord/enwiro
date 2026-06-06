@@ -43,7 +43,7 @@ cargo install enwiro enwiro-daemon
 cargo install enwiro-adapter-i3wm   # or another adapter
 ```
 
-Set your adapter in your config file:
+With a single adapter installed, enwiro selects it automatically. If you install more than one, choose which to use in your config file:
 
 ```toml
 adapter = "i3wm"
