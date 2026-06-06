@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.6.0...enwiro-sdk-v0.7.0) - 2026-06-06
+
+### Added
+
+- deduplicate equivalent recipes across cookbooks ([#608](https://github.com/kantord/enwiro/pull/608))
+
 ## [0.6.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.5.1...enwiro-sdk-v0.6.0) - 2026-06-03
 
 ### Added

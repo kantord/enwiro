@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/kantord/enwiro/compare/enwiro-garnish-submodules-v0.1.8...enwiro-garnish-submodules-v0.1.9) - 2026-06-06
+
+### Fixed
+
+- *(deps)* update rust crate git2 to 0.21.0 ([#463](https://github.com/kantord/enwiro/pull/463))
+
 ## [0.1.8](https://github.com/kantord/enwiro/compare/enwiro-garnish-submodules-v0.1.7...enwiro-garnish-submodules-v0.1.8) - 2026-06-03
 
 ### Other

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.19](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.18...enwiro-cookbook-github-v0.1.19) - 2026-06-06
+
+### Added
+
+- deduplicate equivalent recipes across cookbooks ([#608](https://github.com/kantord/enwiro/pull/608))
+
+### Fixed
+
+- *(deps)* update rust crate git2 to 0.21.0 ([#463](https://github.com/kantord/enwiro/pull/463))
+
 ## [0.1.18](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.17...enwiro-cookbook-github-v0.1.18) - 2026-06-03
 
 ### Added
