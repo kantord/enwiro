@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.23](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.22...enwiro-bridge-rofi-v0.1.23) - 2026-06-06
+
+### Other
+
+- updated the following local packages: enwiro-sdk
+
 ## [0.1.22](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.21...enwiro-bridge-rofi-v0.1.22) - 2026-06-03
 
 ### Other

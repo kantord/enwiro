@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12](https://github.com/kantord/enwiro/compare/enwiro-cookbook-obsidian-v0.1.11...enwiro-cookbook-obsidian-v0.1.12) - 2026-06-06
+
+### Added
+
+- deduplicate equivalent recipes across cookbooks ([#608](https://github.com/kantord/enwiro/pull/608))
+
 ## [0.1.11](https://github.com/kantord/enwiro/compare/enwiro-cookbook-obsidian-v0.1.10...enwiro-cookbook-obsidian-v0.1.11) - 2026-06-03
 
 ### Added

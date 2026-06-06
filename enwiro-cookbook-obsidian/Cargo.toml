@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-cookbook-obsidian"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 description = "Obsidian vault cookbook for enwiro"
 license = "GPL-3.0-or-later"

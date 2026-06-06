@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.47"
+version = "0.3.48"
 dependencies = [
  "anyhow",
  "assertables",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-i3wm"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "anyhow",
  "clap",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-tmux"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-rofi"
-version = "0.1.22"
+version = "0.1.23"
 dependencies = [
  "anyhow",
  "enwiro-sdk",
@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-chezmoi"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "clap",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-git"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
  "anyhow",
  "clap",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-github"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-obsidian"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-daemon"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-garnish-just"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-garnish-submodules"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-sdk"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
