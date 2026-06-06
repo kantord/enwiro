@@ -263,18 +263,29 @@ fn discover_worktree_recipes(
 }
 
 /// Short names of branches already checked out in the main working tree or any
-/// worktree. Creating a worktree for an already-checked-out branch would fail,
-/// so branch discovery skips these.
+/// worktree, including enwiro-managed ones. git refuses to create a worktree
+/// for a branch that is already checked out elsewhere, so a recipe for such a
+/// branch could never be cooked - it would only ever hit the "already checked
+/// out" error in `resolve_branch_worktree`. Branch discovery skips these so we
+/// never offer a predictably un-cookable recipe. (This is also what collapses
+/// the duplicate left behind once enwiro cooks a branch: the cooked worktree
+/// holds the branch, so the branch recipe drops out on its own.)
 fn checked_out_branch_names(repo: &Repository) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();
+
+    // The main working tree's own branch is checked out too, but it is not
+    // enumerated by `worktrees()`, so account for it explicitly.
+    if let Ok(head) = repo.head()
+        && head.is_branch()
+        && let Ok(name) = head.shorthand()
+    {
+        names.insert(name.to_string());
+    }
+
     let Ok(worktrees) = repo.worktrees() else {
         return names;
     };
     for wt_name in worktrees.iter().flatten().flatten() {
-        // enwiro-managed worktrees' branches stay cookable as branch recipes.
-        if wt_name.starts_with("enwiro-") {
-            continue;
-        }
         if let Ok(wt) = repo.find_worktree(wt_name)
             && let Ok(wt_repo) = Repository::open(wt.path())
             && let Ok(wt_head) = wt_repo.head()
@@ -796,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cooked_branch_recipe_remains_in_list() {
+    fn test_cooked_branch_recipe_drops_out_of_list() {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
         fs::create_dir(&repo_path).unwrap();
@@ -811,16 +822,22 @@ mod tests {
             wt_dir.to_str().unwrap(),
         );
 
-        // Cook the branch recipe (creates a worktree)
+        // Before cooking, the branch is offered as a recipe.
+        let before = build_repository_hashmap(&config).unwrap();
+        assert!(before.contains_key("my-project@feature-x"));
+
+        // Cooking checks the branch out into an enwiro-managed worktree.
         let result = resolve_recipe_path(&config, "my-project@feature-x").unwrap();
         assert!(result.exists());
 
-        // The recipe should still appear in the list after cooking
-        let recipes = build_repository_hashmap(&config).unwrap();
+        // Now the branch is checked out, so cooking it again would fail with
+        // "already checked out". The recipe must drop out of the list rather
+        // than be offered as something that predictably cannot be built.
+        let after = build_repository_hashmap(&config).unwrap();
         assert!(
-            recipes.contains_key("my-project@feature-x"),
-            "Branch recipe should remain in list after cooking, got: {:?}",
-            recipes.keys().collect::<Vec<_>>()
+            !after.contains_key("my-project@feature-x"),
+            "Cooked (checked-out) branch must not be offered again, got: {:?}",
+            after.keys().collect::<Vec<_>>()
         );
     }
 
@@ -853,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn test_head_branch_listed_as_recipe() {
+    fn test_head_branch_not_listed_as_recipe() {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
         fs::create_dir(&repo_path).unwrap();
@@ -869,16 +886,17 @@ mod tests {
         let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
         let recipes = build_repository_hashmap(&config).unwrap();
 
-        // The HEAD branch should appear as a branch recipe even though it's checked out
+        // The HEAD branch is checked out in the main working tree, so cooking it
+        // would fail with "already checked out"; it must not be offered.
         let head_recipe_key = format!("my-project@{}", head_branch_name);
         assert!(
-            recipes.contains_key(&head_recipe_key),
-            "HEAD branch '{}' should appear as a recipe: {:?}",
+            !recipes.contains_key(&head_recipe_key),
+            "Checked-out HEAD branch '{}' must not appear as a recipe: {:?}",
             head_branch_name,
             recipes.keys().collect::<Vec<_>>()
         );
 
-        // The main repo entry and the other branch should still be there
+        // The repo entry and the un-checked-out branch are still offered.
         assert!(recipes.contains_key("my-project"));
         assert!(recipes.contains_key("my-project@feature-x"));
     }
@@ -962,12 +980,15 @@ mod tests {
             wt_dir.to_str().unwrap(),
         );
 
-        let recipe_name = format!("my-project@{}", head_branch_name);
-        let result = resolve_recipe_path(&config, &recipe_name);
+        // Branch discovery excludes already-checked-out branches, so this path
+        // is only reachable defensively (e.g. a branch checked out between
+        // listing and cooking). Exercise the worktree-creation step directly so
+        // we still guarantee the error message it produces is actionable.
+        let result = resolve_branch_worktree(&config, &repo_path, &head_branch_name, false);
 
         assert!(
             result.is_err(),
-            "cook() for an already-checked-out branch must return an error"
+            "cooking an already-checked-out branch must return an error"
         );
 
         let err = result.unwrap_err();

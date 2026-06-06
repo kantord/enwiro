@@ -22,6 +22,10 @@ pub struct CachedRecipe {
     pub description: Option<String>,
     #[serde(default)]
     pub sort_order: u32,
+    /// See `Recipe::equivalent_to`: carried through the daemon cache so `ls`
+    /// can hide a recipe once an equivalent one has been cooked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub equivalent_to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scores: Option<EnvScores>,
 }

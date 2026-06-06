@@ -48,6 +48,10 @@ and `sort_order`:
 - The `"sort_order"` field is optional (defaults to 0). It is a number from 0
   to 100 that controls how this recipe ranks globally against recipes from other
   cookbooks. Lower values appear first. See **Global sort order** below.
+- The `"equivalent_to"` field is optional (a list of names; omit it when empty).
+  It declares other recipe/environment names that would cook the *same*
+  environment as this recipe. enwiro uses it to hide redundant recipes once one
+  has been cooked. See **Equivalent recipes** below.
 - Recipe names must not contain newlines or null bytes.
 - Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
@@ -83,6 +87,36 @@ spread evenly. The built-in cookbooks all use this convention.
 `sort_order` values of 0, 25, 50, 75, 100. A GitHub cookbook with 3 items would
 output 0, 50, 100. When combined, the globally sorted list interleaves them by
 relevance rather than grouping by cookbook.
+
+#### Equivalent recipes
+
+Two cookbooks can offer recipes that cook the *same* environment under different
+names — e.g. the GitHub cookbook's `repo#42` (a pull request) and the git
+cookbook's `repo@pr-42` (the branch that PR created) both end up at the same git
+worktree. The optional `"equivalent_to"` field declares the other names your
+recipe is equivalent to, so enwiro shows the thing once instead of once per
+cookbook:
+
+```json
+{"name":"repo#42","description":"[PR] Fix login","equivalent_to":["repo@pr-42"]}
+```
+
+Rules and behaviour:
+
+- Names in `equivalent_to` are plain recipe/environment names — the same flat,
+  globally-unique namespace `name` lives in. No cookbook prefix.
+- enwiro treats it as undirected and transitive: the names a recipe links
+  together form one equivalence group. When **any** name in a group matches an
+  existing environment, every recipe in the group is hidden from `enwiro ls`.
+- Hiding only happens once an equivalent has been cooked. While nothing
+  equivalent exists yet, every recipe stays listed, so the user still chooses
+  which one to cook.
+- Only one side needs to declare the link; enwiro closes over it. The git
+  cookbook can stay silent and the GitHub cookbook declare `["repo@pr-42"]` on
+  `repo#42` — cooking either one then hides the other.
+- Equivalence is evaluated from the current recipe list, so a recipe asserts its
+  equivalence only while it is listed. If you declare another cookbook's name,
+  you depend on that cookbook's naming scheme; keep such couplings deliberate.
 
 ### `cook <recipe_name>`
 

@@ -148,6 +148,44 @@ fn collect_env_names<W: Write>(context: &CommandContext<W>) -> anyhow::Result<Ha
         .collect())
 }
 
+/// The set of names considered "already cooked", expanded over recipe-declared
+/// equivalence. Recipes declare equivalence via `CachedRecipe::equivalent_to`
+/// (e.g. the github cookbook's `repo#42` lists `repo@pr-42`). Starting from the
+/// existing environment names, we close over those links so that when one
+/// member of an equivalence group is cooked, every name in the group counts as
+/// cooked — and the caller hides any recipe whose name lands in this set.
+///
+/// Equivalence is data the cookbooks put in the recipe list; the host owns no
+/// naming logic. (Because it rides the live recipe list, it deduplicates while
+/// the declaring recipe is listed — e.g. an open PR; a recipe that has left the
+/// list can no longer assert its equivalence.)
+fn cooked_equivalence_names(
+    env_names: &HashSet<String>,
+    recipes: &[&CachedRecipe],
+) -> HashSet<String> {
+    let mut cooked: HashSet<String> = env_names.clone();
+    loop {
+        let mut grew = false;
+        for recipe in recipes {
+            let touches_cooked = cooked.contains(&recipe.name)
+                || recipe
+                    .equivalent_to
+                    .iter()
+                    .any(|name| cooked.contains(name));
+            if !touches_cooked {
+                continue;
+            }
+            grew |= cooked.insert(recipe.name.clone());
+            for equivalent in &recipe.equivalent_to {
+                grew |= cooked.insert(equivalent.clone());
+            }
+        }
+        if !grew {
+            return cooked;
+        }
+    }
+}
+
 struct LsRow {
     cookbook: String,
     status: Option<String>,
@@ -385,19 +423,27 @@ fn write_recipes<W: Write>(
             )
         })?;
 
+    let parsed: Vec<(String, CachedRecipe)> = recipes
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            serde_json::from_str::<CachedRecipe>(line)
+                .ok()
+                .map(|entry| (line.to_string(), entry))
+        })
+        .collect();
+
+    let recipe_refs: Vec<&CachedRecipe> = parsed.iter().map(|(_, r)| r).collect();
+    let cooked = cooked_equivalence_names(env_names, &recipe_refs);
+
     let mut filtered: Vec<CachedRecipe> = Vec::new();
     let mut raw_lines: Vec<String> = Vec::new();
-    for line in recipes.lines() {
-        if line.is_empty() {
+    for (line, entry) in parsed {
+        if cooked.contains(&entry.name) {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line) {
-            if env_names.contains(entry.name.as_str()) {
-                continue;
-            }
-            raw_lines.push(line.to_string());
-            filtered.push(entry);
-        }
+        raw_lines.push(line);
+        filtered.push(entry);
     }
 
     if json {
@@ -516,6 +562,85 @@ mod tests {
         assert!(
             output.contains("repo#99") && output.contains("Add feature"),
             "Non-matching recipe with description should still be listed"
+        );
+    }
+
+    /// Env `repo#42` was cooked by github. The github recipe `repo#42` (still
+    /// listed) declares `equivalent_to: [repo@pr-42]`, so the git recipe
+    /// `repo@pr-42` for the same branch is hidden by equivalence; unrelated
+    /// recipes survive.
+    #[rstest]
+    fn test_ls_hides_recipe_equivalent_to_cooked_env(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("repo#42");
+        context_object.write_cache_entries_with_equivalents(&[
+            ("github", "repo#42", Some("Fix bug"), &["repo@pr-42"]),
+            ("git", "repo@pr-42", None, &[]),
+            ("git", "repo@other", None, &[]),
+        ]);
+
+        ls(&mut context_object, Scope::All, false, None).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            !output.lines().any(|l| l.contains("repo@pr-42")),
+            "git recipe equivalent to the cooked env must be hidden"
+        );
+        assert!(
+            output.contains("repo#42"),
+            "the cooked env should still show"
+        );
+        assert!(output.contains("repo@other"), "unrelated recipe stays");
+    }
+
+    /// Symmetric: branch cooked first (env `repo@pr-42`); the github recipe
+    /// `repo#42`, which declares `repo@pr-42`, is hidden even though its own
+    /// name matches no env.
+    #[rstest]
+    fn test_ls_hides_recipe_whose_equivalent_matches_cooked_env(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("repo@pr-42");
+        context_object.write_cache_entries_with_equivalents(&[
+            ("github", "repo#42", Some("Fix bug"), &["repo@pr-42"]),
+            ("github", "repo#99", Some("Other"), &["repo@pr-99"]),
+        ]);
+
+        ls(&mut context_object, Scope::All, false, None).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            !output.contains("repo#42"),
+            "equivalent github recipe hidden"
+        );
+        assert!(
+            output.contains("repo#99"),
+            "non-equivalent github recipe stays"
+        );
+    }
+
+    /// Equivalence alone hides nothing: two recipes declaring each other
+    /// equivalent both stay while neither is cooked.
+    #[rstest]
+    fn test_ls_keeps_equivalent_recipes_when_none_cooked(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+        context_object.write_cache_entries_with_equivalents(&[
+            ("github", "repo#42", Some("Fix bug"), &["repo@pr-42"]),
+            ("git", "repo@pr-42", None, &[]),
+        ]);
+
+        ls(&mut context_object, Scope::All, false, None).unwrap();
+
+        let output = context_object.get_output();
+        assert!(output.contains("repo#42"), "github recipe listed");
+        assert!(
+            output.contains("repo@pr-42"),
+            "equivalent git recipe also listed while nothing is cooked"
         );
     }
 
