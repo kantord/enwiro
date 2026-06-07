@@ -31,22 +31,39 @@ enum Action {
     Quit,
     Activate(String),
     Mark(String, &'static str),
+    CookAndMark(String, &'static str),
 }
 
 struct KanbanState {
     columns: [Vec<Card>; 4],
     selected_col: usize,
     selected_row: [usize; 4],
-    status_menu: Option<StatusMenu>,
+    /// Index of the first visible card per column. Persisted so scrolling is
+    /// edge-triggered (the view only moves when the cursor reaches the margin),
+    /// not recomputed-from-cursor every frame.
+    scroll_offset: [usize; 4],
+    command_menu: Option<CommandMenu>,
 }
 
-struct StatusMenu {
+struct CommandMenu {
     selected: usize,
 }
 
 const COLUMN_NAMES: [&str; 4] = ["Ready", "Active", "Waiting", "Done"];
 const COLUMN_COLORS: [Color; 4] = [Color::Blue, Color::Green, Color::Yellow, Color::Magenta];
 const STATUS_OPTIONS: [&str; 4] = ["ready", "active", "waiting", "done"];
+
+/// Command palette entries: index 0 is "Work on" (activate); indices 1..=4 set the
+/// status at `STATUS_OPTIONS[index - 1]`.
+const COMMAND_COUNT: usize = STATUS_OPTIONS.len() + 1;
+
+fn command_label(index: usize) -> String {
+    if index == 0 {
+        "Work on".to_string()
+    } else {
+        format!("Set status: {}", STATUS_OPTIONS[index - 1])
+    }
+}
 
 fn classify(status: Option<&Status>) -> Option<usize> {
     match status {
@@ -108,9 +125,9 @@ fn load_board<W: Write>(
         col.sort_by(|a, b| a.name.cmp(&b.name));
     }
 
-    let (selected_col, selected_row) = match prev {
-        Some(p) => (p.selected_col, p.selected_row),
-        None => (0, [0; 4]),
+    let (selected_col, selected_row, scroll_offset) = match prev {
+        Some(p) => (p.selected_col, p.selected_row, p.scroll_offset),
+        None => (0, [0; 4], [0; 4]),
     };
 
     let mut selected_row = selected_row;
@@ -124,7 +141,8 @@ fn load_board<W: Write>(
         columns,
         selected_col,
         selected_row,
-        status_menu: None,
+        scroll_offset,
+        command_menu: None,
     })
 }
 
@@ -164,6 +182,18 @@ pub fn kanban<W: Write>(context: &mut CommandContext<W>, _args: KanbanArgs) -> a
             Action::Activate(name) => break Some(name),
             Action::Mark(name, status) => {
                 crate::context::mark_via_daemon(&name, status, enwiro_sdk::rpc::MarkSource::User);
+                state = load_board(context, Some(&state))?;
+            }
+            Action::CookAndMark(name, status) => {
+                terminal.draw(|f| draw_cooking(f, &name)).ok();
+                let cfg = crate::context::CookConfig { no_hooks: false };
+                context.cook_environment(&name, &cfg)?;
+                let flat_name = name.replace('/', "-");
+                crate::context::mark_via_daemon(
+                    &flat_name,
+                    status,
+                    enwiro_sdk::rpc::MarkSource::User,
+                );
                 state = load_board(context, Some(&state))?;
             }
         }
@@ -206,27 +236,30 @@ fn run_until_action(
                 continue;
             }
 
-            if let Some(menu) = &mut state.status_menu {
+            if let Some(menu) = &mut state.command_menu {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') => {
-                        state.status_menu = None;
+                        state.command_menu = None;
                     }
                     KeyCode::Up | KeyCode::Char('k') if menu.selected > 0 => {
                         menu.selected -= 1;
                     }
-                    KeyCode::Down | KeyCode::Char('j')
-                        if menu.selected < STATUS_OPTIONS.len() - 1 =>
-                    {
+                    KeyCode::Down | KeyCode::Char('j') if menu.selected < COMMAND_COUNT - 1 => {
                         menu.selected += 1;
                     }
                     KeyCode::Enter => {
-                        let status = STATUS_OPTIONS[menu.selected];
-                        if let Some(card) = selected_card(state)
-                            && !card.is_recipe
-                        {
+                        let selected = menu.selected;
+                        state.command_menu = None;
+                        if let Some(card) = selected_card(state) {
+                            if selected == 0 {
+                                return Ok(Action::Activate(card.name.clone()));
+                            }
+                            let status = STATUS_OPTIONS[selected - 1];
+                            if card.is_recipe {
+                                return Ok(Action::CookAndMark(card.name.clone(), status));
+                            }
                             return Ok(Action::Mark(card.name.clone(), status));
                         }
-                        state.status_menu = None;
                     }
                     _ => {}
                 }
@@ -250,17 +283,8 @@ fn run_until_action(
                 {
                     state.selected_row[state.selected_col] += 1;
                 }
-                KeyCode::Enter => {
-                    if let Some(card) = selected_card(state) {
-                        return Ok(Action::Activate(card.name.clone()));
-                    }
-                }
-                KeyCode::Char(' ') => {
-                    if let Some(card) = selected_card(state)
-                        && !card.is_recipe
-                    {
-                        state.status_menu = Some(StatusMenu { selected: 0 });
-                    }
+                KeyCode::Enter if selected_card(state).is_some() => {
+                    state.command_menu = Some(CommandMenu { selected: 0 });
                 }
                 _ => {}
             }
@@ -268,7 +292,7 @@ fn run_until_action(
     }
 }
 
-fn draw(frame: &mut Frame, state: &KanbanState) {
+fn draw(frame: &mut Frame, state: &mut KanbanState) {
     let area = frame.area();
 
     let col_gaps = Layout::horizontal([
@@ -311,11 +335,12 @@ fn draw(frame: &mut Frame, state: &KanbanState) {
             cards_area,
             is_selected_col,
             state.selected_row[i],
+            &mut state.scroll_offset[i],
             color,
         );
     }
 
-    let help = " hjkl/arrows: move | Enter: activate | Space: set status | q: quit ";
+    let help = " hjkl/arrows: move | Enter: commands | q: quit ";
     let help_area = Rect {
         x: 0,
         y: area.height.saturating_sub(1),
@@ -330,9 +355,30 @@ fn draw(frame: &mut Frame, state: &KanbanState) {
         help_area,
     );
 
-    if state.status_menu.is_some() {
-        draw_status_menu(frame, state);
+    if state.command_menu.is_some() {
+        draw_command_menu(frame, state);
     }
+}
+
+/// Edge-triggered scroll: keep `current` offset unless the cursor reaches within
+/// `margin` (one item, where the viewport allows) of an edge, then scroll the
+/// minimum needed. Returns the new first-visible index.
+fn scroll_window(current: usize, selected: usize, len: usize, visible: usize) -> usize {
+    if len <= visible {
+        return 0;
+    }
+    let max_offset = len - visible;
+    let margin = 1usize.min(visible.saturating_sub(1) / 2);
+
+    let mut offset = current.min(max_offset);
+    if selected < offset + margin {
+        offset = selected.saturating_sub(margin);
+    }
+    let bottom = offset + visible - 1;
+    if selected + margin > bottom {
+        offset = (selected + margin + 1).saturating_sub(visible);
+    }
+    offset.min(max_offset)
 }
 
 fn draw_cards(
@@ -341,13 +387,21 @@ fn draw_cards(
     area: Rect,
     is_selected_col: bool,
     selected_row: usize,
+    scroll_offset: &mut usize,
     color: Color,
 ) {
     let card_height: u16 = 3;
     let gap: u16 = 1;
+
+    let stride = card_height + gap;
+    let visible = (((area.height + gap) / stride).max(1)) as usize;
+
+    let first = scroll_window(*scroll_offset, selected_row, cards.len(), visible);
+    *scroll_offset = first;
+
     let mut y = area.y;
 
-    for (j, card) in cards.iter().enumerate() {
+    for (j, card) in cards.iter().enumerate().skip(first) {
         if y + card_height > area.y + area.height {
             break;
         }
@@ -400,12 +454,12 @@ fn draw_cards(
     }
 }
 
-fn draw_status_menu(frame: &mut Frame, state: &KanbanState) {
+fn draw_command_menu(frame: &mut Frame, state: &KanbanState) {
     let area = frame.area();
-    let menu = state.status_menu.as_ref().unwrap();
+    let menu = state.command_menu.as_ref().unwrap();
 
-    let menu_width: u16 = 20;
-    let menu_height: u16 = STATUS_OPTIONS.len() as u16 + 2;
+    let menu_width: u16 = 24;
+    let menu_height: u16 = COMMAND_COUNT as u16 + 2;
     let x = area.width.saturating_sub(menu_width) / 2;
     let y = area.height.saturating_sub(menu_height) / 2;
 
@@ -414,16 +468,19 @@ fn draw_status_menu(frame: &mut Frame, state: &KanbanState) {
     frame.render_widget(Clear, menu_area);
 
     let block = Block::default()
-        .title(" Set status ")
+        .title(" Commands ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::White))
         .padding(Padding::horizontal(1));
 
-    let items: Vec<ListItem> = STATUS_OPTIONS
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let color = COLUMN_COLORS[i];
+    let items: Vec<ListItem> = (0..COMMAND_COUNT)
+        .map(|i| {
+            // "Work on" (i == 0) is uncolored; status commands take their column color.
+            let color = if i == 0 {
+                Color::White
+            } else {
+                COLUMN_COLORS[i - 1]
+            };
             let is_selected = i == menu.selected;
             let style = if is_selected {
                 Style::default()
@@ -433,12 +490,37 @@ fn draw_status_menu(frame: &mut Frame, state: &KanbanState) {
             } else {
                 Style::default().fg(color)
             };
-            ListItem::new(Line::from(Span::styled(*label, style)))
+            ListItem::new(Line::from(Span::styled(command_label(i), style)))
         })
         .collect();
 
     let list = List::new(items).block(block);
     frame.render_widget(list, menu_area);
+}
+
+fn draw_cooking(frame: &mut Frame, name: &str) {
+    let area = frame.area();
+
+    let text = format!(" Cooking {}... ", name);
+    let box_width = (text.len() as u16 + 2).min(area.width);
+    let box_height: u16 = 3;
+    let x = area.width.saturating_sub(box_width) / 2;
+    let y = area.height.saturating_sub(box_height) / 2;
+
+    let box_area = Rect::new(x, y, box_width, box_height);
+    frame.render_widget(Clear, box_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green));
+    let paragraph = Paragraph::new(Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .block(block);
+    frame.render_widget(paragraph, box_area);
 }
 
 fn shrink(area: Rect, horizontal: u16, vertical: u16) -> Rect {
@@ -447,5 +529,58 @@ fn shrink(area: Rect, horizontal: u16, vertical: u16) -> Rect {
         y: area.y + vertical,
         width: area.width.saturating_sub(horizontal * 2),
         height: area.height.saturating_sub(vertical * 2),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scroll_window;
+
+    /// Everything fits: never scroll.
+    #[test]
+    fn no_scroll_when_content_fits() {
+        assert_eq!(scroll_window(0, 0, 3, 5), 0);
+        assert_eq!(scroll_window(0, 2, 3, 5), 0);
+    }
+
+    /// Moving down stays put until the cursor hits the bottom margin (one item
+    /// to spare), then scrolls the minimum needed.
+    #[test]
+    fn down_is_edge_triggered_with_margin() {
+        // visible=5, margin=1. Rows 0..3 keep offset 0 (row 4 stays visible as spare).
+        assert_eq!(scroll_window(0, 3, 10, 5), 0);
+        // Row 4 reaches the bottom margin -> scroll one, keeping row 5 as the spare.
+        assert_eq!(scroll_window(0, 4, 10, 5), 1);
+        // Row 5 from offset 1 -> scroll one more.
+        assert_eq!(scroll_window(1, 5, 10, 5), 2);
+    }
+
+    /// Moving up stays put until the cursor hits the top margin, then scrolls up.
+    #[test]
+    fn up_is_edge_triggered_with_margin() {
+        // offset 3 shows rows 3..7. Cursor at row 5 is comfortably inside -> no move.
+        assert_eq!(scroll_window(3, 5, 10, 5), 3);
+        // Cursor at row 4 hits the top margin -> scroll up one (keeps row 3 spare).
+        assert_eq!(scroll_window(3, 4, 10, 5), 3);
+        // Cursor at row 3 (top visible) -> scroll up to keep a spare above.
+        assert_eq!(scroll_window(3, 3, 10, 5), 2);
+    }
+
+    /// At the ends there is no room for a spare; offset clamps to the extremes.
+    #[test]
+    fn clamps_at_ends() {
+        // Top: cursor at row 0 cannot keep a spare above.
+        assert_eq!(scroll_window(2, 0, 10, 5), 0);
+        // Bottom: last row pins the window to max offset (len - visible), no spare below.
+        assert_eq!(scroll_window(0, 9, 10, 5), 5);
+    }
+
+    /// Tiny viewports collapse the margin so the cursor still stays visible.
+    #[test]
+    fn small_viewport_keeps_cursor_visible() {
+        // visible=1, margin collapses to 0: offset always equals the selected row.
+        assert_eq!(scroll_window(0, 0, 10, 1), 0);
+        assert_eq!(scroll_window(0, 4, 10, 1), 4);
+        assert_eq!(scroll_window(4, 9, 10, 1), 9);
     }
 }
