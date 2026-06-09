@@ -1,9 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "extends": ["config:best-practices"],
   "minimumReleaseAge": "3 days",
   "lockFileMaintenance": {
-    "automerge": true,
-    "enabled": true
+    "enabled": true,
+    "automerge": true
   }
 }
