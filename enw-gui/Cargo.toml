@@ -1,0 +1,19 @@
+[package]
+name = "enw-gui"
+version = "0.0.0"
+edition = "2024"
+description = "Local web GUI for enwiro: a single binary that serves an embedded React SPA to the browser"
+license = "GPL-3.0-or-later"
+repository.workspace = true
+
+[[bin]]
+name = "enw-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+tokio = { version = "1.37", features = ["rt-multi-thread", "macros", "net"] }
+rust-embed = "8"
+mime_guess = "2"
+open = "5"
