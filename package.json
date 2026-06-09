@@ -1,0 +1,12 @@
+{
+  "name": "enwiro-monorepo",
+  "private": true,
+  "description": "Repo-root dev tooling (Biome). Per-app JS lives in each crate's own dir, e.g. enw-gui/web.",
+  "scripts": {
+    "lint": "biome check",
+    "format": "biome check --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.16"
+  }
+}
