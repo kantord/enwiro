@@ -24,6 +24,6 @@ repos:
         pass_filenames: false
       - id: biome
         name: biome
-        entry: npx --no-install @biomejs/biome check --write --no-errors-on-unmatched
+        entry: pnpm exec biome check --write --no-errors-on-unmatched
         language: system
         types_or: [ts, tsx, javascript, jsx, json, css]
