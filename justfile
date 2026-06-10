@@ -75,3 +75,11 @@ gui-run:
     pnpm install
     pnpm --filter ./enw-gui/web build
     cargo run -p enw-gui
+
+# Regenerate the typed API client from the Rust OpenAPI spec (run after changing
+# enw-gui's API). Dumps openapi.json, then runs @hey-api/openapi-ts.
+gui-gen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run -p enw-gui -- --dump-openapi > enw-gui/web/openapi.json
+    pnpm --filter ./enw-gui/web gen
