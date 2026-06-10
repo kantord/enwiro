@@ -7,7 +7,11 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!**/enw-gui/web/src/index.css"]
+    "includes": [
+      "**",
+      "!**/enw-gui/web/src/index.css",
+      "!**/enw-gui/web/src/client"
+    ]
   },
   "formatter": {
     "enabled": true,
