@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.49](https://github.com/kantord/enwiro/compare/enwiro-v0.3.48...enwiro-v0.3.49) - 2026-06-10
+
+### Fixed
+
+- improve ux issues in `enw kanban` ([#619](https://github.com/kantord/enwiro/pull/619))
+
 ## [0.3.48](https://github.com/kantord/enwiro/compare/enwiro-v0.3.47...enwiro-v0.3.48) - 2026-06-06
 
 ### Added
