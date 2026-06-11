@@ -11,7 +11,7 @@ import {
   useSensors,
 } from '@dnd-kit/core'
 import { useQuery } from '@tanstack/react-query'
-import { MoreHorizontal } from 'lucide-react'
+import { GripVertical, MoreHorizontal } from 'lucide-react'
 import { type ReactNode, useEffect, useState } from 'react'
 import type { BoardColumn, Card as CardData } from '@/client'
 import { getBoardOptions } from '@/client/@tanstack/react-query.gen'
@@ -76,21 +76,24 @@ function Centered({ children }: { children: ReactNode }) {
 function BoardCard({
   card,
   onSetStatus,
+  dragHandle,
 }: {
   card: CardData
   onSetStatus: (envName: string, status: string) => void
+  dragHandle?: ReactNode
 }) {
   return (
     <Card className="shrink-0 gap-2 py-3">
       <CardHeader className="px-3">
-        <div className="flex items-start justify-between gap-2">
-          <CardTitle className="text-sm break-all">{card.name}</CardTitle>
+        <div className="flex items-start gap-1">
+          {dragHandle}
+          <CardTitle className="flex-1 text-sm break-all">
+            {card.name}
+          </CardTitle>
           <DropdownMenu>
             <DropdownMenuTrigger
               aria-label="Set status"
-              // Don't let the menu click start a drag (MouseSensor listens to mousedown).
-              onMouseDown={(e) => e.stopPropagation()}
-              className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+              className="ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
             >
               <MoreHorizontal className="size-4" />
             </DropdownMenuTrigger>
@@ -135,18 +138,23 @@ function DraggableCard({
     id: card.name,
     data: { fromKey },
   })
-  return (
-    <div
-      ref={setNodeRef}
+  // Listeners live on a dedicated grip handle (not the whole card) — the
+  // standard dnd-kit pattern; dragging only starts from the handle, so card
+  // text/clicks/the menu never conflict with the gesture.
+  const handle = (
+    <button
+      type="button"
+      aria-label="Drag to move"
       {...attributes}
       {...listeners}
-      // `select-none` stops text selection from hijacking the drag gesture;
-      // `touch-none` lets touch/trackpad drag instead of scroll.
-      className={`touch-none select-none cursor-grab active:cursor-grabbing ${
-        isDragging ? 'opacity-40' : ''
-      }`}
+      className="-ml-1 flex size-6 shrink-0 cursor-grab touch-none items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground active:cursor-grabbing"
     >
-      <BoardCard card={card} onSetStatus={onSetStatus} />
+      <GripVertical className="size-4" />
+    </button>
+  )
+  return (
+    <div ref={setNodeRef} className={isDragging ? 'opacity-40' : ''}>
+      <BoardCard card={card} onSetStatus={onSetStatus} dragHandle={handle} />
     </div>
   )
 }
@@ -227,6 +235,10 @@ function App() {
   return (
     <DndContext
       sensors={sensors}
+      // Off on purpose: the per-column `overflow-y-auto` containers make
+      // dnd-kit's auto-scroll latch onto the huge "Ready" column and freeze
+      // real (continuous-pointer) drags. We don't need drag-to-scroll here.
+      autoScroll={false}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onDragCancel={() => setActiveCard(null)}
