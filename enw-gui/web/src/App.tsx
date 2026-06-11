@@ -1,11 +1,20 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MoreHorizontal } from 'lucide-react'
-import type { ReactNode } from 'react'
-import type { Card as CardData } from '@/client'
 import {
-  getBoardOptions,
-  postMarkMutation,
-} from '@/client/@tanstack/react-query.gen'
+  DndContext,
+  type DragEndEvent,
+  DragOverlay,
+  type DragStartEvent,
+  MouseSensor,
+  TouchSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core'
+import { useQuery } from '@tanstack/react-query'
+import { MoreHorizontal } from 'lucide-react'
+import { type ReactNode, useEffect, useState } from 'react'
+import type { BoardColumn, Card as CardData } from '@/client'
+import { getBoardOptions } from '@/client/@tanstack/react-query.gen'
 import { Badge } from '@/components/ui/badge'
 import {
   Card,
@@ -27,6 +36,34 @@ const STATUSES = [
   { key: 'waiting', label: 'Waiting' },
   { key: 'done', label: 'Done' },
 ]
+
+/** Move a card to `toKey`, keeping each column sorted by name. Pure FE state;
+ * BE persistence is deferred (optimistic + rollback comes later). */
+function moveCard(
+  columns: BoardColumn[],
+  cardName: string,
+  toKey: string,
+): BoardColumn[] {
+  let moved: CardData | undefined
+  const without = columns.map((col) => {
+    const idx = col.cards.findIndex((c) => c.name === cardName)
+    if (idx < 0) return col
+    moved = col.cards[idx]
+    return { ...col, cards: col.cards.filter((_, i) => i !== idx) }
+  })
+  if (!moved) return columns
+  const card = moved
+  return without.map((col) =>
+    col.key === toKey
+      ? {
+          ...col,
+          cards: [...col.cards, card].sort((a, b) =>
+            a.name.localeCompare(b.name),
+          ),
+        }
+      : col,
+  )
+}
 
 function Centered({ children }: { children: ReactNode }) {
   return (
@@ -51,6 +88,8 @@ function BoardCard({
           <DropdownMenu>
             <DropdownMenuTrigger
               aria-label="Set status"
+              // Don't let the menu click start a drag (MouseSensor listens to mousedown).
+              onMouseDown={(e) => e.stopPropagation()}
               className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
             >
               <MoreHorizontal className="size-4" />
@@ -83,19 +122,98 @@ function BoardCard({
   )
 }
 
-function App() {
-  const queryClient = useQueryClient()
-  const board = useQuery(getBoardOptions())
-  const mark = useMutation({
-    ...postMarkMutation(),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: getBoardOptions().queryKey }),
+function DraggableCard({
+  card,
+  fromKey,
+  onSetStatus,
+}: {
+  card: CardData
+  fromKey: string
+  onSetStatus: (envName: string, status: string) => void
+}) {
+  const { setNodeRef, attributes, listeners, isDragging } = useDraggable({
+    id: card.name,
+    data: { fromKey },
   })
+  return (
+    <div
+      ref={setNodeRef}
+      {...attributes}
+      {...listeners}
+      // `select-none` stops text selection from hijacking the drag gesture;
+      // `touch-none` lets touch/trackpad drag instead of scroll.
+      className={`touch-none select-none cursor-grab active:cursor-grabbing ${
+        isDragging ? 'opacity-40' : ''
+      }`}
+    >
+      <BoardCard card={card} onSetStatus={onSetStatus} />
+    </div>
+  )
+}
+
+function DroppableColumn({
+  colKey,
+  children,
+}: {
+  colKey: string
+  children: ReactNode
+}) {
+  const { setNodeRef, isOver } = useDroppable({ id: colKey })
+  return (
+    <div
+      ref={setNodeRef}
+      className={`flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto rounded-md pr-1 transition-colors ${
+        isOver ? 'bg-muted/60' : ''
+      }`}
+    >
+      {children}
+    </div>
+  )
+}
+
+function App() {
+  const board = useQuery(getBoardOptions())
+  // Local, client-side board state — the source of truth for what's rendered.
+  // Seeded once from the server read; moves happen here instantly (no BE yet).
+  const [columns, setColumns] = useState<BoardColumn[] | null>(null)
+  useEffect(() => {
+    if (board.data && columns === null) {
+      setColumns(board.data.columns)
+    }
+  }, [board.data, columns])
+
+  const [activeCard, setActiveCard] = useState<CardData | null>(null)
+  // MouseSensor (not PointerSensor): a real mouse can trigger `pointercancel`
+  // (native selection/drag takeover), which aborts PointerSensor mid-drag —
+  // the "cursor sticks, card frozen" bug. Mouse/Touch events aren't canceled
+  // that way. Distance/delay so clicks + the ⋯ menu still work.
+  const sensors = useSensors(
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, {
+      activationConstraint: { delay: 150, tolerance: 8 },
+    }),
+  )
 
   const onSetStatus = (envName: string, status: string) =>
-    mark.mutate({ body: { env_name: envName, status } })
+    setColumns((cols) => (cols ? moveCard(cols, envName, status) : cols))
 
-  if (board.isPending) {
+  const onDragStart = (event: DragStartEvent) => {
+    const name = String(event.active.id)
+    const card = columns?.flatMap((c) => c.cards).find((c) => c.name === name)
+    setActiveCard(card ?? null)
+  }
+  const onDragEnd = (event: DragEndEvent) => {
+    setActiveCard(null)
+    const { active, over } = event
+    if (!over) return
+    const fromKey = (active.data.current as { fromKey?: string })?.fromKey
+    const toKey = String(over.id)
+    if (fromKey && fromKey !== toKey) {
+      onSetStatus(String(active.id), toKey)
+    }
+  }
+
+  if (board.isPending || columns === null) {
     return <Centered>Loading board…</Centered>
   }
   if (board.isError) {
@@ -107,34 +225,47 @@ function App() {
   }
 
   return (
-    <main className="flex h-svh flex-col bg-background text-foreground">
-      <h1 className="shrink-0 px-6 pt-6 pb-4 text-2xl font-semibold tracking-tight">
-        enwiro
-      </h1>
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden px-6 pb-6 sm:grid-cols-2 lg:grid-cols-4">
-        {board.data.columns.map((col) => (
-          <section key={col.key} className="flex min-h-0 flex-col gap-3">
-            <header className="flex shrink-0 items-center justify-between px-1">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                {col.title}
-              </h2>
-              <span className="text-xs text-muted-foreground">
-                {col.cards.length}
-              </span>
-            </header>
-            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
-              {col.cards.map((card) => (
-                <BoardCard
-                  key={card.name}
-                  card={card}
-                  onSetStatus={onSetStatus}
-                />
-              ))}
-            </div>
-          </section>
-        ))}
-      </div>
-    </main>
+    <DndContext
+      sensors={sensors}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragCancel={() => setActiveCard(null)}
+    >
+      <main className="flex h-svh flex-col bg-background text-foreground">
+        <h1 className="shrink-0 px-6 pt-6 pb-4 text-2xl font-semibold tracking-tight">
+          enwiro
+        </h1>
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden px-6 pb-6 sm:grid-cols-2 lg:grid-cols-4">
+          {columns.map((col) => (
+            <section key={col.key} className="flex min-h-0 flex-col gap-3">
+              <header className="flex shrink-0 items-center justify-between px-1">
+                <h2 className="text-sm font-medium text-muted-foreground">
+                  {col.title}
+                </h2>
+                <span className="text-xs text-muted-foreground">
+                  {col.cards.length}
+                </span>
+              </header>
+              <DroppableColumn colKey={col.key}>
+                {col.cards.map((card) => (
+                  <DraggableCard
+                    key={card.name}
+                    card={card}
+                    fromKey={col.key}
+                    onSetStatus={onSetStatus}
+                  />
+                ))}
+              </DroppableColumn>
+            </section>
+          ))}
+        </div>
+      </main>
+      <DragOverlay>
+        {activeCard ? (
+          <BoardCard card={activeCard} onSetStatus={() => {}} />
+        ) : null}
+      </DragOverlay>
+    </DndContext>
   )
 }
 
