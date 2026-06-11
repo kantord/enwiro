@@ -44,7 +44,7 @@ function BoardCard({
   onSetStatus: (envName: string, status: string) => void
 }) {
   return (
-    <Card className="gap-2 py-3">
+    <Card className="shrink-0 gap-2 py-3">
       <CardHeader className="px-3">
         <div className="flex items-start justify-between gap-2">
           <CardTitle className="text-sm break-all">{card.name}</CardTitle>
@@ -107,12 +107,14 @@ function App() {
   }
 
   return (
-    <main className="min-h-svh bg-background p-6 text-foreground">
-      <h1 className="mb-6 text-2xl font-semibold tracking-tight">enwiro</h1>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <main className="flex h-svh flex-col bg-background text-foreground">
+      <h1 className="shrink-0 px-6 pt-6 pb-4 text-2xl font-semibold tracking-tight">
+        enwiro
+      </h1>
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-hidden px-6 pb-6 sm:grid-cols-2 lg:grid-cols-4">
         {board.data.columns.map((col) => (
-          <section key={col.key} className="flex flex-col gap-3">
-            <header className="flex items-center justify-between px-1">
+          <section key={col.key} className="flex min-h-0 flex-col gap-3">
+            <header className="flex shrink-0 items-center justify-between px-1">
               <h2 className="text-sm font-medium text-muted-foreground">
                 {col.title}
               </h2>
@@ -120,7 +122,7 @@ function App() {
                 {col.cards.length}
               </span>
             </header>
-            <div className="flex flex-col gap-2">
+            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
               {col.cards.map((card) => (
                 <BoardCard
                   key={card.name}
