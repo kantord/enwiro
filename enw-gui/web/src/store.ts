@@ -32,9 +32,16 @@ interface BoardState {
 const visibleCount = (col: BoardColumn) =>
   Math.min(col.cards.length, CARD_RENDER_CAP)
 
+/** Same ordering the backend uses (board.rs::board_order): frecency
+ * descending, envs before recipes on ties, then name. Keeping the comparator
+ * in sync means a moved card lands where a fresh board read would put it. */
+const byBoardOrder = (a: Card, b: Card) =>
+  b.score - a.score ||
+  Number(a.is_recipe) - Number(b.is_recipe) ||
+  a.name.localeCompare(b.name)
+
 /** Move a card to the `toKey` column (FE-local only; nothing is written to the
- * backend yet). Columns stay name-sorted. Returns the card's new position so
- * the selection can follow it. */
+ * backend yet). Returns the card's new position so the selection can follow. */
 function relocate(
   columns: BoardColumn[],
   name: string,
@@ -52,9 +59,7 @@ function relocate(
   let to: Selection | null = null
   const next = without.map((col, colIdx) => {
     if (col.key !== toKey) return col
-    const cards = [...col.cards, card].sort((a, b) =>
-      a.name.localeCompare(b.name),
-    )
+    const cards = [...col.cards, card].sort(byBoardOrder)
     to = {
       col: colIdx,
       row: Math.min(
