@@ -8,6 +8,7 @@ use std::path::Path;
 
 use enwiro_daemon::meta::{CookedPhase, EnvStats, Status, load_env_meta, now_timestamp};
 use enwiro_sdk::client::CachedRecipe;
+use enwiro_sdk::rpc::EnvListEntry;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -102,43 +103,68 @@ fn board_order(a: &Card, b: &Card) -> std::cmp::Ordering {
         .then(a.name.cmp(&b.name))
 }
 
-/// Assemble the board: environments grouped by status, plus recipes that have
-/// no environment yet (shown in "Ready"). Cards sort by frecency, computed
-/// from usage signals with the same shared formula the launcher uses.
-pub fn build_board(workspaces_directory: &str) -> Board {
-    let mut columns: [Vec<Card>; 4] = Default::default();
-    let env_names = list_env_names(workspaces_directory);
-    let cache_entries = load_cache_entries();
+/// Ask the running daemon for the env list (centralized scoring). Errors when
+/// the daemon is down or the call fails; the caller then falls back to the
+/// local scan.
+async fn envs_via_daemon() -> anyhow::Result<Vec<EnvListEntry>> {
+    use enwiro_sdk::rpc::EnwiroRpcClient;
+    let client = enwiro_sdk::rpc::connect().await?;
+    Ok(client.env_list().await?.envs)
+}
 
-    let metas: std::collections::HashMap<String, EnvStats> = env_names
-        .iter()
+/// Daemon-down fallback: scan the workspaces directory and score locally with
+/// the same shared formula the daemon uses.
+fn envs_local(workspaces_directory: &str) -> Vec<EnvListEntry> {
+    let metas: std::collections::HashMap<String, EnvStats> = list_env_names(workspaces_directory)
+        .into_iter()
         .map(|name| {
-            (
-                name.clone(),
-                load_env_meta(&Path::new(workspaces_directory).join(name)),
-            )
+            let meta = load_env_meta(&Path::new(workspaces_directory).join(&name));
+            (name, meta)
         })
         .collect();
     let scores = enwiro_daemon::scoring::launcher_score(&metas, now_timestamp());
+    metas
+        .into_iter()
+        .map(|(name, meta)| EnvListEntry {
+            launcher_score: scores.get(&name).copied().unwrap_or(0.0),
+            slot_score: 0.0,
+            description: meta.description,
+            status: meta.status,
+            name,
+        })
+        .collect()
+}
 
-    for (name, meta) in &metas {
-        if let Some(col) = classify(meta.status.as_ref()) {
-            columns[col].push(Card {
-                name: name.clone(),
-                description: meta.description.clone(),
-                is_recipe: false,
-                score: scores.get(name).copied().unwrap_or(0.0),
-            });
-        }
-    }
+/// Assemble the board: environments grouped by status, plus recipes that have
+/// no environment yet (shown in "Ready"). Env data and frecency scores come
+/// from the daemon when it is running, otherwise from a local scan.
+pub async fn build_board(workspaces_directory: &str) -> Board {
+    let envs = match envs_via_daemon().await {
+        Ok(envs) => envs,
+        Err(_) => envs_local(workspaces_directory),
+    };
 
-    for recipe in cache_entries {
-        if !env_names.iter().any(|n| n == &recipe.name) {
+    let mut columns: [Vec<Card>; 4] = Default::default();
+    let env_names: std::collections::HashSet<&str> = envs.iter().map(|e| e.name.as_str()).collect();
+
+    for recipe in load_cache_entries() {
+        if !env_names.contains(recipe.name.as_str()) {
             columns[0].push(Card {
                 name: recipe.name,
                 description: recipe.description,
                 is_recipe: true,
                 score: 0.0,
+            });
+        }
+    }
+
+    for env in envs {
+        if let Some(col) = classify(env.status.as_ref()) {
+            columns[col].push(Card {
+                name: env.name,
+                description: env.description,
+                is_recipe: false,
+                score: env.launcher_score,
             });
         }
     }
