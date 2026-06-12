@@ -35,7 +35,7 @@ pub struct MarkResponse {
     responses((status = 200, body = Board)),
 )]
 async fn get_board(State(state): State<AppState>) -> Json<Board> {
-    Json(build_board(&state.workspaces_directory))
+    Json(build_board(&state.workspaces_directory).await)
 }
 
 /// Set an environment's status. Delegated to the daemon's `env.mark`.
