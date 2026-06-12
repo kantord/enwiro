@@ -9,6 +9,7 @@
 pub mod config;
 pub mod meta;
 pub mod rpc;
+pub mod scoring;
 pub use config::ConfigurationValues;
 
 use std::fs;

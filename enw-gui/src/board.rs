@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use enwiro_daemon::meta::{CookedPhase, Status, load_env_meta};
+use enwiro_daemon::meta::{CookedPhase, EnvStats, Status, load_env_meta, now_timestamp};
 use enwiro_sdk::client::CachedRecipe;
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -19,6 +19,11 @@ pub struct Card {
     pub description: Option<String>,
     /// True for recipes that have no environment directory yet.
     pub is_recipe: bool,
+    /// Frecency-derived relevance (the `launcher` percentile `enw ls` computes
+    /// from usage signals; same ordering semantics as the rofi picker).
+    /// Columns sort by it descending; the frontend reuses it to keep a moved
+    /// card's position consistent. Recipes have no usage signals and get 0.
+    pub score: f64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -71,7 +76,9 @@ fn list_env_names(workspaces_directory: &str) -> Vec<String> {
         .collect()
 }
 
-fn load_recipes() -> Vec<CachedRecipe> {
+/// All daemon-cache entries: recipes plus env entries, the latter carrying the
+/// frecency-derived `scores` that `enw ls` computed.
+fn load_cache_entries() -> Vec<CachedRecipe> {
     let Ok(cache) = enwiro_daemon::DaemonCache::open() else {
         return Vec::new();
     };
@@ -85,35 +92,59 @@ fn load_recipes() -> Vec<CachedRecipe> {
         .collect()
 }
 
+/// Column order: frecency descending (rofi-consistent), envs before recipes on
+/// equal score, then name as the stable tie-break.
+fn board_order(a: &Card, b: &Card) -> std::cmp::Ordering {
+    b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then(a.is_recipe.cmp(&b.is_recipe))
+        .then(a.name.cmp(&b.name))
+}
+
 /// Assemble the board: environments grouped by status, plus recipes that have
-/// no environment yet (shown in "Ready"). Cards are sorted by name per column.
+/// no environment yet (shown in "Ready"). Cards sort by frecency, computed
+/// from usage signals with the same shared formula the launcher uses.
 pub fn build_board(workspaces_directory: &str) -> Board {
     let mut columns: [Vec<Card>; 4] = Default::default();
     let env_names = list_env_names(workspaces_directory);
+    let cache_entries = load_cache_entries();
 
-    for name in &env_names {
-        let meta = load_env_meta(&Path::new(workspaces_directory).join(name));
+    let metas: std::collections::HashMap<String, EnvStats> = env_names
+        .iter()
+        .map(|name| {
+            (
+                name.clone(),
+                load_env_meta(&Path::new(workspaces_directory).join(name)),
+            )
+        })
+        .collect();
+    let scores = enwiro_daemon::scoring::launcher_score(&metas, now_timestamp());
+
+    for (name, meta) in &metas {
         if let Some(col) = classify(meta.status.as_ref()) {
             columns[col].push(Card {
                 name: name.clone(),
-                description: meta.description,
+                description: meta.description.clone(),
                 is_recipe: false,
+                score: scores.get(name).copied().unwrap_or(0.0),
             });
         }
     }
 
-    for recipe in load_recipes() {
+    for recipe in cache_entries {
         if !env_names.iter().any(|n| n == &recipe.name) {
             columns[0].push(Card {
                 name: recipe.name,
                 description: recipe.description,
                 is_recipe: true,
+                score: 0.0,
             });
         }
     }
 
     for col in &mut columns {
-        col.sort_by(|a, b| a.name.cmp(&b.name));
+        col.sort_by(board_order);
     }
 
     let columns = columns

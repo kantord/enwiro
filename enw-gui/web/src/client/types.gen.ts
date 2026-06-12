@@ -30,6 +30,13 @@ export type Card = {
      */
     is_recipe: boolean;
     name: string;
+    /**
+     * Frecency-derived relevance (the `launcher` percentile `enw ls` computes
+     * from usage signals; same ordering semantics as the rofi picker).
+     * Columns sort by it descending; the frontend reuses it to keep a moved
+     * card's position consistent. Recipes have no usage signals and get 0.
+     */
+    score: number;
 };
 
 export type MarkRequest = {
