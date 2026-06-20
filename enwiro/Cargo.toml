@@ -12,6 +12,13 @@ repository.workspace = true
 name = "enw"
 path = "src/main.rs"
 
+[features]
+# Experimental Stage 0 of the isolation layer (issue #540): run `enw wrap`
+# commands inside a prebuilt OCI image when one exists for the environment.
+# Off by default — not compiled into release builds. Build/test with
+# `--features container-wrap` to exercise it.
+container-wrap = []
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
