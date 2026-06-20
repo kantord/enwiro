@@ -3,7 +3,12 @@ install-dev:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Building workspace in release mode..."
-    cargo build --workspace --release
+    # Build the daemon with the experimental isolation feature (issue #540) so the
+    # dev install can exercise the container-wrap launch path. The feature is gated
+    # on image presence (`enwiro/<env>`), so it stays inert unless such an image
+    # exists. Other crates don't define the feature; the `pkg/feature` form scopes
+    # it to the daemon while still building the whole workspace in one pass.
+    cargo build --workspace --release --features enwiro-daemon/container-wrap
     # Stop the daemon so the binary isn't held open. Use systemctl when the
     # unit exists so the lifecycle stays in sync with how it normally runs;
     # fall back to pkill for users running `enw daemon` directly.
