@@ -10,6 +10,12 @@ repository.workspace = true
 name = "enwiro-daemon"
 path = "src/main.rs"
 
+[features]
+# Experimental Stage 0 of the isolation layer (issue #540): the daemon's
+# `launch.resolve` runs a command inside a prebuilt OCI image when one exists
+# for the env. Off by default. Build/test with `--features container-wrap`.
+container-wrap = []
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"

@@ -108,6 +108,38 @@ pub struct EnvMarkResult {
     pub ok: bool,
 }
 
+/// Params for `launch.resolve`: the daemon decides *how* to launch a command
+/// in an environment (host vs. containerized), but does **not** resolve/cook
+/// the env — the client passes the already-resolved `(env_name, env_path)`.
+///
+/// `interactive` reports whether the *caller's* stdin is a TTY; the daemon
+/// can't observe the caller's terminal, so the client tells it (decides
+/// `-it` vs `-i` for the container path).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchResolveParams {
+    pub env_name: String,
+    pub env_path: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub interactive: bool,
+}
+
+/// Result of `launch.resolve`: the final process to spawn (`program` + `args`)
+/// plus the environment variables the daemon decided the launched process
+/// should carry (`env_vars`, e.g. `ENWIRO_ENV`). The client sets cwd, applies
+/// `env_vars`, and exec-replaces — it does not decide any of this itself. Host
+/// path = the command itself; container path = `podman run … <image> <command> …`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchResolveResult {
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env_vars: Vec<(String, String)>,
+}
+
 /// Single source of truth for the client↔daemon RPC surface.
 #[jsonrpsee::proc_macros::rpc(server, client)]
 pub trait EnwiroRpc {
@@ -125,6 +157,12 @@ pub trait EnwiroRpc {
         &self,
         params: EnvMarkParams,
     ) -> Result<EnvMarkResult, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "launch.resolve")]
+    async fn launch_resolve(
+        &self,
+        params: LaunchResolveParams,
+    ) -> Result<LaunchResolveResult, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 pub mod client;
