@@ -34,7 +34,7 @@ demand if it doesn't exist yet).
 flowchart TD
     A["enw wrap COMMAND [ENV]"] --> B["CLI: resolve / cook the environment<br/>→ (name, path)"]
     B --> C{"daemon reachable?"}
-    C -- "no" --> H["host fallback:<br/>run COMMAND on the host<br/>(+ ENWIRO_ENV)"]
+    C -- "no" --> H["daemon down:<br/>stderr error + desktop notification,<br/>run COMMAND unwrapped<br/>(no env dir, no ENWIRO_ENV, no isolation)"]
     C -- "yes" --> D["daemon: launch.resolve<br/>(name, path, command, args, interactive)"]
     D --> E{"container-wrap feature on<br/>AND image enwiro/&lt;name&gt; exists?"}
     E -- "no" --> F["host launch:<br/>program = COMMAND<br/>env: ENWIRO_ENV=name"]
@@ -126,8 +126,10 @@ To turn the container path off again for an environment, remove its image
 
 ## Notes and limits
 
-- **The daemon must be running for the container path.** If it is down,
-  `enw wrap` logs a warning and falls back to a plain host launch.
+- **The daemon must be running.** It is the source of truth for how a command
+  is launched. If it is down, `enw wrap` does not half-wrap: it prints an error
+  to stderr, shows a desktop notification, and runs the command **unwrapped** —
+  no environment directory, no `ENWIRO_ENV`, and no isolation.
 - **`enw wrap` is the only launch path that consults the daemon today.** Other
   ways enwiro starts programs — `enw run` via an adapter, `enw :<gear>` cli
   entries, and the daemon's cook-autorun — still launch on the host and do not

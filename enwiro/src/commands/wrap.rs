@@ -3,7 +3,7 @@ use anyhow::{Context, anyhow};
 use crate::CommandContext;
 use crate::context::CookConfig;
 
-use enwiro_sdk::process::{ENWIRO_ENV_VAR, ProcessSpec};
+use enwiro_sdk::process::ProcessSpec;
 use enwiro_sdk::rpc::{EnwiroRpcClient, LaunchResolveParams, LaunchResolveResult, connect};
 
 use std::io::{self, IsTerminal, Write};
@@ -54,25 +54,38 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     let child_args: Vec<String> = args.child_args.unwrap_or_default();
 
     // Ask the daemon *how* to launch: host vs. containerized (issue #540). The
-    // daemon owns the isolation decision; this CLI just exec-replaces into
-    // whatever it returns. Env resolution/cooking stays here (the daemon can't
-    // cook yet — #522). If the daemon is unavailable, fall back to a plain host
-    // launch (the original behaviour).
-    let resolved = resolve_launch_via_daemon(
+    // daemon owns the launch decision; this CLI just exec-replaces into whatever
+    // it returns (program, args, env vars incl. ENWIRO_ENV) with cwd = env path.
+    // Env resolution/cooking stays here (the daemon can't cook yet — #522).
+    let resolved = match resolve_launch_via_daemon(
         &environment_name,
         &environment_path,
         &args.command_name,
         &child_args,
         io::stdin().is_terminal(),
-    )
-    .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "launch.resolve unavailable; falling back to host exec");
-        LaunchResolveResult {
-            program: args.command_name.clone(),
-            args: child_args.clone(),
-            env_vars: vec![(ENWIRO_ENV_VAR.to_string(), environment_name.clone())],
+    ) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            // The daemon is the source of truth for how to launch. If it isn't
+            // running we don't half-wrap: report loudly (stderr + desktop
+            // notification) and exec the command *bare* — no cwd, no
+            // ENWIRO_ENV, no isolation.
+            tracing::warn!(error = %e, "daemon unavailable; launching unwrapped");
+            eprintln!(
+                "enwiro: daemon not running ({e}); launching `{}` unwrapped (no environment, no isolation)",
+                args.command_name
+            );
+            context.notifier.notify_error(&format!(
+                "enwiro daemon not running — launched `{}` unwrapped (no environment, no isolation)",
+                args.command_name
+            ));
+            let err = ProcessSpec::new(args.command_name.clone())
+                .args(child_args)
+                .into_command()
+                .exec();
+            return Err(anyhow!(err).context(format!("Failed to exec {}", args.command_name)));
         }
-    });
+    };
 
     let program = resolved.program;
     // The daemon decided the program, args, and env vars (incl. ENWIRO_ENV);
