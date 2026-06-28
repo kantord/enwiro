@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.12...enwiro-daemon-v0.0.13) - 2026-06-28
+
+### Added
+
+- add experimental container-based isolation (behind feature flag) ([#662](https://github.com/kantord/enwiro/pull/662))
+
 ## [0.0.12](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.11...enwiro-daemon-v0.0.12) - 2026-06-28
 
 ### Fixed

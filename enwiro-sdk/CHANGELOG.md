@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.7.0...enwiro-sdk-v0.8.0) - 2026-06-28
+
+### Added
+
+- add experimental container-based isolation (behind feature flag) ([#662](https://github.com/kantord/enwiro/pull/662))
+
 ## [0.7.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.6.0...enwiro-sdk-v0.7.0) - 2026-06-06
 
 ### Added
