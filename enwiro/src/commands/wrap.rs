@@ -52,10 +52,9 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
         .unwrap_or_default();
     let child_args: Vec<String> = args.child_args.unwrap_or_default();
 
-    // Ask the daemon *how* to launch: host vs. containerized (issue #540). The
-    // daemon owns the launch decision; this CLI just exec-replaces into whatever
-    // it returns (program, args, env vars incl. ENWIRO_ENV) with cwd = env path.
-    // Env resolution/cooking stays here (the daemon can't cook yet; #522).
+    // Ask the daemon *how* to launch (host vs. containerized, #540): it owns the
+    // launch decision. Env resolution/cooking stays CLI-side (daemon can't cook
+    // yet, #522).
     let resolved = match resolve_launch_via_daemon(
         &environment_name,
         &environment_path,
@@ -83,8 +82,8 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     };
 
     let program = resolved.program;
-    // The daemon decided the program, args, and env vars (incl. ENWIRO_ENV);
-    // we only set the working directory (= env path) and exec-replace into it.
+    // Apply what the daemon returned (program, args, env vars) and exec-replace;
+    // cwd = env path.
     let mut command = ProcessSpec::new(program.clone())
         .args(resolved.args)
         .into_command();
@@ -154,8 +153,7 @@ fn resolve_launch_via_daemon(
 mod tests {
     use super::*;
 
-    // Review #2: a daemon-side resolve error must NOT be reported as "daemon
-    // not running" (the old code printed that for every failure kind).
+    // A daemon-side resolve error must not be mislabelled as "daemon not running".
     #[test]
     fn unreachable_is_reported_as_daemon_not_running() {
         let msg = DaemonLaunchError::Unreachable("connection refused".to_string())

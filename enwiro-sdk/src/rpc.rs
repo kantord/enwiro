@@ -113,8 +113,7 @@ pub struct EnvMarkResult {
 /// the env; the client passes the already-resolved `(env_name, env_path)`.
 ///
 /// `interactive` reports whether the *caller's* stdin is a TTY; the daemon
-/// can't observe the caller's terminal, so the client tells it (decides
-/// `-it` vs `-i` for the container path).
+/// can't observe the caller's terminal, so the client tells it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchResolveParams {
     pub env_name: String,
@@ -130,7 +129,7 @@ pub struct LaunchResolveParams {
 /// plus the environment variables the daemon decided the launched process
 /// should carry (`env_vars`, e.g. `ENWIRO_ENV`). The client sets cwd, applies
 /// `env_vars`, and exec-replaces; it does not decide any of this itself. Host
-/// path = the command itself; container path = `podman run ... <image> <command> ...`.
+/// path = the command itself; container path = `<engine> run ... <image> <command> ...`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchResolveResult {
     pub program: String,

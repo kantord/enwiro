@@ -35,9 +35,8 @@ jobs:
       - name: Test
         run: cargo test ${{ matrix.cargo_args }}
 
-  # The isolation/container-wrap path (issue #540) is behind an off-by-default
-  # feature, so the default workspace build never compiles it. Lint + test it
-  # explicitly. The unit tests build argv only (no container engine needed).
+  # The container-wrap isolation path (issue #540) is off by default, so the main
+  # workspace build never compiles it. Lint + test it explicitly here.
   container_wrap:
     runs-on: ubuntu-latest
     steps:

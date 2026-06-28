@@ -1,9 +1,8 @@
 //! Isolation launch decision (issue #540). Given a resolved environment +
 //! command, decide whether to run on the host or inside a prebuilt OCI image,
-//! and return the final `program` + `args`. This logic used to live in the
-//! `enw` CLI (`commands/wrap.rs`); it now lives in the daemon so the daemon is
-//! the single source of truth for the launch decision. The CLI is a thin
-//! client that just exec-replaces into whatever this returns.
+//! and return the final `program` + `args`. The daemon is the single source of
+//! truth for this decision; the `enw` CLI is a thin client that exec-replaces
+//! into whatever `resolve_launch` returns.
 //!
 //! The container path is behind the `container-wrap` build feature (off by
 //! default); without it `resolve_launch` always returns the host command.
@@ -20,11 +19,9 @@ const CONTAINER_IMAGE_PREFIX: &str = "enwiro/";
 #[cfg(feature = "container-wrap")]
 const CONTAINER_ENGINES: [&str; 2] = ["podman", "docker"];
 
-/// Terminal emulators enwiro launches as host *chrome* with a wrapped shell
-/// inside (pilot: kitty only; see the launch-template registry plan). Matched
-/// by binary basename. A recognized terminal runs on the **host**; only the
-/// shell inside it is wrapped (host or container), so the terminal itself never
-/// needs display passthrough.
+/// Terminal emulators enwiro runs as host chrome with a wrapped shell inside
+/// (pilot: kitty only; see the launch-template registry plan). Matched by binary
+/// basename; the terminal itself never needs display passthrough.
 const TERMINAL_BINARIES: &[&str] = &["kitty"];
 
 /// Shell run inside a *containerized* terminal (must exist in the image).
@@ -46,12 +43,9 @@ fn is_terminal(command: &str) -> bool {
 // (binary-name -> strategy) so new terminals and per-app rules don't require
 // editing this function.
 pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
-    // Terminal-emulator template (issue #540): run the terminal on the HOST with
-    // the env's shell inside it. If the env containerizes, the terminal's inner
-    // command is the container invocation for the shell (`kitty <engine> run ...
-    // <image> <shell>`); otherwise the terminal runs on the host and uses
-    // `$SHELL`. The terminal is host chrome (only the shell inside is wrapped),
-    // so this needs no display passthrough.
+    // Terminal template (issue #540): the terminal runs on the host; if the env
+    // containerizes, its inner command is the container invocation for the shell
+    // (`kitty <engine> run ... <image> <shell>`), otherwise it uses `$SHELL`.
     if is_terminal(&params.command) {
         #[cfg(feature = "container-wrap")]
         if !params.env_name.is_empty()
@@ -115,8 +109,7 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
 
 /// Environment variables the daemon injects on a host-launched process: just
 /// `ENWIRO_ENV` carrying the resolved environment name (empty on the home-dir
-/// fallback). Built daemon-side so the launch decision (including which env
-/// vars a launched process carries) has a single source of truth.
+/// fallback).
 fn launch_env_vars(environment_name: &str) -> Vec<(String, String)> {
     vec![(ENWIRO_ENV_VAR.to_string(), environment_name.to_string())]
 }
@@ -128,17 +121,13 @@ fn container_image_tag(environment_name: &str) -> String {
 }
 
 /// First available container engine on PATH, in preference order, or None.
-/// Uses the `which` crate (the standard executable-resolution lever) so the
-/// check honours the execute bit and platform conventions rather than a raw
-/// file-exists scan.
 ///
-/// NOTE (review #3): this resolves against the *daemon's* `PATH`/environment,
-/// not the calling user's. A `systemd --user` daemon with a stripped `PATH`
-/// (no `~/.local/bin` etc.) may fail to find an engine the user has, so the env
-/// silently runs on the host. Likewise `image_exists` probes the daemon's
-/// engine/registry context. The robust fix is to thread the caller's `PATH`
-/// (and engine context) through `LaunchResolveParams` and probe with
-/// `which::which_in`; deferred until the isolation layer leaves experimental.
+/// NOTE: this resolves against the *daemon's* `PATH`, not the calling user's. A
+/// `systemd --user` daemon with a stripped `PATH` may fail to find an engine the
+/// user has, so the env silently runs on the host (likewise `image_exists`
+/// probes the daemon's engine context). The robust fix is to thread the caller's
+/// `PATH` through `LaunchResolveParams` and probe with `which::which_in`;
+/// deferred while the isolation layer is experimental.
 #[cfg(feature = "container-wrap")]
 fn find_container_engine() -> Option<&'static str> {
     CONTAINER_ENGINES
@@ -300,10 +289,8 @@ mod tests {
         assert!(!argv.contains(&"-it".to_string()));
     }
 
-    // Review #5: a path containing a colon must not be split by the engine.
-    // With the old `-v src:dst` form, a colon in the path is the field
-    // separator and corrupts the mount; `--mount` keeps the path intact as a
-    // single `source=`/`target=` value.
+    // A path containing a colon must not be split by the engine: `--mount` keeps
+    // it intact as `source=`/`target=`, where `-v src:dst` would mis-split it.
     #[test]
     fn container_argv_mount_survives_colon_in_path() {
         let colon_path = "/home/u/.enwiro_envs/proj:1/proj:1";
@@ -328,7 +315,7 @@ mod tests {
         );
     }
 
-    // Review #1: a containerized terminal must preserve the terminal's OWN args
+    // A containerized terminal must preserve the terminal's own args
     // (e.g. `kitty --session foo`), not just run the inner container shell.
     #[test]
     fn terminal_container_args_preserve_terminal_args() {
