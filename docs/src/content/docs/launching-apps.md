@@ -33,17 +33,13 @@ doesn't exist yet).
 
 ```mermaid
 flowchart TD
-    A["enw wrap COMMAND [ENV]"] --> B["CLI: resolve / cook the environment<br/>→ (name, path)"]
+    A["enw wrap COMMAND [ENV]"] --> B["CLI resolves / cooks the environment"]
     B --> C{"daemon reachable?"}
-    C -- "no" --> H["daemon down:<br/>stderr error + desktop notification,<br/>exec COMMAND bare<br/>(no env dir, no ENWIRO_ENV, no isolation)"]
-    C -- "yes" --> D["daemon: launch.resolve<br/>(name, path, command, args, interactive)"]
-    D --> E{"container-wrap feature on<br/>AND image enwiro/&lt;name&gt; exists?"}
-    E -- "no" --> F["host launch:<br/>program = COMMAND<br/>env: ENWIRO_ENV=name"]
-    E -- "yes" --> G["Wrap app in container isolation"]
-    F --> X["CLI sets cwd = path, applies env, exec()"]
-    G --> X
-    X --> Z["your program runs in the environment"]
-    H --> Z
+    C -- "no" --> H["Command runs unwrapped<br/>(not in the environment)"]
+    C -- "yes" --> D["daemon decides how to launch"]
+    D --> E{"container image for this env?"}
+    E -- "no" --> F["Command runs on host, in the environment"]
+    E -- "yes" --> G["Command runs in container isolation"]
     click G "#the-container-isolation-path-experimental" "How container isolation runs your command"
 ```
 
