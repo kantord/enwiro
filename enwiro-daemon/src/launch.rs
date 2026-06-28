@@ -20,9 +20,67 @@ const CONTAINER_IMAGE_PREFIX: &str = "enwiro/";
 #[cfg(feature = "container-wrap")]
 const CONTAINER_ENGINES: [&str; 2] = ["podman", "docker"];
 
+/// Terminal emulators enwiro launches as host *chrome* with a wrapped shell
+/// inside (pilot: kitty only — see the launch-template registry plan). Matched
+/// by binary basename. A recognized terminal runs on the **host**; only the
+/// shell inside it is wrapped (host or container), so the terminal itself never
+/// needs display passthrough.
+const TERMINAL_BINARIES: &[&str] = &["kitty"];
+
+/// Shell run inside a *containerized* terminal (must exist in the image).
+#[cfg(feature = "container-wrap")]
+const TERMINAL_CONTAINER_SHELL: &str = "bash";
+
+/// True iff `command` (by basename) is a known terminal emulator.
+fn is_terminal(command: &str) -> bool {
+    let basename = command.rsplit('/').next().unwrap_or(command);
+    TERMINAL_BINARIES.contains(&basename)
+}
+
 /// Decide how to launch `command` in the environment. Host path returns the
 /// command unchanged; container path returns `engine run … <image> <command>`.
 pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
+    // Terminal-emulator template (issue #540): run the terminal on the HOST with
+    // the env's shell inside it. If the env containerizes, the terminal's inner
+    // command is the container invocation for the shell (`kitty <engine> run …
+    // <image> <shell>`); otherwise the terminal runs on the host and uses
+    // `$SHELL`. The terminal is host chrome — only the shell inside is wrapped —
+    // so this needs no display passthrough.
+    if is_terminal(&params.command) {
+        #[cfg(feature = "container-wrap")]
+        if !params.env_name.is_empty()
+            && let Some(engine) = find_container_engine()
+        {
+            let image = container_image_tag(&params.env_name);
+            if image_exists(engine, &image) {
+                let mut args = vec![engine.to_string()];
+                // The terminal supplies the pty, so the inner shell is always
+                // interactive regardless of the caller's stdin.
+                args.extend(build_container_argv(
+                    &image,
+                    &params.env_path,
+                    &params.env_name,
+                    TERMINAL_CONTAINER_SHELL,
+                    &[],
+                    true,
+                ));
+                return LaunchResolveResult {
+                    program: params.command.clone(),
+                    args,
+                    env_vars: Vec::new(),
+                };
+            }
+        }
+
+        // Host terminal: run it directly (it uses `$SHELL`); the client applies
+        // cwd (= env path) + `ENWIRO_ENV`.
+        return LaunchResolveResult {
+            program: params.command.clone(),
+            args: params.args.clone(),
+            env_vars: launch_env_vars(&params.env_name),
+        };
+    }
+
     #[cfg(feature = "container-wrap")]
     if !params.env_name.is_empty()
         && let Some(engine) = find_container_engine()
@@ -129,6 +187,38 @@ fn build_container_argv(
     argv.push(command.to_string());
     argv.extend(child_args.iter().cloned());
     argv
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_kitty_by_basename() {
+        assert!(is_terminal("kitty"));
+        assert!(is_terminal("/usr/bin/kitty"));
+        assert!(!is_terminal("bash"));
+        assert!(!is_terminal("vim"));
+    }
+
+    #[test]
+    fn host_terminal_runs_directly_with_enwiro_env() {
+        // No `enwiro/__nope__` image (and/or feature off) → host terminal: run
+        // it directly so it uses `$SHELL`; cwd + ENWIRO_ENV applied by the client.
+        let res = resolve_launch(&LaunchResolveParams {
+            env_name: "__nope__".to_string(),
+            env_path: "/tmp".to_string(),
+            command: "kitty".to_string(),
+            args: vec![],
+            interactive: false,
+        });
+        assert_eq!(res.program, "kitty");
+        assert!(res.args.is_empty());
+        assert_eq!(
+            res.env_vars,
+            vec![("ENWIRO_ENV".to_string(), "__nope__".to_string())]
+        );
+    }
 }
 
 #[cfg(all(test, feature = "container-wrap"))]
