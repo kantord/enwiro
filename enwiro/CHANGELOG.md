@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.50](https://github.com/kantord/enwiro/compare/enwiro-v0.3.49...enwiro-v0.3.50) - 2026-06-28
+
+### Added
+
+- add experimental isolation feature (behind build flag) ([#639](https://github.com/kantord/enwiro/pull/639))
+
 ## [0.3.49](https://github.com/kantord/enwiro/compare/enwiro-v0.3.48...enwiro-v0.3.49) - 2026-06-10
 
 ### Fixed
