@@ -249,7 +249,12 @@ impl EnwiroRpcServer for DaemonRpc {
         &self,
         params: LaunchResolveParams,
     ) -> Result<LaunchResolveResult, ErrorObjectOwned> {
-        Ok(crate::launch::resolve_launch(&params))
+        // `resolve_launch` can shell out to the container engine (image probe),
+        // which is blocking; run it off the async worker so a slow/hung engine
+        // can't stall other RPC handlers on this thread.
+        tokio::task::spawn_blocking(move || crate::launch::resolve_launch(&params))
+            .await
+            .map_err(|e| app_err(format!("launch.resolve task failed: {e}")))
     }
 }
 

@@ -55,7 +55,7 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     // Ask the daemon *how* to launch: host vs. containerized (issue #540). The
     // daemon owns the launch decision; this CLI just exec-replaces into whatever
     // it returns (program, args, env vars incl. ENWIRO_ENV) with cwd = env path.
-    // Env resolution/cooking stays here (the daemon can't cook yet — #522).
+    // Env resolution/cooking stays here (the daemon can't cook yet; #522).
     let resolved = match resolve_launch_via_daemon(
         &environment_name,
         &environment_path,
@@ -65,19 +65,15 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     ) {
         Ok(resolved) => resolved,
         Err(e) => {
-            // The daemon is the source of truth for how to launch. If it isn't
-            // running we don't half-wrap: report loudly (stderr + desktop
-            // notification) and exec the command *bare* — no cwd, no
-            // ENWIRO_ENV, no isolation.
-            tracing::warn!(error = %e, "daemon unavailable; launching unwrapped");
-            eprintln!(
-                "enwiro: daemon not running ({e}); launching `{}` unwrapped (no environment, no isolation)",
-                args.command_name
-            );
-            context.notifier.notify_error(&format!(
-                "enwiro daemon not running — launched `{}` unwrapped (no environment, no isolation)",
-                args.command_name
-            ));
+            // The daemon is the source of truth for how to launch. If we can't
+            // get an answer we don't half-wrap: report loudly (stderr + desktop
+            // notification) and exec the command *bare* (no cwd, no ENWIRO_ENV,
+            // no isolation). The message distinguishes "daemon not running" from
+            // a daemon-side resolve error so a real error isn't mislabelled.
+            let message = e.degraded_launch_message(&args.command_name);
+            tracing::warn!(error = %message, "daemon launch.resolve failed; launching unwrapped");
+            eprintln!("{message}");
+            context.notifier.notify_error(&message);
             let err = ProcessSpec::new(args.command_name.clone())
                 .args(child_args)
                 .into_command()
@@ -99,6 +95,26 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
     Err(anyhow!(err).context(format!("Failed to exec {program}")))
 }
 
+/// Why a daemon `launch.resolve` attempt failed. Kept distinct so the degraded
+/// (bare) launch is reported accurately instead of always blaming a down daemon.
+enum DaemonLaunchError {
+    /// Couldn't reach the daemon (runtime build or connect failed): daemon down.
+    Unreachable(String),
+    /// The daemon answered but `launch.resolve` itself returned an error.
+    Resolve(String),
+}
+
+impl DaemonLaunchError {
+    /// One-line, user-facing explanation of the degraded bare launch.
+    fn degraded_launch_message(&self, command: &str) -> String {
+        let cause = match self {
+            Self::Unreachable(e) => format!("daemon not running ({e})"),
+            Self::Resolve(e) => format!("daemon error ({e})"),
+        };
+        format!("enwiro: {cause}; launching `{command}` unwrapped (no environment, no isolation)")
+    }
+}
+
 /// Block on the daemon's `launch.resolve` RPC. The empty env name (home-dir
 /// fallback) is passed through too; the daemon simply returns the host command.
 fn resolve_launch_via_daemon(
@@ -107,16 +123,18 @@ fn resolve_launch_via_daemon(
     command: &str,
     args: &[String],
     interactive: bool,
-) -> anyhow::Result<LaunchResolveResult> {
+) -> Result<LaunchResolveResult, DaemonLaunchError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("could not start async runtime")?;
+        .map_err(|e| {
+            DaemonLaunchError::Unreachable(format!("could not start async runtime: {e}"))
+        })?;
 
     rt.block_on(async {
         let client = connect()
             .await
-            .context("could not connect to enwiro-daemon")?;
+            .map_err(|e| DaemonLaunchError::Unreachable(e.to_string()))?;
         EnwiroRpcClient::launch_resolve(
             &client,
             LaunchResolveParams {
@@ -128,6 +146,35 @@ fn resolve_launch_via_daemon(
             },
         )
         .await
-        .map_err(|e| anyhow!("daemon launch.resolve error: {e}"))
+        .map_err(|e| DaemonLaunchError::Resolve(e.to_string()))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Review #2: a daemon-side resolve error must NOT be reported as "daemon
+    // not running" (the old code printed that for every failure kind).
+    #[test]
+    fn unreachable_is_reported_as_daemon_not_running() {
+        let msg = DaemonLaunchError::Unreachable("connection refused".to_string())
+            .degraded_launch_message("nvim");
+        assert!(msg.contains("daemon not running"), "{msg}");
+        assert!(msg.contains("connection refused"), "{msg}");
+        assert!(msg.contains("nvim"), "{msg}");
+        assert!(!msg.contains("daemon error"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_error_is_not_reported_as_daemon_not_running() {
+        let msg =
+            DaemonLaunchError::Resolve("bad request".to_string()).degraded_launch_message("nvim");
+        assert!(msg.contains("daemon error"), "{msg}");
+        assert!(msg.contains("bad request"), "{msg}");
+        assert!(
+            !msg.contains("daemon not running"),
+            "resolve errors must not be mislabelled as a down daemon: {msg}"
+        );
+    }
 }

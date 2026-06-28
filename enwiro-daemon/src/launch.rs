@@ -21,7 +21,7 @@ const CONTAINER_IMAGE_PREFIX: &str = "enwiro/";
 const CONTAINER_ENGINES: [&str; 2] = ["podman", "docker"];
 
 /// Terminal emulators enwiro launches as host *chrome* with a wrapped shell
-/// inside (pilot: kitty only — see the launch-template registry plan). Matched
+/// inside (pilot: kitty only; see the launch-template registry plan). Matched
 /// by binary basename. A recognized terminal runs on the **host**; only the
 /// shell inside it is wrapped (host or container), so the terminal itself never
 /// needs display passthrough.
@@ -38,13 +38,19 @@ fn is_terminal(command: &str) -> bool {
 }
 
 /// Decide how to launch `command` in the environment. Host path returns the
-/// command unchanged; container path returns `engine run … <image> <command>`.
+/// command unchanged; container path returns `engine run ... <image> <command>`.
+//
+// TODO(#540): the terminal handling below is a hardcoded pilot (kitty only, via
+// `TERMINAL_BINARIES`) and the container-terminal branch duplicates the generic
+// container branch. Replace both with a general launch-template registry
+// (binary-name -> strategy) so new terminals and per-app rules don't require
+// editing this function.
 pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
     // Terminal-emulator template (issue #540): run the terminal on the HOST with
     // the env's shell inside it. If the env containerizes, the terminal's inner
-    // command is the container invocation for the shell (`kitty <engine> run …
+    // command is the container invocation for the shell (`kitty <engine> run ...
     // <image> <shell>`); otherwise the terminal runs on the host and uses
-    // `$SHELL`. The terminal is host chrome — only the shell inside is wrapped —
+    // `$SHELL`. The terminal is host chrome (only the shell inside is wrapped),
     // so this needs no display passthrough.
     if is_terminal(&params.command) {
         #[cfg(feature = "container-wrap")]
@@ -53,20 +59,15 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
         {
             let image = container_image_tag(&params.env_name);
             if image_exists(engine, &image) {
-                let mut args = vec![engine.to_string()];
-                // The terminal supplies the pty, so the inner shell is always
-                // interactive regardless of the caller's stdin.
-                args.extend(build_container_argv(
-                    &image,
-                    &params.env_path,
-                    &params.env_name,
-                    TERMINAL_CONTAINER_SHELL,
-                    &[],
-                    true,
-                ));
                 return LaunchResolveResult {
                     program: params.command.clone(),
-                    args,
+                    args: build_terminal_container_args(
+                        &params.args,
+                        engine,
+                        &image,
+                        &params.env_path,
+                        &params.env_name,
+                    ),
                     env_vars: Vec::new(),
                 };
             }
@@ -114,8 +115,8 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
 
 /// Environment variables the daemon injects on a host-launched process: just
 /// `ENWIRO_ENV` carrying the resolved environment name (empty on the home-dir
-/// fallback). Built daemon-side so the launch decision — including which env
-/// vars a launched process carries — has a single source of truth.
+/// fallback). Built daemon-side so the launch decision (including which env
+/// vars a launched process carries) has a single source of truth.
 fn launch_env_vars(environment_name: &str) -> Vec<(String, String)> {
     vec![(ENWIRO_ENV_VAR.to_string(), environment_name.to_string())]
 }
@@ -127,20 +128,47 @@ fn container_image_tag(environment_name: &str) -> String {
 }
 
 /// First available container engine on PATH, in preference order, or None.
+/// Uses the `which` crate (the standard executable-resolution lever) so the
+/// check honours the execute bit and platform conventions rather than a raw
+/// file-exists scan.
+///
+/// NOTE (review #3): this resolves against the *daemon's* `PATH`/environment,
+/// not the calling user's. A `systemd --user` daemon with a stripped `PATH`
+/// (no `~/.local/bin` etc.) may fail to find an engine the user has, so the env
+/// silently runs on the host. Likewise `image_exists` probes the daemon's
+/// engine/registry context. The robust fix is to thread the caller's `PATH`
+/// (and engine context) through `LaunchResolveParams` and probe with
+/// `which::which_in`; deferred until the isolation layer leaves experimental.
 #[cfg(feature = "container-wrap")]
 fn find_container_engine() -> Option<&'static str> {
     CONTAINER_ENGINES
         .into_iter()
-        .find(|engine| binary_on_path(engine))
+        .find(|engine| which::which(engine).is_ok())
 }
 
-/// True iff a file named `name` exists in any PATH directory.
+/// Build the args for a *containerized terminal*: the terminal runs on the host
+/// (it is the `program`) with its own `terminal_args` preserved, followed by the
+/// container invocation that runs the env's shell inside the image. The terminal
+/// supplies the pty, so the inner shell is always interactive.
 #[cfg(feature = "container-wrap")]
-fn binary_on_path(name: &str) -> bool {
-    let Ok(path) = std::env::var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+fn build_terminal_container_args(
+    terminal_args: &[String],
+    engine: &str,
+    image: &str,
+    environment_path: &str,
+    environment_name: &str,
+) -> Vec<String> {
+    let mut args = terminal_args.to_vec();
+    args.push(engine.to_string());
+    args.extend(build_container_argv(
+        image,
+        environment_path,
+        environment_name,
+        TERMINAL_CONTAINER_SHELL,
+        &[],
+        true,
+    ));
+    args
 }
 
 /// Ask the engine whether `image` exists locally. Podman has `image exists`
@@ -162,10 +190,14 @@ fn image_exists(engine: &str, image: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Assemble the `run …` args (engine excluded — it's the `program`). The env's
+/// Assemble the `run ...` args (engine excluded; it is the `program`). The env's
 /// project dir is bind-mounted at the *same* path it has on the host (paths
-/// match → no translation), cwd set there, `ENWIRO_ENV` injected; `-it` when
+/// match, so no translation), cwd set there, `ENWIRO_ENV` injected; `-it` when
 /// the caller's stdin is a TTY, `-i` otherwise.
+///
+/// The bind mount uses `--mount type=bind,source=,target=` rather than
+/// `-v src:dst` so a path containing a colon is not mis-parsed as the
+/// `-v`-syntax field separator.
 #[cfg(feature = "container-wrap")]
 fn build_container_argv(
     image: &str,
@@ -177,8 +209,10 @@ fn build_container_argv(
 ) -> Vec<String> {
     let mut argv = vec!["run".to_string(), "--rm".to_string()];
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
-    argv.push("-v".to_string());
-    argv.push(format!("{environment_path}:{environment_path}"));
+    argv.push("--mount".to_string());
+    argv.push(format!(
+        "type=bind,source={environment_path},target={environment_path}"
+    ));
     argv.push("-w".to_string());
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
@@ -246,8 +280,8 @@ mod tests {
                 "run",
                 "--rm",
                 "-it",
-                "-v",
-                "/home/u/.enwiro_envs/my-proj/my-proj:/home/u/.enwiro_envs/my-proj/my-proj",
+                "--mount",
+                "type=bind,source=/home/u/.enwiro_envs/my-proj/my-proj,target=/home/u/.enwiro_envs/my-proj/my-proj",
                 "-w",
                 "/home/u/.enwiro_envs/my-proj/my-proj",
                 "-e",
@@ -264,6 +298,55 @@ mod tests {
         let argv = build_container_argv("enwiro/x", "/p", "x", "echo", &[], false);
         assert!(argv.contains(&"-i".to_string()));
         assert!(!argv.contains(&"-it".to_string()));
+    }
+
+    // Review #5: a path containing a colon must not be split by the engine.
+    // With the old `-v src:dst` form, a colon in the path is the field
+    // separator and corrupts the mount; `--mount` keeps the path intact as a
+    // single `source=`/`target=` value.
+    #[test]
+    fn container_argv_mount_survives_colon_in_path() {
+        let colon_path = "/home/u/.enwiro_envs/proj:1/proj:1";
+        let argv = build_container_argv("enwiro/x", colon_path, "x", "bash", &[], true);
+        // The path appears verbatim inside a single `--mount` value...
+        let mount_idx = argv
+            .iter()
+            .position(|a| a == "--mount")
+            .expect("has --mount");
+        let mount_val = &argv[mount_idx + 1];
+        assert_eq!(
+            mount_val,
+            &format!("type=bind,source={colon_path},target={colon_path}")
+        );
+        // ...and never as a bare `src:dst` `-v` value (which the engine would
+        // mis-split on the colon).
+        assert!(!argv.iter().any(|a| a == "-v"));
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.contains(&format!("{colon_path}:{colon_path}")))
+        );
+    }
+
+    // Review #1: a containerized terminal must preserve the terminal's OWN args
+    // (e.g. `kitty --session foo`), not just run the inner container shell.
+    #[test]
+    fn terminal_container_args_preserve_terminal_args() {
+        let terminal_args = vec!["--session".to_string(), "foo".to_string()];
+        let args = build_terminal_container_args(
+            &terminal_args,
+            "docker",
+            "enwiro/my-proj",
+            "/p",
+            "my-proj",
+        );
+        // The terminal's own args come first (kitty parses them), then the
+        // container invocation for the inner shell.
+        assert_eq!(&args[0], "--session");
+        assert_eq!(&args[1], "foo");
+        assert_eq!(&args[2], "docker");
+        assert_eq!(&args[3], "run");
+        assert!(args.iter().any(|a| a == "bash"));
     }
 
     #[test]

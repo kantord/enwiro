@@ -110,7 +110,7 @@ pub struct EnvMarkResult {
 
 /// Params for `launch.resolve`: the daemon decides *how* to launch a command
 /// in an environment (host vs. containerized), but does **not** resolve/cook
-/// the env — the client passes the already-resolved `(env_name, env_path)`.
+/// the env; the client passes the already-resolved `(env_name, env_path)`.
 ///
 /// `interactive` reports whether the *caller's* stdin is a TTY; the daemon
 /// can't observe the caller's terminal, so the client tells it (decides
@@ -129,8 +129,8 @@ pub struct LaunchResolveParams {
 /// Result of `launch.resolve`: the final process to spawn (`program` + `args`)
 /// plus the environment variables the daemon decided the launched process
 /// should carry (`env_vars`, e.g. `ENWIRO_ENV`). The client sets cwd, applies
-/// `env_vars`, and exec-replaces — it does not decide any of this itself. Host
-/// path = the command itself; container path = `podman run … <image> <command> …`.
+/// `env_vars`, and exec-replaces; it does not decide any of this itself. Host
+/// path = the command itself; container path = `podman run ... <image> <command> ...`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchResolveResult {
     pub program: String,
