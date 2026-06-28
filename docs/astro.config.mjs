@@ -19,6 +19,7 @@ export default defineConfig({
 				{ slug: 'index' },
 				{ slug: 'activating-workspaces' },
 				{ slug: 'launching-apps' },
+				{ slug: 'development-setup' },
 				{
 					label: 'Adapters',
 					items: [
