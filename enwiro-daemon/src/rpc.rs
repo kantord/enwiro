@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use enwiro_sdk::rpc::{
     APPLICATION_ERROR_CODE, CALL_CHAIN_ENV_VAR, CYCLE_DETECTED_CODE, CookbookInvokeParams,
     CookbookInvokeResult, EnvCurrentResult, EnvMarkParams, EnvMarkResult, EnwiroRpcServer,
+    LaunchResolveParams, LaunchResolveResult,
 };
 use futures_util::{SinkExt, StreamExt};
 use jsonrpsee::core::server::Methods;
@@ -242,6 +243,18 @@ impl EnwiroRpcServer for DaemonRpc {
             .map_err(|e| app_err(format!("could not save metadata: {e}")))?;
 
         Ok(EnvMarkResult { ok: true })
+    }
+
+    async fn launch_resolve(
+        &self,
+        params: LaunchResolveParams,
+    ) -> Result<LaunchResolveResult, ErrorObjectOwned> {
+        // `resolve_launch` can shell out to the container engine (image probe),
+        // which is blocking; run it off the async worker so a slow/hung engine
+        // can't stall other RPC handlers on this thread.
+        tokio::task::spawn_blocking(move || crate::launch::resolve_launch(&params))
+            .await
+            .map_err(|e| app_err(format!("launch.resolve task failed: {e}")))
     }
 }
 

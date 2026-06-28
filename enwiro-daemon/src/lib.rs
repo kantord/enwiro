@@ -7,6 +7,7 @@
 //! handling, idle detection, cache file location) is owned by this crate.
 
 pub mod config;
+pub mod launch;
 pub mod meta;
 pub mod rpc;
 pub use config::ConfigurationValues;

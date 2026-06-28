@@ -35,6 +35,20 @@ jobs:
       - name: Test
         run: cargo test ${{ matrix.cargo_args }}
 
+  # The container-wrap isolation path (issue #540) is off by default, so the main
+  # workspace build never compiles it. Lint + test it explicitly here.
+  container_wrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - name: Clippy (container-wrap)
+        run: cargo clippy -p enwiro-daemon --all-targets --features container-wrap -- -D warnings
+      - name: Test (container-wrap)
+        run: cargo test -p enwiro-daemon --features container-wrap
+
   docs:
     runs-on: ubuntu-latest
     steps:

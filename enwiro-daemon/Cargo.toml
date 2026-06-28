@@ -10,6 +10,12 @@ repository.workspace = true
 name = "enwiro-daemon"
 path = "src/main.rs"
 
+[features]
+# Experimental Stage 0 of the isolation layer (issue #540): the daemon's
+# `launch.resolve` runs a command inside a prebuilt OCI image when one exists
+# for the env. Off by default. Build/test with `--features container-wrap`.
+container-wrap = ["dep:which"]
+
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
@@ -27,6 +33,7 @@ system-idle-time = "1.0.4"
 tokio = { version = "1.37.0", default-features = false, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 tracing.workspace = true
+which = { version = "8", optional = true }
 
 [dev-dependencies]
 proptest = "1"

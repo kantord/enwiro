@@ -3,7 +3,10 @@ install-dev:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Building workspace in release mode..."
-    cargo build --workspace --release
+    # Enable the daemon's experimental container-wrap path (issue #540) for dev
+    # installs. The `pkg/feature` form targets the daemon, building the whole
+    # workspace in one pass.
+    cargo build --workspace --release --features enwiro-daemon/container-wrap
     # Stop the daemon so the binary isn't held open. Use systemctl when the
     # unit exists so the lifecycle stays in sync with how it normally runs;
     # fall back to pkill for users running `enw daemon` directly.
