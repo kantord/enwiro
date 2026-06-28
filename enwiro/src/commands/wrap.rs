@@ -50,7 +50,6 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
         .as_ref()
         .map(|environment| environment.name.clone())
         .unwrap_or_default();
-
     let child_args: Vec<String> = args.child_args.unwrap_or_default();
 
     // Ask the daemon *how* to launch: host vs. containerized (issue #540). The
