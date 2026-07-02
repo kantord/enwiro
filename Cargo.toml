@@ -20,8 +20,8 @@ members = [
 repository = "https://github.com/kantord/enwiro"
 
 [workspace.dependencies]
-enwiro-sdk = { path = "enwiro-sdk", version = "0.7.0" }
-enwiro-daemon = { path = "enwiro-daemon", version = "0.0.12" }
+enwiro-sdk = { path = "enwiro-sdk", version = "0.8.0" }
+enwiro-daemon = { path = "enwiro-daemon", version = "0.0.13" }
 home = "0.5.9"
 tracing = "0.1"
 tracing-appender = "0.2"
