@@ -4,6 +4,7 @@
     "config:recommended",
     "helpers:pinGitHubActionDigests"
   ],
+  "minimumReleaseAge": "3 days",
   "lockFileMaintenance": {
     "automerge": true,
     "enabled": true
