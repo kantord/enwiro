@@ -39,7 +39,7 @@ fn is_terminal(command: &str) -> bool {
 }
 
 /// True iff `command` (by basename) is the Claude Code CLI, which is the only
-/// launch that receives an injected `CLAUDE_CODE_OAUTH_TOKEN`.
+/// launch routed through the host-side auth proxy.
 #[cfg(feature = "container-wrap")]
 fn is_claude(command: &str) -> bool {
     command_basename(command) == "claude"
@@ -93,13 +93,11 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
     {
         let image = container_image_tag(&params.env_name);
         if image_exists(engine, &image) {
-            // Only a claude launch gets the OAuth token; everything else in any
-            // env is launched without it.
-            let claude_token = if is_claude(&params.command) {
-                claude_oauth_token()
-            } else {
-                None
-            };
+            // A claude launch is routed through the host-side auth proxy (the
+            // token stays on the host, never in the container) — but only when a
+            // token is actually configured; otherwise claude just logs in.
+            let route_claude_via_proxy =
+                is_claude(&params.command) && claude_oauth_token().is_some();
             return LaunchResolveResult {
                 program: engine.to_string(),
                 args: build_container_argv(
@@ -109,7 +107,7 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
                     &params.command,
                     &params.args,
                     params.interactive,
-                    claude_token.as_deref(),
+                    route_claude_via_proxy,
                 ),
                 // The container path injects `ENWIRO_ENV` *inside* the
                 // container via `-e` (see `build_container_argv`), so the host
@@ -168,7 +166,7 @@ fn build_terminal_container_args(
 ) -> Vec<String> {
     let mut args = terminal_args.to_vec();
     args.push(engine.to_string());
-    // The inner command is a shell, not claude, so no OAuth token is injected.
+    // The inner command is a shell, not claude, so no proxy wiring is injected.
     args.extend(build_container_argv(
         image,
         environment_path,
@@ -176,7 +174,7 @@ fn build_terminal_container_args(
         TERMINAL_CONTAINER_SHELL,
         &[],
         true,
-        None,
+        false,
     ));
     args
 }
@@ -216,7 +214,7 @@ fn build_container_argv(
     command: &str,
     child_args: &[String],
     interactive: bool,
-    claude_oauth_token: Option<&str>,
+    route_claude_via_proxy: bool,
 ) -> Vec<String> {
     let mut argv = vec!["run".to_string(), "--rm".to_string()];
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
@@ -228,21 +226,25 @@ fn build_container_argv(
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
     argv.push(format!("ENWIRO_ENV={environment_name}"));
-    // Credential injection (issue #540): a claude launch gets a scoped
-    // `CLAUDE_CODE_OAUTH_TOKEN` (minted by `claude setup-token`) so it reuses the
-    // host subscription without mounting `~/.claude` at all. The caller only
-    // passes a token for claude commands, so `bash`/other launches never receive
-    // it.
-    //
-    // TEMPORARY / not-yet-ideal:
-    //   - A container env var is visible to *every* process in that container, so
-    //     this is not per-process isolation; the per-process end state is claude's
-    //     `apiKeyHelper` (token fetched on demand, never in the env).
-    //   - The token is long-lived (1 year) until revoked, not short-lived.
-    //   - Not yet gated by env trust; an untrusted/agent env should not get it.
-    if let Some(token) = claude_oauth_token {
+    // Credential injection (issue #540): route claude at the host-side auth proxy
+    // instead of putting the real token in the container. The container gets only
+    // the proxy's base URL + a non-secret sentinel token; the daemon's proxy
+    // (`proxy.rs`) swaps the sentinel for the real `Authorization` on the host, so
+    // the credential never enters the container and can't be exfiltrated from it.
+    // `--add-host` makes `host.docker.internal` resolve to the host on Linux.
+    if route_claude_via_proxy {
+        argv.push("--add-host".to_string());
+        argv.push("host.docker.internal:host-gateway".to_string());
         argv.push("-e".to_string());
-        argv.push(format!("CLAUDE_CODE_OAUTH_TOKEN={token}"));
+        argv.push(format!(
+            "ANTHROPIC_BASE_URL=http://host.docker.internal:{}",
+            crate::proxy::CLAUDE_PROXY_PORT
+        ));
+        argv.push("-e".to_string());
+        argv.push(format!(
+            "ANTHROPIC_AUTH_TOKEN={}",
+            crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
+        ));
     }
     argv.push(image.to_string());
     // Seed a default `.claude.json` (only if absent) so an interactive claude
@@ -290,9 +292,10 @@ const CLAUDE_ONBOARDING_SEED_SCRIPT: &str = concat!(
 /// `~/.config/enwiro/claude_oauth_token`). Mint one with `claude setup-token`.
 ///
 /// One cached token is reused across envs (no per-env token proliferation); it
-/// is only injected for claude commands (see `build_container_argv`).
+/// is used by the host-side proxy (`proxy.rs`) for claude launches, never placed
+/// in the container.
 #[cfg(feature = "container-wrap")]
-fn claude_oauth_token() -> Option<String> {
+pub(crate) fn claude_oauth_token() -> Option<String> {
     if let Some(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
         .ok()
         .filter(|token| !token.is_empty())
@@ -359,7 +362,7 @@ mod tests {
             "bash",
             &["-l".to_string()],
             true,
-            None,
+            false,
         );
         // Head up to the image: run flags + bind mount + cwd + ENWIRO_ENV.
         let image_idx = argv.iter().position(|a| a == "enwiro/my-proj").unwrap();
@@ -388,7 +391,7 @@ mod tests {
     // workspace-trust) without baking anything into the image.
     #[test]
     fn container_argv_seeds_onboarding_then_execs_command() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, None);
+        let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, false);
         let script = &argv[argv.iter().position(|a| a == "-c").unwrap() + 1];
         assert!(script.contains("hasCompletedOnboarding"), "{script}");
         // both onboarding gates: theme/welcome AND per-workspace trust.
@@ -405,7 +408,7 @@ mod tests {
 
     #[test]
     fn container_argv_uses_dash_i_when_not_a_tty() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "echo", &[], false, None);
+        let argv = build_container_argv("enwiro/x", "/p", "x", "echo", &[], false, false);
         assert!(argv.contains(&"-i".to_string()));
         assert!(!argv.contains(&"-it".to_string()));
     }
@@ -418,27 +421,48 @@ mod tests {
         assert!(!is_claude("claude-code"));
     }
 
-    // A claude launch with a configured token gets `-e CLAUDE_CODE_OAUTH_TOKEN`.
+    // Routing claude via the proxy points the container at the proxy's base URL +
+    // a sentinel token, and NEVER puts the real OAuth token in the container.
     #[test]
-    fn container_argv_injects_claude_token_when_present() {
-        let argv =
-            build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, Some("tok-123"));
+    fn container_argv_wires_claude_proxy_when_enabled() {
+        let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, true);
         assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "-e" && w[1] == "CLAUDE_CODE_OAUTH_TOKEN=tok-123"),
+            argv.windows(2).any(|w| w[0] == "-e"
+                && w[1]
+                    == format!(
+                        "ANTHROPIC_BASE_URL=http://host.docker.internal:{}",
+                        crate::proxy::CLAUDE_PROXY_PORT
+                    )),
             "{argv:?}"
         );
-    }
-
-    // With no token (e.g. non-claude command, or none configured), the token is
-    // never present in the args.
-    #[test]
-    fn container_argv_omits_token_when_absent() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, None);
+        assert!(
+            argv.windows(2).any(|w| w[0] == "-e"
+                && w[1]
+                    == format!(
+                        "ANTHROPIC_AUTH_TOKEN={}",
+                        crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
+                    )),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--add-host" && w[1] == "host.docker.internal:host-gateway"),
+            "{argv:?}"
+        );
+        // The real token must never reach the container.
         assert!(
             !argv.iter().any(|a| a.contains("CLAUDE_CODE_OAUTH_TOKEN")),
             "{argv:?}"
         );
+    }
+
+    // Without proxy routing (non-claude, or no token configured), no ANTHROPIC_*
+    // wiring is added.
+    #[test]
+    fn container_argv_no_proxy_when_disabled() {
+        let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, false);
+        assert!(!argv.iter().any(|a| a.contains("ANTHROPIC_")), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "--add-host"), "{argv:?}");
     }
 
     // A path containing a colon must not be split by the engine: `--mount` keeps
@@ -446,7 +470,7 @@ mod tests {
     #[test]
     fn container_argv_mount_survives_colon_in_path() {
         let colon_path = "/home/u/.enwiro_envs/proj:1/proj:1";
-        let argv = build_container_argv("enwiro/x", colon_path, "x", "bash", &[], true, None);
+        let argv = build_container_argv("enwiro/x", colon_path, "x", "bash", &[], true, false);
         // The path appears verbatim inside a single `--mount` value...
         let mount_idx = argv
             .iter()

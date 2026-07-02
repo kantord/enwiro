@@ -9,6 +9,8 @@
 pub mod config;
 pub mod launch;
 pub mod meta;
+#[cfg(feature = "container-wrap")]
+pub mod proxy;
 pub mod rpc;
 pub use config::ConfigurationValues;
 
@@ -287,6 +289,10 @@ pub async fn run(
         active_env,
         workspaces_directory.clone(),
     ));
+
+    // Host-side Claude auth proxy: keeps the OAuth token off the container.
+    #[cfg(feature = "container-wrap")]
+    tokio::spawn(proxy::serve());
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);
