@@ -232,6 +232,12 @@ fn build_container_argv(
     // (`proxy.rs`) swaps the sentinel for the real `Authorization` on the host, so
     // the credential never enters the container and can't be exfiltrated from it.
     // `--add-host` makes `host.docker.internal` resolve to the host on Linux.
+    //
+    // The sentinel goes in `CLAUDE_CODE_OAUTH_TOKEN` (not `ANTHROPIC_AUTH_TOKEN`):
+    // both make the CLI send a swappable `Bearer`, but `ANTHROPIC_AUTH_TOKEN` puts
+    // it in *gateway/API-billing* mode (drops the `oauth-2025-04-20` beta flag,
+    // shows "API Usage Billing"), whereas `CLAUDE_CODE_OAUTH_TOKEN` keeps
+    // *subscription* mode so the injected subscription token bills as intended.
     if route_claude_via_proxy {
         argv.push("--add-host".to_string());
         argv.push("host.docker.internal:host-gateway".to_string());
@@ -242,7 +248,7 @@ fn build_container_argv(
         ));
         argv.push("-e".to_string());
         argv.push(format!(
-            "ANTHROPIC_AUTH_TOKEN={}",
+            "CLAUDE_CODE_OAUTH_TOKEN={}",
             crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
         ));
     }
@@ -422,7 +428,8 @@ mod tests {
     }
 
     // Routing claude via the proxy points the container at the proxy's base URL +
-    // a sentinel token, and NEVER puts the real OAuth token in the container.
+    // a non-secret sentinel token (in `CLAUDE_CODE_OAUTH_TOKEN`, which keeps the
+    // CLI in subscription-billing mode). The real token stays on the host.
     #[test]
     fn container_argv_wires_claude_proxy_when_enabled() {
         let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, true);
@@ -435,11 +442,12 @@ mod tests {
                     )),
             "{argv:?}"
         );
+        // The token env carries only the non-secret sentinel, never a real token.
         assert!(
             argv.windows(2).any(|w| w[0] == "-e"
                 && w[1]
                     == format!(
-                        "ANTHROPIC_AUTH_TOKEN={}",
+                        "CLAUDE_CODE_OAUTH_TOKEN={}",
                         crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
                     )),
             "{argv:?}"
@@ -449,9 +457,9 @@ mod tests {
                 .any(|w| w[0] == "--add-host" && w[1] == "host.docker.internal:host-gateway"),
             "{argv:?}"
         );
-        // The real token must never reach the container.
+        // No env var should carry anything but the sentinel as a token value.
         assert!(
-            !argv.iter().any(|a| a.contains("CLAUDE_CODE_OAUTH_TOKEN")),
+            !argv.iter().any(|a| a.contains("ANTHROPIC_AUTH_TOKEN")),
             "{argv:?}"
         );
     }

@@ -1,11 +1,11 @@
 //! Host-side Claude auth proxy (issue #540, experimental).
 //!
-//! A prompt-injected agent in the container could read a `CLAUDE_CODE_OAUTH_TOKEN`
-//! we inject as an env var. This proxy keeps the real token on the *host*: the
+//! A prompt-injected agent in the container could read a real OAuth token if we
+//! injected one as an env var. This proxy keeps the real token on the *host*: the
 //! container is pointed at `ANTHROPIC_BASE_URL=http://host.docker.internal:<port>`
-//! with a throwaway `ANTHROPIC_AUTH_TOKEN`, and this proxy swaps the dummy
-//! `Authorization` header for the real one before forwarding to Anthropic. The
-//! credential never enters the container, so it cannot be exfiltrated from there.
+//! with a throwaway sentinel `CLAUDE_CODE_OAUTH_TOKEN`, and this proxy swaps the
+//! dummy `Authorization` header for the real one before forwarding to Anthropic.
+//! The credential never enters the container, so it cannot be exfiltrated there.
 //!
 //! It is a transparent pass-through: only `Authorization` is rewritten, every
 //! other header and the body are forwarded verbatim (the Claude Code harness
