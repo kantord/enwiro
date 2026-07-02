@@ -125,6 +125,43 @@ enw wrap bash some-other-env
 To turn the container path off again for an environment, remove its image
 (`docker rmi enwiro/my-project`).
 
+### Running Claude Code in isolation
+
+Running an agent like Claude Code inside the container was a motivating use case
+for this layer: the agent sees only the environment's project directory, not the
+rest of your machine. Two enwiro-specific pieces make it work smoothly.
+
+**Authentication, without the credential entering the container.** A naive
+approach would inject your token as an environment variable, but anything running
+in the container (including the agent, if it is led astray by a prompt injection)
+could then read and exfiltrate it. Instead, the daemon runs a small host-side
+auth proxy: a `claude` launch is pointed at it via `ANTHROPIC_BASE_URL` and given
+a non-secret sentinel token, and the proxy swaps in your real token on the host
+before forwarding to Anthropic. **The real credential never enters the
+container.** Configure it once:
+
+```sh
+# Mint a long-lived token tied to your subscription, then store it host-side:
+claude setup-token
+mkdir -p ~/.config/enwiro
+printf '%s\n' 'PASTE_THE_TOKEN' > ~/.config/enwiro/claude_oauth_token
+chmod 600 ~/.config/enwiro/claude_oauth_token
+```
+
+With a token configured and an `enwiro/<env>` image that ships `claude`,
+`enw wrap claude <env>` authenticates through the proxy using your subscription.
+Only `claude` launches are routed this way; other commands never get the token.
+
+**First-run onboarding is skipped automatically** (see the note below), so the
+session lands straight at the prompt.
+
+This is **experimental and intended for your own, trusted environments only.**
+Known limits: the v1 proxy listens on all interfaces (any local process that can
+reach it can use your token), it protects the credential but not Claude's
+server-side tools such as web search (those run on Anthropic's infrastructure and
+never traverse the proxy), and running an agent against untrusted code in a shared
+kernel is not a strong security boundary. Treat it accordingly.
+
 ## Notes and limits
 
 - **The daemon must be running.** It is the source of truth for how a command is
@@ -134,16 +171,9 @@ To turn the container path off again for an environment, remove its image
 - **Terminal emulators are wrapped specially.** A recognised terminal (currently
   kitty only) runs on the host with the environment's shell wrapped inside it, so
   the terminal needs no display passthrough. This is an experimental pilot.
-- **Claude Code gets a scoped OAuth token (temporary, trusted use only).** If you
-  configure a token (the daemon's `CLAUDE_CODE_OAUTH_TOKEN`, else a single line in
-  `~/.config/enwiro/claude_oauth_token`), a **`claude`** launch in a container
-  receives it as `CLAUDE_CODE_OAUTH_TOKEN`, so it authenticates with your
-  subscription without mounting `~/.claude`. Mint the token with `claude
-  setup-token`. The token is injected **only for `claude` commands** (other
-  commands never receive it), but note a container env var is readable by every
-  process in that container, so it is only appropriate for **trusted**
-  environments. The intended end state is per-process delivery (Claude's
-  `apiKeyHelper`) gated by environment trust.
+- **Claude Code is authenticated through a host-side proxy** so the credential
+  never enters the container. See [Running Claude Code in
+  isolation](#running-claude-code-in-isolation) above.
 - **First-run onboarding is skipped automatically.** Claude Code has no env var
   or setting to skip its first-run wizard (theme picker and "trust this folder"
   prompt); the only lever is a `.claude.json` marking `hasCompletedOnboarding`
