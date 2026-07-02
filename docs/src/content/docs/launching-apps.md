@@ -134,6 +134,24 @@ To turn the container path off again for an environment, remove its image
 - **Terminal emulators are wrapped specially.** A recognised terminal (currently
   kitty only) runs on the host with the environment's shell wrapped inside it, so
   the terminal needs no display passthrough. This is an experimental pilot.
+- **Claude Code gets a scoped OAuth token (temporary, trusted use only).** If you
+  configure a token (the daemon's `CLAUDE_CODE_OAUTH_TOKEN`, else a single line in
+  `~/.config/enwiro/claude_oauth_token`), a **`claude`** launch in a container
+  receives it as `CLAUDE_CODE_OAUTH_TOKEN`, so it authenticates with your
+  subscription without mounting `~/.claude`. Mint the token with `claude
+  setup-token`. The token is injected **only for `claude` commands** (other
+  commands never receive it), but note a container env var is readable by every
+  process in that container, so it is only appropriate for **trusted**
+  environments. The intended end state is per-process delivery (Claude's
+  `apiKeyHelper`) gated by environment trust.
+- **First-run onboarding is skipped automatically.** Claude Code has no env var
+  or setting to skip its first-run wizard (theme picker and "trust this folder"
+  prompt); the only lever is a `.claude.json` marking `hasCompletedOnboarding`
+  and the workspace's `hasTrustDialogAccepted`. Rather than make you bake that
+  into every image, the container launch **seeds a default `.claude.json` at
+  start if one is absent** (keyed to the environment's directory; it never
+  overwrites one the image already ships), so `claude` in a fresh container goes
+  straight to the prompt.
 - **`enw wrap` is the only launch path that consults the daemon today.** Other
   ways enwiro starts programs (`enw run` via an adapter, `enw :<gear>` cli
   entries, and the daemon's cook-autorun) still launch on the host and do not yet
