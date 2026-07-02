@@ -14,7 +14,15 @@ path = "src/main.rs"
 # Experimental Stage 0 of the isolation layer (issue #540): the daemon's
 # `launch.resolve` runs a command inside a prebuilt OCI image when one exists
 # for the env. Off by default. Build/test with `--features container-wrap`.
-container-wrap = ["dep:which"]
+# Also carries the experimental host-side Claude auth proxy (`proxy.rs`).
+container-wrap = [
+    "dep:which",
+    "dep:bytes",
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:reqwest",
+]
 
 [dependencies]
 anyhow = "1"
@@ -34,6 +42,12 @@ tokio = { version = "1.37.0", default-features = false, features = ["net", "io-u
 tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 tracing.workspace = true
 which = { version = "8", optional = true }
+# Host-side Claude auth proxy (issue #540, behind `container-wrap`).
+bytes = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", default-features = false, features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
