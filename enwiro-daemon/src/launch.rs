@@ -222,6 +222,21 @@ fn build_container_argv(
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
     argv.push(format!("ENWIRO_ENV={environment_name}"));
+    // Run as the host user's uid/gid so the bind-mounted project (owned by that
+    // user) is accessed as its owner. This fixes git's "dubious ownership" error,
+    // stops the container from leaving root-owned files on the host, and drops
+    // root (hardening; claude's `--dangerously-skip-permissions` also requires
+    // non-root). A bare uid may have no home, so point `HOME` at a writable path.
+    //
+    // Linux only: on macOS the container runs in a VM whose file-sharing layer
+    // maps ownership, and the daemon's uid is meaningless inside that VM. (Rootless
+    // Podman may need `--userns=keep-id` instead; a refinement for later.)
+    if cfg!(target_os = "linux") {
+        argv.push("--user".to_string());
+        argv.push(format!("{}:{}", host_uid(), host_gid()));
+        argv.push("-e".to_string());
+        argv.push(format!("HOME={CONTAINER_HOME}"));
+    }
     // Credential injection (issue #540): instead of putting the real token in the
     // container, install a `claude` shim (materialized by the launch prelude into
     // a PATH dir) that points claude at the host-side auth proxy. The daemon's
@@ -258,6 +273,24 @@ fn build_container_argv(
 /// Directory the launch prelude writes enwiro shims into, prepended to `PATH`.
 #[cfg(feature = "container-wrap")]
 const SHIM_DIR: &str = "/tmp/enwiro-bin";
+
+/// `HOME` for the container when it runs as a non-root uid: a writable, ephemeral
+/// path, since a bare uid may have no home directory in the image.
+#[cfg(feature = "container-wrap")]
+const CONTAINER_HOME: &str = "/tmp/enwiro-home";
+
+/// The daemon's real uid / gid, injected as the container's `--user` so file
+/// ownership on the bind-mounted project matches.
+#[cfg(feature = "container-wrap")]
+fn host_uid() -> u32 {
+    // SAFETY: `getuid` always succeeds and has no preconditions.
+    unsafe { libc::getuid() }
+}
+#[cfg(feature = "container-wrap")]
+fn host_gid() -> u32 {
+    // SAFETY: `getgid` always succeeds and has no preconditions.
+    unsafe { libc::getgid() }
+}
 
 /// The `claude` shim: a tiny script installed on `PATH` inside the container that
 /// points claude at the host auth proxy, then execs the *real* claude (found by
@@ -309,6 +342,7 @@ fn claude_shim_script() -> String {
 /// filesystem (gone on `--rm`).
 #[cfg(feature = "container-wrap")]
 const CONTAINER_PRELUDE_SCRIPT: &str = concat!(
+    r#"[ -n "$HOME" ] && mkdir -p "$HOME"; "#,
     r#"if [ -n "$ENWIRO_SHIMS" ]; then d=/tmp/enwiro-bin; mkdir -p "$d"; "#,
     r#"for n in $ENWIRO_SHIMS; do eval "c=\${ENWIRO_SHIM_$n}"; printf '%s' "$c" > "$d/$n" && chmod +x "$d/$n"; done; "#,
     r#"PATH="$d:$PATH"; export PATH; fi; "#,
@@ -397,26 +431,47 @@ mod tests {
             true,
             false,
         );
-        // Head up to the image: run flags + bind mount + cwd + ENWIRO_ENV.
+        // Before the image: run flags + bind mount + cwd + ENWIRO_ENV (plus
+        // `--user`/HOME on Linux, checked separately).
         let image_idx = argv.iter().position(|a| a == "enwiro/my-proj").unwrap();
-        assert_eq!(
-            &argv[..=image_idx],
-            &[
-                "run",
-                "--rm",
-                "-it",
-                "--mount",
-                "type=bind,source=/home/u/.enwiro_envs/my-proj/my-proj,target=/home/u/.enwiro_envs/my-proj/my-proj",
-                "-w",
-                "/home/u/.enwiro_envs/my-proj/my-proj",
-                "-e",
-                "ENWIRO_ENV=my-proj",
-                "enwiro/my-proj",
-            ]
+        let head = &argv[..image_idx];
+        assert_eq!(&argv[..3], &["run", "--rm", "-it"]);
+        assert!(
+            head.windows(2).any(|w| w[0] == "--mount"
+                && w[1] == "type=bind,source=/home/u/.enwiro_envs/my-proj/my-proj,target=/home/u/.enwiro_envs/my-proj/my-proj"),
+            "{argv:?}"
         );
-        // The command is wrapped `sh -c <seed> sh <command> <args>`.
+        assert!(
+            head.windows(2)
+                .any(|w| w[0] == "-w" && w[1] == "/home/u/.enwiro_envs/my-proj/my-proj"),
+            "{argv:?}"
+        );
+        assert!(
+            head.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "ENWIRO_ENV=my-proj"),
+            "{argv:?}"
+        );
+        // The command is wrapped `sh -c <prelude> sh <command> <args>`.
         assert_eq!(&argv[image_idx + 1..image_idx + 3], &["sh", "-c"]);
         assert_eq!(&argv[image_idx + 4..], &["sh", "bash", "-l"]);
+    }
+
+    // On Linux the container runs as the host uid/gid with a writable HOME, so
+    // bind-mounted files (owned by that user) are accessed as their owner.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn container_argv_runs_as_host_uid_on_linux() {
+        let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, false);
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--user" && w[1] == format!("{}:{}", host_uid(), host_gid())),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == format!("HOME={CONTAINER_HOME}")),
+            "{argv:?}"
+        );
     }
 
     // A default `.claude.json` is seeded only if absent, then the real command
