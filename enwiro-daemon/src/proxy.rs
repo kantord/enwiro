@@ -12,11 +12,14 @@
 //! headers must survive to avoid tripping Anthropic's abuse detection), and the
 //! response is streamed unbuffered so SSE works.
 //!
-//! v1 caveats: single global token, one shared listener on a fixed port bound to
-//! all interfaces (any host/LAN process that can reach the port can use the
-//! token via the proxy — acceptable for trusted local dev, tighten later), and
-//! it does not defend against server-side tools (`web_search` runs on Anthropic
-//! infra and never traverses this proxy).
+//! It binds to the container bridge gateway (not all interfaces), so the LAN
+//! cannot reach it; if that address can't be determined or bound it fails closed
+//! (does not start) rather than exposing the token more widely.
+//!
+//! v1 caveats: single global token; any *container* on the bridge can still reach
+//! the proxy and spend inference quota (the credential itself is never exposed;
+//! per-container auth is a follow-up); and it does not defend against server-side
+//! tools (`web_search` runs on Anthropic infra and never traverses this proxy).
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -49,16 +52,10 @@ type ProxyBody = BoxBody<Bytes, std::io::Error>;
 /// returns (the daemon keeps running; a claude launch then just fails to auth
 /// rather than taking the daemon down).
 pub async fn serve() {
-    let addr = SocketAddr::from(([0, 0, 0, 0], CLAUDE_PROXY_PORT));
-    let listener = match TcpListener::bind(addr).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::error!(%error, port = CLAUDE_PROXY_PORT, "claude auth proxy: bind failed");
-            return;
-        }
+    let Some(listener) = bind_listener().await else {
+        return;
     };
     let client = reqwest::Client::new();
-    tracing::info!(port = CLAUDE_PROXY_PORT, "claude auth proxy listening");
 
     loop {
         let (stream, _peer) = match listener.accept().await {
@@ -77,6 +74,64 @@ pub async fn serve() {
             }
         });
     }
+}
+
+/// Bind the proxy to the container bridge gateway (the address containers use to
+/// reach the host, e.g. `172.17.0.1`) so that only bridge containers, not the
+/// wider LAN, can reach it.
+///
+/// Fail-closed: if the gateway can't be determined or bound, the proxy does NOT
+/// start. Binding to all interfaces instead would expose the auth token to every
+/// process on the network, which defeats the point, so we refuse rather than
+/// silently degrade. Claude launches then fail to authenticate (connection
+/// refused), which is the safe failure.
+async fn bind_listener() -> Option<TcpListener> {
+    let Some(ip) = bridge_gateway_ip() else {
+        tracing::error!(
+            "claude auth proxy: could not determine the container bridge gateway; refusing to \
+             start (binding all interfaces would expose the auth token). Claude launches will not \
+             authenticate until this is resolved."
+        );
+        return None;
+    };
+    let addr = SocketAddr::new(ip, CLAUDE_PROXY_PORT);
+    match TcpListener::bind(addr).await {
+        Ok(listener) => {
+            tracing::info!(%addr, "claude auth proxy listening (bridge gateway only)");
+            Some(listener)
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                %addr,
+                "claude auth proxy: bridge-gateway bind failed; refusing to fall back to all \
+                 interfaces (would expose the auth token)"
+            );
+            None
+        }
+    }
+}
+
+/// The container engine's default bridge gateway IP (what `host-gateway`, and
+/// therefore the container, uses to reach the host). `None` if no engine, the
+/// engine can't be queried, or the output doesn't parse. Uses Docker's inspect
+/// format; other engines fall through to the all-interfaces bind.
+fn bridge_gateway_ip() -> Option<std::net::IpAddr> {
+    let engine = crate::launch::find_container_engine()?;
+    let output = std::process::Command::new(engine)
+        .args([
+            "network",
+            "inspect",
+            "bridge",
+            "--format",
+            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
 /// Never fails at the hyper layer: a forwarding error becomes a 502 so the
