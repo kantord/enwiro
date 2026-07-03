@@ -146,7 +146,7 @@ fn container_image_tag(environment_name: &str) -> String {
 /// `PATH` through `LaunchResolveParams` and probe with `which::which_in`;
 /// deferred while the isolation layer is experimental.
 #[cfg(feature = "container-wrap")]
-fn find_container_engine() -> Option<&'static str> {
+pub(crate) fn find_container_engine() -> Option<&'static str> {
     CONTAINER_ENGINES
         .into_iter()
         .find(|engine| which::which(engine).is_ok())
