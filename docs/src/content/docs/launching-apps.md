@@ -150,14 +150,18 @@ chmod 600 ~/.config/enwiro/claude_oauth_token
 
 With a token configured and an `enwiro/<env>` image that ships `claude`,
 `enw wrap claude <env>` authenticates through the proxy using your subscription.
-Only `claude` launches are routed this way; other commands never get the token.
+The routing is installed as a `claude` shim on the container's `PATH`, so running
+`claude` from a shell inside the environment (for example after `enw wrap kitty
+<env>`) works the same way. Only `claude` is affected; other commands are left
+alone.
 
 **First-run onboarding is skipped automatically** (see the note below), so the
 session lands straight at the prompt.
 
 This is **experimental and intended for your own, trusted environments only.**
-Known limits: the v1 proxy listens on all interfaces (any local process that can
-reach it can use your token), it protects the credential but not Claude's
+Known limits: the proxy is reachable by any container on the host's container
+bridge (it binds the bridge, not the wider network, but does not yet authenticate
+which container is calling), it protects the credential but not Claude's
 server-side tools such as web search (those run on Anthropic's infrastructure and
 never traverse the proxy), and running an agent against untrusted code in a shared
 kernel is not a strong security boundary. Treat it accordingly.
