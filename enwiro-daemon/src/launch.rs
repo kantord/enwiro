@@ -38,13 +38,6 @@ fn is_terminal(command: &str) -> bool {
     TERMINAL_BINARIES.contains(&command_basename(command))
 }
 
-/// True iff `command` (by basename) is the Claude Code CLI, which is the only
-/// launch routed through the host-side auth proxy.
-#[cfg(feature = "container-wrap")]
-fn is_claude(command: &str) -> bool {
-    command_basename(command) == "claude"
-}
-
 /// Decide how to launch `command` in the environment. Host path returns the
 /// command unchanged; container path returns `engine run ... <image> <command>`.
 //
@@ -72,6 +65,7 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
                         &image,
                         &params.env_path,
                         &params.env_name,
+                        claude_oauth_token().is_some(),
                     ),
                     env_vars: Vec::new(),
                 };
@@ -93,11 +87,11 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
     {
         let image = container_image_tag(&params.env_name);
         if image_exists(engine, &image) {
-            // A claude launch is routed through the host-side auth proxy (the
-            // token stays on the host, never in the container) — but only when a
-            // token is actually configured; otherwise claude just logs in.
-            let route_claude_via_proxy =
-                is_claude(&params.command) && claude_oauth_token().is_some();
+            // When a Claude token is configured, install the `claude` shim so any
+            // `claude` run *inside* the container (directly or from a shell) routes
+            // through the host proxy. Container-scoped, not command-scoped: the
+            // shim only affects `claude`, so wiring it for every launch is safe.
+            let inject_proxy_shim = claude_oauth_token().is_some();
             return LaunchResolveResult {
                 program: engine.to_string(),
                 args: build_container_argv(
@@ -107,7 +101,7 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
                     &params.command,
                     &params.args,
                     params.interactive,
-                    route_claude_via_proxy,
+                    inject_proxy_shim,
                 ),
                 // The container path injects `ENWIRO_ENV` *inside* the
                 // container via `-e` (see `build_container_argv`), so the host
@@ -163,10 +157,12 @@ fn build_terminal_container_args(
     image: &str,
     environment_path: &str,
     environment_name: &str,
+    inject_proxy_shim: bool,
 ) -> Vec<String> {
     let mut args = terminal_args.to_vec();
     args.push(engine.to_string());
-    // The inner command is a shell, not claude, so no proxy wiring is injected.
+    // The inner command is a shell; the claude shim (if injected) lets `claude`
+    // run from that shell route through the proxy.
     args.extend(build_container_argv(
         image,
         environment_path,
@@ -174,7 +170,7 @@ fn build_terminal_container_args(
         TERMINAL_CONTAINER_SHELL,
         &[],
         true,
-        false,
+        inject_proxy_shim,
     ));
     args
 }
@@ -214,7 +210,7 @@ fn build_container_argv(
     command: &str,
     child_args: &[String],
     interactive: bool,
-    route_claude_via_proxy: bool,
+    inject_proxy_shim: bool,
 ) -> Vec<String> {
     let mut argv = vec!["run".to_string(), "--rm".to_string()];
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
@@ -226,65 +222,96 @@ fn build_container_argv(
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
     argv.push(format!("ENWIRO_ENV={environment_name}"));
-    // Credential injection (issue #540): route claude at the host-side auth proxy
-    // instead of putting the real token in the container. The container gets only
-    // the proxy's base URL + a non-secret sentinel token; the daemon's proxy
-    // (`proxy.rs`) swaps the sentinel for the real `Authorization` on the host, so
-    // the credential never enters the container and can't be exfiltrated from it.
-    // `--add-host` makes `host.docker.internal` resolve to the host on Linux.
+    // Credential injection (issue #540): instead of putting the real token in the
+    // container, install a `claude` shim (materialized by the launch prelude into
+    // a PATH dir) that points claude at the host-side auth proxy. The daemon's
+    // proxy (`proxy.rs`) swaps the non-secret sentinel for the real
+    // `Authorization` on the host, so the credential never enters the container.
     //
-    // The sentinel goes in `CLAUDE_CODE_OAUTH_TOKEN` (not `ANTHROPIC_AUTH_TOKEN`):
-    // both make the CLI send a swappable `Bearer`, but `ANTHROPIC_AUTH_TOKEN` puts
-    // it in *gateway/API-billing* mode (drops the `oauth-2025-04-20` beta flag,
-    // shows "API Usage Billing"), whereas `CLAUDE_CODE_OAUTH_TOKEN` keeps
-    // *subscription* mode so the injected subscription token bills as intended.
-    if route_claude_via_proxy {
+    // Delivering it as a shim (not container-wide env) means any `claude` run in
+    // the container, directly or from a shell, is routed, while other processes'
+    // env stays clean. `--add-host` makes `host.docker.internal` resolve to the
+    // host so the shim's base URL is reachable.
+    if inject_proxy_shim {
         argv.push("--add-host".to_string());
         argv.push("host.docker.internal:host-gateway".to_string());
         argv.push("-e".to_string());
-        argv.push(format!(
-            "ANTHROPIC_BASE_URL=http://host.docker.internal:{}",
-            crate::proxy::CLAUDE_PROXY_PORT
-        ));
+        argv.push("ENWIRO_SHIMS=claude".to_string());
         argv.push("-e".to_string());
-        argv.push(format!(
-            "CLAUDE_CODE_OAUTH_TOKEN={}",
-            crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
-        ));
+        argv.push(format!("ENWIRO_SHIM_claude={}", claude_shim_script()));
     }
     argv.push(image.to_string());
-    // Seed a default `.claude.json` (only if absent) so an interactive claude
-    // skips the first-run onboarding wizard, then `exec` the real command.
-    // Claude has no env var / settings field for `hasCompletedOnboarding`
-    // (issue anthropics/claude-code#4714), so a file is the only lever; seeding
-    // it at start rather than baking it into the image keeps BYO images
-    // untouched. The seed is non-secret and the container mutates its own
-    // ephemeral copy (discarded on `--rm`); an image that ships its own
-    // `.claude.json` is left alone.
+    // Run the container command through a small `sh` prelude that (1) materializes
+    // any enwiro shims into a PATH dir and (2) seeds a default `.claude.json` to
+    // skip claude's first-run wizard, then `exec`s the real command. Doing this at
+    // start (rather than baking into the image) keeps BYO images untouched; the
+    // shims and seed are non-secret and live in the container's ephemeral fs.
     argv.push("sh".to_string());
     argv.push("-c".to_string());
-    argv.push(CLAUDE_ONBOARDING_SEED_SCRIPT.to_string());
+    argv.push(CONTAINER_PRELUDE_SCRIPT.to_string());
     argv.push("sh".to_string()); // $0 for the exec'd shell
     argv.push(command.to_string());
     argv.extend(child_args.iter().cloned());
     argv
 }
 
-/// `sh -c` script that seeds a default `.claude.json` (only when absent) then
-/// `exec`s the caller's command (`"$@"`, supplied after the `sh` `$0`), so a
-/// fresh container skips Claude Code's first-run wizard without baking anything
-/// into the image. Claude has no env var / settings field for this (issue
-/// anthropics/claude-code#4714), so the file is the only lever.
-///
-/// It marks BOTH gates: `hasCompletedOnboarding` (theme + welcome) and, for the
-/// container's working directory (`$(pwd)`, which enwiro sets to the env path via
-/// `-w`), `hasTrustDialogAccepted` (the "trust this folder" prompt). Claude's
-/// config path is `$CLAUDE_CONFIG_DIR/.claude.json` when set, else
-/// `$HOME/.claude.json` (home root, *not* a `.claude/` subdir) - verified against
-/// the CLI. The seed is non-secret and ephemeral; an image shipping its own
-/// `.claude.json` is left untouched.
+/// Directory the launch prelude writes enwiro shims into, prepended to `PATH`.
 #[cfg(feature = "container-wrap")]
-const CLAUDE_ONBOARDING_SEED_SCRIPT: &str = concat!(
+const SHIM_DIR: &str = "/tmp/enwiro-bin";
+
+/// The `claude` shim: a tiny script installed on `PATH` inside the container that
+/// points claude at the host auth proxy, then execs the *real* claude (found by
+/// scanning `PATH`, skipping the shim dir). The proxy base URL and the non-secret
+/// sentinel are baked in; the real token is never here. The sentinel goes in
+/// `CLAUDE_CODE_OAUTH_TOKEN` (not `ANTHROPIC_AUTH_TOKEN`) so the CLI stays in
+/// subscription-billing mode rather than switching to API-usage billing.
+#[cfg(feature = "container-wrap")]
+fn claude_shim_script() -> String {
+    format!(
+        concat!(
+            "#!/bin/sh\n",
+            "export ANTHROPIC_BASE_URL=http://host.docker.internal:{port}\n",
+            "export CLAUDE_CODE_OAUTH_TOKEN={sentinel}\n",
+            "real=''\n",
+            "oldifs=\"$IFS\"; IFS=:\n",
+            "for dir in $PATH; do\n",
+            "  [ \"$dir\" = {shim_dir} ] && continue\n",
+            "  if [ -x \"$dir/claude\" ]; then real=\"$dir/claude\"; break; fi\n",
+            "done\n",
+            "IFS=\"$oldifs\"\n",
+            "[ -n \"$real\" ] || {{ echo 'enwiro: real claude not found on PATH' >&2; exit 127; }}\n",
+            "exec \"$real\" \"$@\"\n",
+        ),
+        port = crate::proxy::CLAUDE_PROXY_PORT,
+        sentinel = crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN,
+        shim_dir = SHIM_DIR,
+    )
+}
+
+/// `sh -c` launch prelude, run before the container command. Two steps, then
+/// `exec "$@"` (the real command, supplied after the `sh` `$0`):
+///
+/// 1. **Shim materialization.** For each name in `$ENWIRO_SHIMS`, write the shim
+///    script from `$ENWIRO_SHIM_<name>` into [`SHIM_DIR`] and prepend that dir to
+///    `PATH`. The `eval` references the env var by name (it never inlines its
+///    contents), so shim bytes can't inject shell code. This is how `claude` gets
+///    routed through the proxy without setting its env container-wide.
+/// 2. **Onboarding seed.** Write a default `.claude.json` (only when absent) so a
+///    fresh container skips Claude's first-run wizard. Claude has no env/setting
+///    for this (issue anthropics/claude-code#4714), so the file is the only lever.
+///    It marks `hasCompletedOnboarding` (theme + welcome) and, for the working
+///    directory, `hasTrustDialogAccepted` (the "trust this folder" prompt).
+///    Claude's config is `$CLAUDE_CONFIG_DIR/.claude.json` when set, else
+///    `$HOME/.claude.json` (home root, not a `.claude/` subdir). An image that
+///    ships its own `.claude.json` is left untouched.
+///
+/// Everything written here is non-secret and lives in the container's ephemeral
+/// filesystem (gone on `--rm`).
+#[cfg(feature = "container-wrap")]
+const CONTAINER_PRELUDE_SCRIPT: &str = concat!(
+    r#"if [ -n "$ENWIRO_SHIMS" ]; then d=/tmp/enwiro-bin; mkdir -p "$d"; "#,
+    r#"for n in $ENWIRO_SHIMS; do eval "c=\${ENWIRO_SHIM_$n}"; printf '%s' "$c" > "$d/$n" && chmod +x "$d/$n"; done; "#,
+    r#"PATH="$d:$PATH"; export PATH; fi; "#,
     r#"if [ -n "$CLAUDE_CONFIG_DIR" ]; then f="$CLAUDE_CONFIG_DIR/.claude.json"; else f="$HOME/.claude.json"; fi; "#,
     r#"[ -f "$f" ] || { mkdir -p "$(dirname "$f")" && "#,
     r#"printf '{"hasCompletedOnboarding":true,"theme":"dark-ansi","projects":{"%s":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' "$(pwd)" > "$f"; }; "#,
@@ -419,57 +446,68 @@ mod tests {
         assert!(!argv.contains(&"-it".to_string()));
     }
 
+    // With the proxy shim enabled, the container gets `--add-host` + the shim
+    // env (`ENWIRO_SHIMS` + `ENWIRO_SHIM_claude`), NOT container-wide `ANTHROPIC_*`
+    // and never a real token. The shim script carries the proxy base URL + the
+    // non-secret sentinel.
     #[test]
-    fn is_claude_matches_by_basename() {
-        assert!(is_claude("claude"));
-        assert!(is_claude("/usr/local/bin/claude"));
-        assert!(!is_claude("bash"));
-        assert!(!is_claude("claude-code"));
-    }
-
-    // Routing claude via the proxy points the container at the proxy's base URL +
-    // a non-secret sentinel token (in `CLAUDE_CODE_OAUTH_TOKEN`, which keeps the
-    // CLI in subscription-billing mode). The real token stays on the host.
-    #[test]
-    fn container_argv_wires_claude_proxy_when_enabled() {
+    fn container_argv_injects_claude_shim_when_enabled() {
         let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, true);
-        assert!(
-            argv.windows(2).any(|w| w[0] == "-e"
-                && w[1]
-                    == format!(
-                        "ANTHROPIC_BASE_URL=http://host.docker.internal:{}",
-                        crate::proxy::CLAUDE_PROXY_PORT
-                    )),
-            "{argv:?}"
-        );
-        // The token env carries only the non-secret sentinel, never a real token.
-        assert!(
-            argv.windows(2).any(|w| w[0] == "-e"
-                && w[1]
-                    == format!(
-                        "CLAUDE_CODE_OAUTH_TOKEN={}",
-                        crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
-                    )),
-            "{argv:?}"
-        );
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--add-host" && w[1] == "host.docker.internal:host-gateway"),
             "{argv:?}"
         );
-        // No env var should carry anything but the sentinel as a token value.
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "ENWIRO_SHIMS=claude"),
+            "{argv:?}"
+        );
+        let shim = argv
+            .windows(2)
+            .find(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_SHIM_claude="))
+            .map(|w| w[1].clone())
+            .expect("shim env present");
+        assert!(
+            shim.contains(&format!(
+                "ANTHROPIC_BASE_URL=http://host.docker.internal:{}",
+                crate::proxy::CLAUDE_PROXY_PORT
+            )),
+            "{shim}"
+        );
+        assert!(
+            shim.contains(&format!(
+                "CLAUDE_CODE_OAUTH_TOKEN={}",
+                crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
+            )),
+            "{shim}"
+        );
+        // The proxy vars live only in the shim, never as container-wide env.
+        assert!(
+            !argv
+                .windows(2)
+                .any(|w| w[0] == "-e" && w[1].starts_with("ANTHROPIC_BASE_URL=")),
+            "{argv:?}"
+        );
+        // No real token anywhere.
         assert!(
             !argv.iter().any(|a| a.contains("ANTHROPIC_AUTH_TOKEN")),
             "{argv:?}"
         );
     }
 
-    // Without proxy routing (non-claude, or no token configured), no ANTHROPIC_*
-    // wiring is added.
+    // Without the proxy shim (no token configured), no shim env or `--add-host`
+    // is added. (The prelude script always mentions `ENWIRO_SHIM` as the reader,
+    // so check for the `-e` injection specifically, not the substring.)
     #[test]
     fn container_argv_no_proxy_when_disabled() {
         let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, false);
-        assert!(!argv.iter().any(|a| a.contains("ANTHROPIC_")), "{argv:?}");
+        assert!(
+            !argv
+                .windows(2)
+                .any(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_SHIM")),
+            "{argv:?}"
+        );
         assert!(!argv.iter().any(|a| a == "--add-host"), "{argv:?}");
     }
 
@@ -510,6 +548,7 @@ mod tests {
             "enwiro/my-proj",
             "/p",
             "my-proj",
+            false,
         );
         // The terminal's own args come first (kitty parses them), then the
         // container invocation for the inner shell.
