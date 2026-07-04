@@ -302,7 +302,9 @@ fn host_gid() -> u32 {
 /// scanning `PATH`, skipping the shim dir). The proxy base URL and the per-launch
 /// capability are baked in; the real token is never here. The capability goes in
 /// `CLAUDE_CODE_OAUTH_TOKEN` (not `ANTHROPIC_AUTH_TOKEN`) so the CLI stays in
-/// subscription-billing mode rather than switching to API-usage billing.
+/// subscription-billing mode rather than switching to API-usage billing. Also
+/// disables claude's self-updater: the container is ephemeral and non-root, so it
+/// has no write access to the image's npm prefix and the update would just fail.
 #[cfg(feature = "container-wrap")]
 fn claude_shim_script(capability: &str) -> String {
     format!(
@@ -310,6 +312,9 @@ fn claude_shim_script(capability: &str) -> String {
             "#!/bin/sh\n",
             "export ANTHROPIC_BASE_URL=http://host.containers.internal:{port}\n",
             "export CLAUDE_CODE_OAUTH_TOKEN={capability}\n",
+            // The container is ephemeral and non-root, so claude can't self-update
+            // (no write access to the image's npm prefix); skip the failing attempt.
+            "export DISABLE_AUTOUPDATER=1\n",
             "real=''\n",
             "oldifs=\"$IFS\"; IFS=:\n",
             "for dir in $PATH; do\n",
@@ -543,6 +548,9 @@ mod tests {
             capability.chars().all(|c| c.is_ascii_hexdigit()),
             "{capability}"
         );
+        // The container is ephemeral/non-root, so claude's self-updater can't
+        // write anywhere and would just fail; the shim disables it.
+        assert!(shim.contains("export DISABLE_AUTOUPDATER=1"), "{shim}");
         // The proxy vars live only in the shim, never as container-wide env.
         assert!(
             !argv
