@@ -93,6 +93,7 @@ impl<W: Write> CommandContext<W> {
         let flat_name = name.replace('/', "-");
         self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
+        self.write_external_paths_if_present(cookbook.as_ref(), name, &flat_name);
         self.write_garnish_gear(&env_path, &flat_name, cfg);
         mark_via_daemon(&flat_name, "active", enwiro_sdk::rpc::MarkSource::Auto);
         Ok(env)
@@ -180,6 +181,40 @@ impl<W: Write> CommandContext<W> {
             Ok(None) => {}
             Err(e) => {
                 tracing::debug!(error = %e, "Cookbook gear() returned error, continuing");
+            }
+        }
+    }
+
+    fn write_external_paths_if_present(
+        &self,
+        cookbook: &dyn CookbookTrait,
+        recipe: &str,
+        flat_name: &str,
+    ) {
+        match cookbook.external_paths(recipe) {
+            Ok(paths) if !paths.is_empty() => {
+                let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
+                let file_path = enwiro_sdk::external_paths::external_paths_dir(&env_dir).join(
+                    enwiro_sdk::external_paths::external_paths_filename(cookbook.name()),
+                );
+                let data = enwiro_sdk::external_paths::ExternalPathsFileData {
+                    version: enwiro_sdk::external_paths::SCHEMA_VERSION,
+                    paths,
+                };
+                match serde_json::to_vec(&data) {
+                    Ok(bytes) => {
+                        if let Err(e) = enwiro_sdk::fs::atomic_write(&file_path, &bytes) {
+                            tracing::debug!(error = %e, "Failed to write external-paths file, continuing");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Failed to serialise external-paths JSON, continuing");
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(error = %e, "Cookbook external_paths() returned error, continuing");
             }
         }
     }

@@ -50,7 +50,10 @@ fn is_terminal(command: &str) -> bool {
 // container branch. Replace both with a general launch-template registry
 // (binary-name -> strategy) so new terminals and per-app rules don't require
 // editing this function.
-pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
+pub fn resolve_launch(
+    params: &LaunchResolveParams,
+    #[allow(unused_variables)] workspaces_directory: &std::path::Path,
+) -> LaunchResolveResult {
     // Terminal template (issue #540): the terminal runs on the host; if the env
     // containerizes, its inner command is the container invocation for the shell
     // (`kitty <engine> run ... <image> <shell>`), otherwise it uses `$SHELL`.
@@ -70,6 +73,7 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
                         &params.env_path,
                         &params.env_name,
                         claude_oauth_token().is_some(),
+                        workspaces_directory,
                     ),
                     env_vars: Vec::new(),
                 };
@@ -106,6 +110,7 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
                     &params.args,
                     params.interactive,
                     inject_proxy_shim,
+                    workspaces_directory,
                 ),
                 // The container path injects `ENWIRO_ENV` *inside* the
                 // container via `-e` (see `build_container_argv`), so the host
@@ -199,6 +204,7 @@ fn build_terminal_container_args(
     environment_path: &str,
     environment_name: &str,
     inject_proxy_shim: bool,
+    workspaces_directory: &std::path::Path,
 ) -> Vec<String> {
     let mut args = terminal_args.to_vec();
     args.push(engine.to_string());
@@ -212,6 +218,7 @@ fn build_terminal_container_args(
         &[],
         true,
         inject_proxy_shim,
+        workspaces_directory,
     ));
     args
 }
@@ -239,6 +246,7 @@ fn image_exists(engine: &str, image: &str) -> bool {
 /// `-v src:dst` so a path containing a colon is not mis-parsed as the
 /// `-v`-syntax field separator.
 #[cfg(feature = "container-wrap")]
+#[allow(clippy::too_many_arguments)]
 fn build_container_argv(
     image: &str,
     environment_path: &str,
@@ -247,6 +255,7 @@ fn build_container_argv(
     child_args: &[String],
     interactive: bool,
     inject_proxy_shim: bool,
+    workspaces_directory: &std::path::Path,
 ) -> Vec<String> {
     let mut argv = vec!["run".to_string(), "--rm".to_string()];
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
@@ -254,6 +263,25 @@ fn build_container_argv(
     argv.push(format!(
         "type=bind,source={environment_path},target={environment_path}"
     ));
+    // Cookbooks may declare that this environment depends on additional host
+    // paths beyond its own directory to function -- e.g. a git worktree's
+    // `.git` is a pointer into a separate main repo holding the shared object
+    // database. The daemon has no idea *why* a path is needed (that's the
+    // cookbook's tool-specific business); it just mounts whatever was
+    // declared, at the same absolute path on both sides (required for tools
+    // like git that hard-code absolute paths into their own metadata).
+    //
+    // Declarations are written under `<workspaces_directory>/<environment_name>`
+    // (see `write_external_paths_if_present` in the host CLI), not under
+    // `environment_path`: an env's actual project location is whatever the
+    // cookbook returned (a bind-mounted clone, a worktree elsewhere, anything),
+    // while enwiro's own per-env metadata always lives in its managed
+    // workspaces directory, one level above the project-pointing symlink.
+    let env_dir = workspaces_directory.join(environment_name);
+    for path in enwiro_sdk::external_paths::load_external_paths(&env_dir) {
+        argv.push("--mount".to_string());
+        argv.push(format!("type=bind,source={path},target={path}"));
+    }
     argv.push("-w".to_string());
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
@@ -442,13 +470,16 @@ mod terminal_tests {
     fn host_terminal_runs_directly_with_enwiro_env() {
         // No `enwiro/__nope__` image (and/or feature off) → host terminal: run
         // it directly so it uses `$SHELL`; cwd + ENWIRO_ENV applied by the client.
-        let res = resolve_launch(&LaunchResolveParams {
-            env_name: "__nope__".to_string(),
-            env_path: "/tmp".to_string(),
-            command: "kitty".to_string(),
-            args: vec![],
-            interactive: false,
-        });
+        let res = resolve_launch(
+            &LaunchResolveParams {
+                env_name: "__nope__".to_string(),
+                env_path: "/tmp".to_string(),
+                command: "kitty".to_string(),
+                args: vec![],
+                interactive: false,
+            },
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         assert_eq!(res.program, "kitty");
         assert!(res.args.is_empty());
         assert_eq!(
@@ -494,6 +525,54 @@ mod tests {
         assert_eq!(sanitize_image_tag_component("my-proj"), "my-proj");
     }
 
+    // A cookbook-declared external path (e.g. a git worktree's main repo,
+    // reported by the cookbook -- see `enwiro_sdk::external_paths`) gets
+    // mounted alongside the env's own path. The daemon has no idea *why* the
+    // path was declared; it just mounts whatever it finds.
+    #[test]
+    fn container_argv_mounts_a_declared_external_path() {
+        let main_repo = tempfile::tempdir().unwrap();
+        let env_path = tempfile::tempdir().unwrap();
+        // Declarations live under `<workspaces_directory>/<environment_name>`
+        // (enwiro's own per-env metadata dir, e.g. `~/.enwiro_envs/<name>`),
+        // not under the project's own path -- the project might be a
+        // bind-mounted clone or worktree anywhere on disk.
+        let workspaces_dir = tempfile::tempdir().unwrap();
+        let env_dir = workspaces_dir.path().join("x");
+        let data = enwiro_sdk::external_paths::ExternalPathsFileData {
+            version: enwiro_sdk::external_paths::SCHEMA_VERSION,
+            paths: vec![main_repo.path().to_str().unwrap().to_string()],
+        };
+        std::fs::create_dir_all(enwiro_sdk::external_paths::external_paths_dir(&env_dir)).unwrap();
+        std::fs::write(
+            enwiro_sdk::external_paths::external_paths_dir(&env_dir)
+                .join(enwiro_sdk::external_paths::external_paths_filename("git")),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .unwrap();
+
+        let argv = build_container_argv(
+            "enwiro/x",
+            env_path.path().to_str().unwrap(),
+            "x",
+            "bash",
+            &[],
+            true,
+            false,
+            workspaces_dir.path(),
+        );
+        let expected = format!(
+            "type=bind,source={},target={}",
+            main_repo.path().display(),
+            main_repo.path().display()
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--mount" && w[1] == expected),
+            "{argv:?}"
+        );
+    }
+
     #[test]
     fn container_argv_mounts_env_path_at_same_path_and_sets_env() {
         let argv = build_container_argv(
@@ -504,6 +583,7 @@ mod tests {
             &["-l".to_string()],
             true,
             false,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
         );
         // Before the image: run flags + bind mount + cwd + ENWIRO_ENV (plus
         // `--user`/HOME on Linux, checked separately).
@@ -536,7 +616,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn container_argv_runs_as_host_uid_on_linux() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, false);
+        let argv = build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "bash",
+            &[],
+            true,
+            false,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--user" && w[1] == format!("{}:{}", host_uid(), host_gid())),
@@ -550,7 +639,16 @@ mod tests {
     // workspace-trust) without baking anything into the image.
     #[test]
     fn container_argv_seeds_onboarding_then_execs_command() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, false);
+        let argv = build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "claude",
+            &[],
+            true,
+            false,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         let script = &argv[argv.iter().position(|a| a == "-c").unwrap() + 1];
         assert!(script.contains("hasCompletedOnboarding"), "{script}");
         // both onboarding gates: theme/welcome AND per-workspace trust.
@@ -567,7 +665,16 @@ mod tests {
 
     #[test]
     fn container_argv_uses_dash_i_when_not_a_tty() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "echo", &[], false, false);
+        let argv = build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "echo",
+            &[],
+            false,
+            false,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         assert!(argv.contains(&"-i".to_string()));
         assert!(!argv.contains(&"-it".to_string()));
     }
@@ -578,7 +685,16 @@ mod tests {
     // freshly minted per-launch capability (not a fixed sentinel).
     #[test]
     fn container_argv_injects_claude_shim_when_enabled() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, true);
+        let argv = build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "claude",
+            &[],
+            true,
+            true,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--add-host" && w[1] == "host.containers.internal:host-gateway"),
@@ -642,6 +758,7 @@ mod tests {
                 .unwrap()
                 .to_string()
         };
+        let workspaces_dir = std::path::Path::new("/nonexistent-workspaces-dir");
         let first = extract_capability(&build_container_argv(
             "enwiro/x",
             "/p",
@@ -650,6 +767,7 @@ mod tests {
             &[],
             true,
             true,
+            workspaces_dir,
         ));
         let second = extract_capability(&build_container_argv(
             "enwiro/x",
@@ -659,6 +777,7 @@ mod tests {
             &[],
             true,
             true,
+            workspaces_dir,
         ));
         assert_ne!(first, second);
     }
@@ -668,7 +787,16 @@ mod tests {
     // so check for the `-e` injection specifically, not the substring.)
     #[test]
     fn container_argv_no_proxy_when_disabled() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, false);
+        let argv = build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "bash",
+            &[],
+            true,
+            false,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         assert!(
             !argv
                 .windows(2)
@@ -683,7 +811,16 @@ mod tests {
     #[test]
     fn container_argv_mount_survives_colon_in_path() {
         let colon_path = "/home/u/.enwiro_envs/proj:1/proj:1";
-        let argv = build_container_argv("enwiro/x", colon_path, "x", "bash", &[], true, false);
+        let argv = build_container_argv(
+            "enwiro/x",
+            colon_path,
+            "x",
+            "bash",
+            &[],
+            true,
+            false,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         // The path appears verbatim inside a single `--mount` value...
         let mount_idx = argv
             .iter()
@@ -716,6 +853,7 @@ mod tests {
             "/p",
             "my-proj",
             false,
+            std::path::Path::new("/nonexistent-workspaces-dir"),
         );
         // The terminal's own args come first (kitty parses them), then the
         // container invocation for the inner shell.
@@ -729,13 +867,16 @@ mod tests {
     #[test]
     fn host_path_returns_command_unchanged_when_no_image() {
         // No `enwiro/__nope__` image exists → host path.
-        let res = resolve_launch(&LaunchResolveParams {
-            env_name: "__nope__".to_string(),
-            env_path: "/tmp".to_string(),
-            command: "echo".to_string(),
-            args: vec!["hi".to_string()],
-            interactive: false,
-        });
+        let res = resolve_launch(
+            &LaunchResolveParams {
+                env_name: "__nope__".to_string(),
+                env_path: "/tmp".to_string(),
+                command: "echo".to_string(),
+                args: vec!["hi".to_string()],
+                interactive: false,
+            },
+            std::path::Path::new("/nonexistent-workspaces-dir"),
+        );
         assert_eq!(res.program, "echo");
         assert_eq!(res.args, vec!["hi".to_string()]);
         assert_eq!(

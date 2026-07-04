@@ -50,6 +50,7 @@ enum EnwiroCookbookGithub {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
     Gear(GearArgs),
+    ExternalPaths(ExternalPathsArgs),
     Metadata,
     Listen,
 }
@@ -64,6 +65,11 @@ pub struct CookArgs {
 
 #[derive(clap::Args)]
 pub struct GearArgs {
+    recipe_name: String,
+}
+
+#[derive(clap::Args)]
+pub struct ExternalPathsArgs {
     recipe_name: String,
 }
 
@@ -854,6 +860,32 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
         number,
         &mut std::io::stdout(),
     )
+}
+
+/// Every recipe here cooks to a git worktree (`cook_pr`/`cook_issue`); its
+/// `.git` is a pointer into `repo_config.local_path`'s own
+/// `.git/worktrees/<name>`, which holds the shared object database and refs
+/// the worktree depends on. Report that path so the isolation layer can
+/// mount it alongside the worktree -- this cookbook has no notion of *why*
+/// that's needed (containers, or anything else). Unlike the plain-git
+/// cookbook, there's no "base repo" recipe here to special-case: every PR
+/// and issue recipe is a worktree.
+fn resolve_external_paths(recipe_name: &str) -> anyhow::Result<Vec<String>> {
+    let (repo_str, _number) = parse_recipe_name(recipe_name)?;
+    let repo_config = resolve_repo_config(repo_str)?;
+    Ok(vec![
+        repo_config
+            .local_path
+            .to_str()
+            .context("Could not convert repo local path to string")?
+            .to_string(),
+    ])
+}
+
+fn external_paths(args: ExternalPathsArgs) -> anyhow::Result<()> {
+    let paths = resolve_external_paths(&args.recipe_name)?;
+    println!("{}", serde_json::to_string(&paths)?);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1709,6 +1741,9 @@ fn main() -> anyhow::Result<()> {
         EnwiroCookbookGithub::Gear(args) => {
             let config = read_config()?;
             gear(&config, args)?;
+        }
+        EnwiroCookbookGithub::ExternalPaths(args) => {
+            external_paths(args)?;
         }
         EnwiroCookbookGithub::Metadata => {
             println!(

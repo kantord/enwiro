@@ -8,6 +8,7 @@ pub mod adapter;
 pub mod client;
 pub mod config;
 pub mod cookbook;
+pub mod external_paths;
 pub mod fs;
 pub mod garnish;
 pub mod gear;

@@ -48,6 +48,18 @@ pub trait CookbookTrait {
     fn gear(&self, _recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
         Ok(None)
     }
+    /// Return host paths (beyond the env's own project directory) this
+    /// recipe's environment depends on to function -- e.g. a git worktree
+    /// needs its main repo's `.git` alongside it. The cookbook reports
+    /// plain paths only: it has no notion of *why* a consumer needs them
+    /// (bind-mounting into a container, or nothing at all on the host
+    /// path). If non-empty after cooking, written to
+    /// `<env>/external-paths.d/cookbook-<name>.json`, where the env-side
+    /// reader (`enwiro_sdk::external_paths::load_external_paths`) merges
+    /// every cookbook's contribution.
+    fn external_paths(&self, _recipe: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 /// Sort cookbooks by priority (lower first), then alphabetically by name.
@@ -358,6 +370,26 @@ impl CookbookTrait for RpcCookbookClient {
             }
         }
     }
+
+    /// Best-effort `external-paths <recipe>` via the daemon. Any failure
+    /// path (cookbook doesn't implement it, exec error, malformed JSON)
+    /// degrades to `Ok(Vec::new())` -- same contract as `gear`.
+    fn external_paths(&self, recipe: &str) -> anyhow::Result<Vec<String>> {
+        let stdout = match self.invoke("external-paths", vec![recipe.to_string()]) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths RPC failed");
+                return Ok(Vec::new());
+            }
+        };
+        match serde_json::from_str::<Vec<String>>(&stdout) {
+            Ok(paths) => Ok(paths),
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths stdout was not valid JSON");
+                Ok(Vec::new())
+            }
+        }
+    }
 }
 
 impl CookbookTrait for CookbookClient {
@@ -435,6 +467,32 @@ impl CookbookTrait for CookbookClient {
             Err(e) => {
                 tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear stdout was not valid JSON");
                 Ok(None)
+            }
+        }
+    }
+
+    /// Invoke the cookbook binary's optional `external-paths <recipe>`
+    /// subcommand and parse its stdout as a JSON string array. Returns
+    /// `Ok(Vec::new())` for any failure (old cookbook that doesn't
+    /// implement it, exec error, malformed JSON) -- same contract as `gear`.
+    fn external_paths(&self, recipe: &str) -> anyhow::Result<Vec<String>> {
+        let output = match self.spawn_with_payload(&["external-paths", recipe]) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths exec failed");
+                return Ok(Vec::new());
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::debug!(cookbook = %self.plugin.name, recipe = %recipe, %stderr, "Cookbook external-paths subcommand returned non-zero");
+            return Ok(Vec::new());
+        }
+        match serde_json::from_slice::<Vec<String>>(&output.stdout) {
+            Ok(paths) => Ok(paths),
+            Err(e) => {
+                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths stdout was not valid JSON");
+                Ok(Vec::new())
             }
         }
     }

@@ -207,6 +207,7 @@ fn repo_activity_epoch(repo: &Repository) -> i64 {
 enum EnwiroCookbookGit {
     ListRecipes(ListRecipesArgs),
     Cook(CookArgs),
+    ExternalPaths(ExternalPathsArgs),
     Metadata,
     Listen,
 }
@@ -218,6 +219,11 @@ pub struct ListRecipesArgs {}
 
 #[derive(clap::Args)]
 pub struct CookArgs {
+    recipe_name: String,
+}
+
+#[derive(clap::Args)]
+pub struct ExternalPathsArgs {
     recipe_name: String,
 }
 
@@ -519,6 +525,60 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A branch recipe's env is a git worktree; its `.git` is a pointer into
+/// the base repo's own `.git/worktrees/<name>`, which holds the shared
+/// object database and refs the worktree depends on. Report the base repo's
+/// path so the isolation layer can mount it alongside the worktree -- this
+/// cookbook has no notion of *why* that's needed (containers, or anything
+/// else). A base repo recipe's env already *is* the repo, so it needs
+/// nothing extra.
+///
+/// This is called as a fresh process invocation strictly *after* `cook` has
+/// already created the worktree (see `write_external_paths_if_present` in
+/// the host CLI), by which point the branch is checked out -- and a checked-
+/// out branch's compound `repo@branch` key is deliberately absent from
+/// `build_repository_hashmap` (`discover_branch_recipes` skips already-
+/// checked-out branches, `discover_worktree_recipes` skips the `enwiro-`-
+/// prefixed worktree itself), so looking up `recipe_name` directly there
+/// would always fail. The base repo's own key has no such lifecycle and is
+/// always resolvable, so resolve through that instead.
+fn resolve_external_paths(
+    config: &ConfigurationValues,
+    recipe_name: &str,
+) -> anyhow::Result<Vec<String>> {
+    if is_base_repo_recipe(recipe_name) {
+        return Ok(Vec::new());
+    }
+    let (repo_name, _branch) = recipe_name
+        .split_once('@')
+        .context("Branch recipe name must contain '@'")?;
+    let recipes = build_repository_hashmap(config)?;
+    let repo_recipe = recipes
+        .get(repo_name)
+        .with_context(|| format!("Could not find base repo recipe {}", repo_name))?;
+    let RecipeInfo::ExistingRepo { repo, .. } = repo_recipe else {
+        anyhow::bail!(
+            "Expected '{}' to be a base repo recipe, found a branch recipe",
+            repo_name
+        );
+    };
+    let workdir = repo
+        .workdir()
+        .context("Could not get working directory of repo")?
+        .to_str()
+        .context("Could not convert repo path to string")?;
+    // `Repository::workdir()` always returns a trailing separator; trim it
+    // so this matches the plain, separator-free form the daemon's own
+    // `environment_path` mount uses (same absolute path, just normalized).
+    Ok(vec![workdir.trim_end_matches('/').to_string()])
+}
+
+fn external_paths(config: &ConfigurationValues, args: ExternalPathsArgs) -> anyhow::Result<()> {
+    let paths = resolve_external_paths(config, &args.recipe_name)?;
+    println!("{}", serde_json::to_string(&paths)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,6 +763,52 @@ mod tests {
         assert!(result.exists(), "Worktree path should exist on disk");
         let wt_repo = Repository::open(&result).unwrap();
         assert!(wt_repo.is_worktree(), "Should be a git worktree");
+    }
+
+    // The host CLI calls `external_paths` as a fresh, separate process
+    // invocation strictly *after* `cook` already created the worktree (see
+    // `write_external_paths_if_present`) -- so this test cooks first, then
+    // resolves, to match the real production ordering. A naive
+    // `resolve_external_paths` call against the pre-cook state (branch not
+    // yet checked out) would pass even with the bug this test guards
+    // against, since the compound `repo@branch` key is only hidden from
+    // `build_repository_hashmap` *after* the branch is checked out.
+    #[test]
+    fn test_external_paths_reports_the_main_repo_for_an_already_cooked_branch_recipe() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = create_repo_with_commit(&repo_path);
+
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-x", &head, false).unwrap();
+
+        let wt_dir = tmp.path().join("worktrees");
+        let config = config_with_worktree_dir(
+            tmp.path().join("*").to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+        );
+
+        // Cook first, exactly like the real `cook` subcommand does.
+        resolve_recipe_path(&config, "my-project@feature-x").unwrap();
+
+        let paths = resolve_external_paths(&config, "my-project@feature-x").unwrap();
+
+        assert_eq!(paths, vec![repo_path.to_str().unwrap().to_string()]);
+    }
+
+    #[test]
+    fn test_external_paths_is_empty_for_a_base_repo_recipe() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        Repository::init(&repo_path).unwrap();
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+
+        let paths = resolve_external_paths(&config, "my-project").unwrap();
+
+        assert!(paths.is_empty(), "{paths:?}");
     }
 
     #[test]
@@ -1346,6 +1452,10 @@ fn main() -> anyhow::Result<()> {
         EnwiroCookbookGit::Cook(args) => {
             let config = read_config()?;
             cook(&config, args)?;
+        }
+        EnwiroCookbookGit::ExternalPaths(args) => {
+            let config = read_config()?;
+            external_paths(&config, args)?;
         }
         EnwiroCookbookGit::Metadata => {
             println!(
