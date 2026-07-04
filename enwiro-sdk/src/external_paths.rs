@@ -72,21 +72,13 @@ pub struct ExternalPathsFileData {
 /// default).
 pub fn load_external_paths(env_dir: &Path) -> Vec<String> {
     let dir = external_paths_dir(env_dir);
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+    let files = match crate::dropin::list_json_files(&dir) {
+        Ok(files) => files,
         Err(err) => {
             tracing::warn!(error = %err, dir = %dir.display(), "Could not read external-paths.d, continuing");
             return Vec::new();
         }
     };
-
-    let mut files: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    files.sort();
 
     let mut paths = Vec::new();
     for file in files {
