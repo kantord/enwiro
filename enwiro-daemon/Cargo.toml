@@ -22,6 +22,8 @@ container-wrap = [
     "dep:hyper",
     "dep:hyper-util",
     "dep:reqwest",
+    "dep:rand",
+    "dep:subtle",
 ]
 
 [dependencies]
@@ -48,6 +50,8 @@ http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", default-features = false, features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2"], optional = true }
+rand = { version = "0.9", optional = true }
+subtle = { version = "2", optional = true }
 
 [dev-dependencies]
 proptest = "1"

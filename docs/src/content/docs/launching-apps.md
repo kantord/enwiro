@@ -83,7 +83,10 @@ When both hold, the daemon returns a container invocation roughly equivalent to:
   enwiro/<env-name> <command> [args...]
 ```
 
-- **Engine** is auto-detected: `podman` is preferred, then `docker`.
+- **Engine**: Podman only. (Rootless Docker lacks `--userns=keep-id`, which the
+  non-root-user handling below relies on, and rootless Podman's networking has
+  no host-bindable "bridge gateway" the way Docker's does, so supporting both
+  would mean two silently-different code paths behind one build flag.)
 - The project directory is bind-mounted at the same path it has on the host (and
   used as the working directory), so paths match and file watching/HMR work on a
   Linux host. A `--mount` is used rather than `-v src:dst` so a path containing a
@@ -113,7 +116,7 @@ To build just the daemon by hand instead:
 just install-dev
 
 # 2. Create a trigger image for a simple-named environment, e.g. "my-project"
-echo 'FROM debian:stable-slim' | docker build -t enwiro/my-project -
+echo 'FROM debian:stable-slim' | podman build -t enwiro/my-project -
 
 # 3. Launch into it: you land in the container, at the bind-mounted project dir
 enw wrap bash my-project
@@ -123,7 +126,7 @@ enw wrap bash some-other-env
 ```
 
 To turn the container path off again for an environment, remove its image
-(`docker rmi enwiro/my-project`).
+(`podman rmi enwiro/my-project`).
 
 ### Running Claude Code in isolation
 
@@ -136,9 +139,10 @@ approach would inject your token as an environment variable, but anything runnin
 in the container (including the agent, if it is led astray by a prompt injection)
 could then read and exfiltrate it. Instead, the daemon runs a small host-side
 auth proxy: a `claude` launch is pointed at it via `ANTHROPIC_BASE_URL` and given
-a non-secret sentinel token, and the proxy swaps in your real token on the host
-before forwarding to Anthropic. **The real credential never enters the
-container.** Configure it once:
+a random capability token minted fresh for that launch, and the proxy swaps in
+your real token on the host before forwarding to Anthropic, rejecting any request
+that doesn't present a capability it minted itself. **The real credential never
+enters the container.** Configure it once:
 
 ```sh
 # Mint a long-lived token tied to your subscription, then store it host-side:
@@ -159,12 +163,12 @@ alone.
 session lands straight at the prompt.
 
 This is **experimental and intended for your own, trusted environments only.**
-Known limits: the proxy is reachable by any container on the host's container
-bridge (it binds the bridge, not the wider network, but does not yet authenticate
-which container is calling), it protects the credential but not Claude's
-server-side tools such as web search (those run on Anthropic's infrastructure and
-never traverse the proxy), and running an agent against untrusted code in a shared
-kernel is not a strong security boundary. Treat it accordingly.
+Known limits: a capability, once minted, stays valid for the daemon's lifetime
+(no per-container revocation or expiry yet), it protects the credential but not
+Claude's server-side tools such as web search (those run on Anthropic's
+infrastructure and never traverse the proxy), and running an agent against
+untrusted code in a shared kernel is not a strong security boundary. Treat it
+accordingly.
 
 ## Notes and limits
 
