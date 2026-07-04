@@ -3,9 +3,9 @@
 //! A prompt-injected agent in the container could read a real OAuth token if we
 //! injected one as an env var. This proxy keeps the real token on the *host*: the
 //! container is pointed at `ANTHROPIC_BASE_URL=http://host.docker.internal:<port>`
-//! with a throwaway sentinel `CLAUDE_CODE_OAUTH_TOKEN`, and this proxy swaps the
-//! dummy `Authorization` header for the real one before forwarding to Anthropic.
-//! The credential never enters the container, so it cannot be exfiltrated there.
+//! with a per-launch random capability token, and this proxy swaps that bearer
+//! for the real one before forwarding to Anthropic. The credential never enters
+//! the container, so it cannot be exfiltrated there.
 //!
 //! It is a transparent pass-through: only `Authorization` is rewritten, every
 //! other header and the body are forwarded verbatim (the Claude Code harness
@@ -16,35 +16,111 @@
 //! cannot reach it; if that address can't be determined or bound it fails closed
 //! (does not start) rather than exposing the token more widely.
 //!
-//! v1 caveats: single global token; any *container* on the bridge can still reach
-//! the proxy and spend inference quota (the credential itself is never exposed;
-//! per-container auth is a follow-up); and it does not defend against server-side
-//! tools (`web_search` runs on Anthropic infra and never traverses this proxy).
+//! **Capability auth (this module's access control):** the bridge-gateway bind
+//! alone doesn't stop other *local* things from reaching the proxy — any process
+//! on the bridge, or (bind-address-independent) any local process/hostile browser
+//! tab via DNS rebinding, same class of bug as classic unauthenticated Jupyter
+//! servers. So every request must present a bearer token this daemon itself
+//! minted for that specific launch; anything else gets 401 before the real
+//! credential is ever used. Tokens are opaque, random, held in memory only (no
+//! disk persistence, no cross-restart carryover), and compared in constant time.
+//!
+//! v1 caveats: a capability is delivered to a container's `claude` shim and
+//! remains valid for the daemon's lifetime (no per-container revocation yet, no
+//! expiry); it does not defend against server-side tools (`web_search` runs on
+//! Anthropic infra and never traverses this proxy); and it does not by itself
+//! stop an *authorized* (capability-holding) but compromised claude process.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::{Mutex, OnceLock};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
+use hyper::header::HeaderMap;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 
 /// Port the daemon's Claude auth proxy listens on. Shared with `launch.rs`,
 /// which points the container's `ANTHROPIC_BASE_URL` at it.
 pub(crate) const CLAUDE_PROXY_PORT: u16 = 8909;
 
-/// Sentinel `ANTHROPIC_AUTH_TOKEN` handed to the container so Claude Code enters
-/// gateway mode and sends a request; the proxy replaces it with the real token.
-/// Non-secret by design.
-pub(crate) const CLAUDE_PROXY_SENTINEL_TOKEN: &str = "enwiro-proxy";
-
 const UPSTREAM: &str = "https://api.anthropic.com";
+
+/// Length, in bytes, of a minted capability token before hex-encoding (32 bytes
+/// = 256 bits, comfortably above the ~128-bit floor for a bearer secret).
+const CAPABILITY_BYTES: usize = 32;
+
+/// Capability tokens currently valid for use against this proxy, one per launch
+/// that was given the claude shim. In-memory only: cleared on daemon restart:
+/// there is no persistence and (yet) no per-container revocation, so a token
+/// stays valid for the daemon's lifetime once minted. The set is expected to
+/// stay tiny (proportional to concurrently-running enwiro-launched containers).
+fn capabilities() -> &'static Mutex<HashSet<String>> {
+    static CAPABILITIES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CAPABILITIES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Mint a fresh random capability token, register it as valid, and return it for
+/// the caller to hand to exactly one launch (via the claude shim). Never returns
+/// a token that isn't also recorded as valid, so every minted token authorizes
+/// immediately.
+pub(crate) fn mint_capability() -> String {
+    let mut bytes = [0u8; CAPABILITY_BYTES];
+    rand::fill(&mut bytes);
+    let token = hex_encode(&bytes);
+    capabilities()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(token.clone());
+    token
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// True iff `headers` carries `Authorization: Bearer <token>` for a token this
+/// daemon minted. Compares in constant time (no early-exit on the first
+/// differing byte, which would otherwise leak timing information about how much
+/// of a guess matched) and checks every registered capability rather than
+/// short-circuiting on the first candidate.
+fn is_authorized(headers: &HeaderMap) -> bool {
+    let Some(presented) = bearer_token(headers) else {
+        return false;
+    };
+    let presented = presented.as_bytes();
+    let tokens = capabilities()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut valid = subtle::Choice::from(0u8);
+    for token in tokens.iter() {
+        // `ct_eq` requires equal-length inputs; a length mismatch alone isn't
+        // secret, so it's fine to check it (and skip) before the constant-time
+        // byte comparison.
+        if token.len() == presented.len() {
+            valid |= token.as_bytes().ct_eq(presented);
+        }
+    }
+    valid.into()
+}
+
+/// Extract the bearer value from an `Authorization: Bearer <token>` header, or
+/// `None` if absent/malformed.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
 
 type ProxyBody = BoxBody<Bytes, std::io::Error>;
 
@@ -134,12 +210,16 @@ fn bridge_gateway_ip() -> Option<std::net::IpAddr> {
     String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
-/// Never fails at the hyper layer: a forwarding error becomes a 502 so the
-/// connection closes cleanly.
+/// Never fails at the hyper layer: an unauthorized request becomes a 401 and a
+/// forwarding error becomes a 502, so the connection closes cleanly either way.
 async fn handle(
     request: Request<Incoming>,
     client: reqwest::Client,
 ) -> Result<Response<ProxyBody>, Infallible> {
+    if !is_authorized(request.headers()) {
+        tracing::warn!("claude auth proxy: rejected request with no valid capability");
+        return Ok(unauthorized_response());
+    }
     match forward(request, client).await {
         Ok(response) => Ok(response),
         Err(error) => {
@@ -154,6 +234,17 @@ async fn handle(
                 .expect("static 502 response builds"))
         }
     }
+}
+
+/// A bare 401 for a request that didn't present a valid capability. Per RFC
+/// 6750, a bearer-auth failure carries `WWW-Authenticate: Bearer`.
+fn unauthorized_response() -> Response<ProxyBody> {
+    let body = BodyExt::boxed(Full::new(Bytes::new()).map_err(|never: Infallible| match never {}));
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(hyper::header::WWW_AUTHENTICATE, "Bearer")
+        .body(body)
+        .expect("static 401 response builds")
 }
 
 /// Forward one request to Anthropic with the real `Authorization`, streaming the
@@ -208,4 +299,60 @@ async fn forward(
         .map(|chunk| chunk.map(Frame::data).map_err(std::io::Error::other));
     let body = BodyExt::boxed(StreamBody::new(stream));
     Ok(builder.body(body)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            hyper::header::AUTHORIZATION,
+            format!("Bearer {token}").parse().unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn minted_capability_is_hex_and_correct_length() {
+        let token = mint_capability();
+        assert_eq!(token.len(), CAPABILITY_BYTES * 2, "{token}");
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{token}");
+    }
+
+    #[test]
+    fn mint_produces_distinct_tokens() {
+        assert_ne!(mint_capability(), mint_capability());
+    }
+
+    #[test]
+    fn a_minted_capability_authorizes() {
+        let token = mint_capability();
+        assert!(is_authorized(&bearer_headers(&token)));
+    }
+
+    #[test]
+    fn an_unminted_token_does_not_authorize() {
+        // Exercises the shared, process-wide capability set (other tests in this
+        // module mint real tokens into it), so use a value distinct from any real
+        // 64-hex-char token: real capabilities are exactly `CAPABILITY_BYTES * 2`
+        // hex characters, this deliberately isn't.
+        assert!(!is_authorized(&bearer_headers("not-a-real-capability")));
+    }
+
+    #[test]
+    fn missing_authorization_header_does_not_authorize() {
+        assert!(!is_authorized(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn non_bearer_authorization_does_not_authorize() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            hyper::header::AUTHORIZATION,
+            "Basic dXNlcjpwYXNz".parse().unwrap(),
+        );
+        assert!(!is_authorized(&headers));
+    }
 }

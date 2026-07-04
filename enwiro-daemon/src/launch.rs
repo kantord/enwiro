@@ -240,20 +240,29 @@ fn build_container_argv(
     // Credential injection (issue #540): instead of putting the real token in the
     // container, install a `claude` shim (materialized by the launch prelude into
     // a PATH dir) that points claude at the host-side auth proxy. The daemon's
-    // proxy (`proxy.rs`) swaps the non-secret sentinel for the real
+    // proxy (`proxy.rs`) swaps a per-launch capability token for the real
     // `Authorization` on the host, so the credential never enters the container.
+    //
+    // The capability is minted fresh per launch (not a fixed sentinel): the proxy
+    // rejects any request that doesn't present a token it minted itself, which is
+    // the actual access control (the bridge-gateway bind alone doesn't stop other
+    // local processes from reaching the proxy).
     //
     // Delivering it as a shim (not container-wide env) means any `claude` run in
     // the container, directly or from a shell, is routed, while other processes'
     // env stays clean. `--add-host` makes `host.docker.internal` resolve to the
     // host so the shim's base URL is reachable.
     if inject_proxy_shim {
+        let capability = crate::proxy::mint_capability();
         argv.push("--add-host".to_string());
         argv.push("host.docker.internal:host-gateway".to_string());
         argv.push("-e".to_string());
         argv.push("ENWIRO_SHIMS=claude".to_string());
         argv.push("-e".to_string());
-        argv.push(format!("ENWIRO_SHIM_claude={}", claude_shim_script()));
+        argv.push(format!(
+            "ENWIRO_SHIM_claude={}",
+            claude_shim_script(&capability)
+        ));
     }
     argv.push(image.to_string());
     // Run the container command through a small `sh` prelude that (1) materializes
@@ -294,17 +303,17 @@ fn host_gid() -> u32 {
 
 /// The `claude` shim: a tiny script installed on `PATH` inside the container that
 /// points claude at the host auth proxy, then execs the *real* claude (found by
-/// scanning `PATH`, skipping the shim dir). The proxy base URL and the non-secret
-/// sentinel are baked in; the real token is never here. The sentinel goes in
+/// scanning `PATH`, skipping the shim dir). The proxy base URL and the per-launch
+/// capability are baked in; the real token is never here. The capability goes in
 /// `CLAUDE_CODE_OAUTH_TOKEN` (not `ANTHROPIC_AUTH_TOKEN`) so the CLI stays in
 /// subscription-billing mode rather than switching to API-usage billing.
 #[cfg(feature = "container-wrap")]
-fn claude_shim_script() -> String {
+fn claude_shim_script(capability: &str) -> String {
     format!(
         concat!(
             "#!/bin/sh\n",
             "export ANTHROPIC_BASE_URL=http://host.docker.internal:{port}\n",
-            "export CLAUDE_CODE_OAUTH_TOKEN={sentinel}\n",
+            "export CLAUDE_CODE_OAUTH_TOKEN={capability}\n",
             "real=''\n",
             "oldifs=\"$IFS\"; IFS=:\n",
             "for dir in $PATH; do\n",
@@ -316,7 +325,7 @@ fn claude_shim_script() -> String {
             "exec \"$real\" \"$@\"\n",
         ),
         port = crate::proxy::CLAUDE_PROXY_PORT,
-        sentinel = crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN,
+        capability = capability,
         shim_dir = SHIM_DIR,
     )
 }
@@ -503,8 +512,8 @@ mod tests {
 
     // With the proxy shim enabled, the container gets `--add-host` + the shim
     // env (`ENWIRO_SHIMS` + `ENWIRO_SHIM_claude`), NOT container-wide `ANTHROPIC_*`
-    // and never a real token. The shim script carries the proxy base URL + the
-    // non-secret sentinel.
+    // and never a real token. The shim script carries the proxy base URL + a
+    // freshly minted per-launch capability (not a fixed sentinel).
     #[test]
     fn container_argv_injects_claude_shim_when_enabled() {
         let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, true);
@@ -530,12 +539,16 @@ mod tests {
             )),
             "{shim}"
         );
+        // The capability itself: a 64-char hex string (32 random bytes), not a
+        // fixed/predictable value.
+        let capability = shim
+            .lines()
+            .find_map(|line| line.strip_prefix("export CLAUDE_CODE_OAUTH_TOKEN="))
+            .expect("capability line present");
+        assert_eq!(capability.len(), 64, "{capability}");
         assert!(
-            shim.contains(&format!(
-                "CLAUDE_CODE_OAUTH_TOKEN={}",
-                crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
-            )),
-            "{shim}"
+            capability.chars().all(|c| c.is_ascii_hexdigit()),
+            "{capability}"
         );
         // The proxy vars live only in the shim, never as container-wide env.
         assert!(
@@ -549,6 +562,40 @@ mod tests {
             !argv.iter().any(|a| a.contains("ANTHROPIC_AUTH_TOKEN")),
             "{argv:?}"
         );
+    }
+
+    // Each launch mints its own capability, not a shared/fixed one: two calls
+    // must not produce the same value.
+    #[test]
+    fn container_argv_mints_a_distinct_capability_per_call() {
+        let extract_capability = |argv: &[String]| -> String {
+            argv.windows(2)
+                .find(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_SHIM_claude="))
+                .unwrap()[1]
+                .lines()
+                .find_map(|line| line.strip_prefix("export CLAUDE_CODE_OAUTH_TOKEN="))
+                .unwrap()
+                .to_string()
+        };
+        let first = extract_capability(&build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "claude",
+            &[],
+            true,
+            true,
+        ));
+        let second = extract_capability(&build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "claude",
+            &[],
+            true,
+            true,
+        ));
+        assert_ne!(first, second);
     }
 
     // Without the proxy shim (no token configured), no shim env or `--add-host`
