@@ -130,9 +130,46 @@ fn launch_env_vars(environment_name: &str) -> Vec<(String, String)> {
 }
 
 /// The OCI image tag the daemon looks for to containerize a given environment.
+/// The environment name is sanitized first: OCI repository names must be
+/// lowercase and may only contain `[a-z0-9._-]`, but enwiro environment names
+/// commonly don't (e.g. GitHub-issue envs named `<repo>#<n>`), which would
+/// otherwise make the image untaggable and silently fall back to the host path.
 #[cfg(feature = "container-wrap")]
 fn container_image_tag(environment_name: &str) -> String {
-    format!("{CONTAINER_IMAGE_PREFIX}{environment_name}")
+    format!(
+        "{CONTAINER_IMAGE_PREFIX}{}",
+        sanitize_image_tag_component(environment_name)
+    )
+}
+
+/// Map `name` into a valid OCI repository-name component: lowercased, with any
+/// run of characters outside `[a-z0-9]` collapsed to a single `-`, and
+/// leading/trailing `-` trimmed (a component must start and end with an
+/// alphanumeric). Deliberately collapses `.`/`_` too, not just clearly-illegal
+/// characters like `#`: Docker's actual grammar only allows a single `.`, one
+/// or two `_`, but any number of `-`, and getting that nuance wrong would
+/// still produce an untaggable image. Using only `-` as a separator sidesteps
+/// the distinction entirely and is always valid.
+///
+/// This is a best-effort, lossy mapping, not a collision-free encoding: e.g.
+/// `my#env` and `my.env` both sanitize to `my-env`. That trade-off is accepted
+/// for the common case this unblocks (issue-based envs named `<repo>#<n>`)
+/// over a more complex, reversible scheme.
+#[cfg(feature = "container-wrap")]
+fn sanitize_image_tag_component(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len());
+    let mut last_was_dash = false;
+    for ch in name.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            sanitized.push(lower);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            sanitized.push('-');
+            last_was_dash = true;
+        }
+    }
+    sanitized.trim_matches('-').to_string()
 }
 
 /// `Some(CONTAINER_ENGINE)` if podman is on PATH, else `None`.
@@ -428,6 +465,33 @@ mod tests {
     #[test]
     fn image_tag_is_prefixed_env_name() {
         assert_eq!(container_image_tag("my-proj"), "enwiro/my-proj");
+    }
+
+    // GitHub-issue envs are named `<repo>#<n>`, but `#` is illegal in an OCI
+    // repository name; without sanitizing, the image can never be tagged or
+    // matched, so the container path silently and permanently falls back to
+    // the host for every such env.
+    #[test]
+    fn image_tag_sanitizes_hash_in_issue_style_env_names() {
+        assert_eq!(container_image_tag("headson#513"), "enwiro/headson-513");
+    }
+
+    #[test]
+    fn sanitize_lowercases_and_collapses_runs_of_invalid_chars() {
+        assert_eq!(sanitize_image_tag_component("My Env!!Name"), "my-env-name");
+    }
+
+    #[test]
+    fn sanitize_trims_leading_and_trailing_separators() {
+        assert_eq!(
+            sanitize_image_tag_component("#leading-and-trailing#"),
+            "leading-and-trailing"
+        );
+    }
+
+    #[test]
+    fn sanitize_is_a_no_op_on_an_already_valid_name() {
+        assert_eq!(sanitize_image_tag_component("my-proj"), "my-proj");
     }
 
     #[test]
