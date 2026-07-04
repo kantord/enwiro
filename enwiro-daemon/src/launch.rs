@@ -15,9 +15,13 @@ use enwiro_sdk::rpc::{LaunchResolveParams, LaunchResolveResult};
 #[cfg(feature = "container-wrap")]
 const CONTAINER_IMAGE_PREFIX: &str = "enwiro/";
 
-/// Container engines we know how to drive, in preference order (podman first).
+/// The only container engine enwiro drives. Podman-only (not Docker) because
+/// `--userns=keep-id` (see `build_container_argv`) has no Docker equivalent, and
+/// rootless Podman's networking has no host-bindable "bridge gateway" the way
+/// Docker's does, so a single supported engine avoids the two runtimes silently
+/// behaving differently under the same code path.
 #[cfg(feature = "container-wrap")]
-const CONTAINER_ENGINES: [&str; 2] = ["podman", "docker"];
+const CONTAINER_ENGINE: &str = "podman";
 
 /// Terminal emulators enwiro runs as host chrome with a wrapped shell inside
 /// (pilot: kitty only; see the launch-template registry plan). Matched by binary
@@ -131,19 +135,19 @@ fn container_image_tag(environment_name: &str) -> String {
     format!("{CONTAINER_IMAGE_PREFIX}{environment_name}")
 }
 
-/// First available container engine on PATH, in preference order, or None.
+/// `Some(CONTAINER_ENGINE)` if podman is on PATH, else `None`.
 ///
 /// NOTE: this resolves against the *daemon's* `PATH`, not the calling user's. A
-/// `systemd --user` daemon with a stripped `PATH` may fail to find an engine the
+/// `systemd --user` daemon with a stripped `PATH` may fail to find the engine the
 /// user has, so the env silently runs on the host (likewise `image_exists`
 /// probes the daemon's engine context). The robust fix is to thread the caller's
 /// `PATH` through `LaunchResolveParams` and probe with `which::which_in`;
 /// deferred while the isolation layer is experimental.
 #[cfg(feature = "container-wrap")]
 pub(crate) fn find_container_engine() -> Option<&'static str> {
-    CONTAINER_ENGINES
-        .into_iter()
-        .find(|engine| which::which(engine).is_ok())
+    which::which(CONTAINER_ENGINE)
+        .is_ok()
+        .then_some(CONTAINER_ENGINE)
 }
 
 /// Build the args for a *containerized terminal*: the terminal runs on the host
@@ -175,18 +179,13 @@ fn build_terminal_container_args(
     args
 }
 
-/// Ask the engine whether `image` exists locally. Podman has `image exists`
-/// (exit 0/1); Docker uses `image inspect` (exit 0 iff present). Any spawn
-/// error counts as "absent".
+/// Ask the engine whether `image` exists locally (`podman image exists`, exit
+/// 0/1). Any spawn error counts as "absent".
 #[cfg(feature = "container-wrap")]
 fn image_exists(engine: &str, image: &str) -> bool {
     use std::process::{Command, Stdio};
-    let probe_args: [&str; 3] = match engine {
-        "podman" => ["image", "exists", image],
-        _ => ["image", "inspect", image],
-    };
     Command::new(engine)
-        .args(probe_args)
+        .args(["image", "exists", image])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -222,38 +221,49 @@ fn build_container_argv(
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
     argv.push(format!("ENWIRO_ENV={environment_name}"));
-    // Run as the host user's uid/gid so the bind-mounted project (owned by that
-    // user) is accessed as its owner. This fixes git's "dubious ownership" error,
-    // stops the container from leaving root-owned files on the host, and drops
-    // root (hardening; claude's `--dangerously-skip-permissions` also requires
-    // non-root). A bare uid may have no home, so point `HOME` at a writable path.
+    // Run as the host user's uid/gid, with `--userns=keep-id` mapping that uid to
+    // itself inside the container's user namespace. This fixes git's "dubious
+    // ownership" error on the bind-mounted project, stops the container from
+    // leaving root-owned files on the host, and drops root (hardening; claude's
+    // `--dangerously-skip-permissions` also requires non-root). `keep-id` means
+    // the uid resolves against the *image's own* `/etc/passwd`, so an image user
+    // matching that uid gets its real home + dotfiles for free, with no need to
+    // derive or override `HOME` ourselves (verified: `enwiro/nanoref`'s `vscode`
+    // user resolves correctly this way).
     //
     // Linux only: on macOS the container runs in a VM whose file-sharing layer
-    // maps ownership, and the daemon's uid is meaningless inside that VM. (Rootless
-    // Podman may need `--userns=keep-id` instead; a refinement for later.)
+    // maps ownership, and the daemon's uid is meaningless inside that VM.
     if cfg!(target_os = "linux") {
+        argv.push("--userns=keep-id".to_string());
         argv.push("--user".to_string());
         argv.push(format!("{}:{}", host_uid(), host_gid()));
-        argv.push("-e".to_string());
-        argv.push(format!("HOME={CONTAINER_HOME}"));
     }
     // Credential injection (issue #540): instead of putting the real token in the
     // container, install a `claude` shim (materialized by the launch prelude into
     // a PATH dir) that points claude at the host-side auth proxy. The daemon's
-    // proxy (`proxy.rs`) swaps the non-secret sentinel for the real
+    // proxy (`proxy.rs`) swaps a per-launch capability token for the real
     // `Authorization` on the host, so the credential never enters the container.
+    //
+    // The capability is minted fresh per launch (not a fixed sentinel): the proxy
+    // rejects any request that doesn't present a token it minted itself, which is
+    // the actual access control (the bridge-gateway bind alone doesn't stop other
+    // local processes from reaching the proxy).
     //
     // Delivering it as a shim (not container-wide env) means any `claude` run in
     // the container, directly or from a shell, is routed, while other processes'
-    // env stays clean. `--add-host` makes `host.docker.internal` resolve to the
-    // host so the shim's base URL is reachable.
+    // env stays clean. `--add-host` makes `host.containers.internal` resolve to
+    // the host so the shim's base URL is reachable.
     if inject_proxy_shim {
+        let capability = crate::proxy::mint_capability();
         argv.push("--add-host".to_string());
-        argv.push("host.docker.internal:host-gateway".to_string());
+        argv.push("host.containers.internal:host-gateway".to_string());
         argv.push("-e".to_string());
         argv.push("ENWIRO_SHIMS=claude".to_string());
         argv.push("-e".to_string());
-        argv.push(format!("ENWIRO_SHIM_claude={}", claude_shim_script()));
+        argv.push(format!(
+            "ENWIRO_SHIM_claude={}",
+            claude_shim_script(&capability)
+        ));
     }
     argv.push(image.to_string());
     // Run the container command through a small `sh` prelude that (1) materializes
@@ -274,11 +284,6 @@ fn build_container_argv(
 #[cfg(feature = "container-wrap")]
 const SHIM_DIR: &str = "/tmp/enwiro-bin";
 
-/// `HOME` for the container when it runs as a non-root uid: a writable, ephemeral
-/// path, since a bare uid may have no home directory in the image.
-#[cfg(feature = "container-wrap")]
-const CONTAINER_HOME: &str = "/tmp/enwiro-home";
-
 /// The daemon's real uid / gid, injected as the container's `--user` so file
 /// ownership on the bind-mounted project matches.
 #[cfg(feature = "container-wrap")]
@@ -294,17 +299,22 @@ fn host_gid() -> u32 {
 
 /// The `claude` shim: a tiny script installed on `PATH` inside the container that
 /// points claude at the host auth proxy, then execs the *real* claude (found by
-/// scanning `PATH`, skipping the shim dir). The proxy base URL and the non-secret
-/// sentinel are baked in; the real token is never here. The sentinel goes in
+/// scanning `PATH`, skipping the shim dir). The proxy base URL and the per-launch
+/// capability are baked in; the real token is never here. The capability goes in
 /// `CLAUDE_CODE_OAUTH_TOKEN` (not `ANTHROPIC_AUTH_TOKEN`) so the CLI stays in
-/// subscription-billing mode rather than switching to API-usage billing.
+/// subscription-billing mode rather than switching to API-usage billing. Also
+/// disables claude's self-updater: the container is ephemeral and non-root, so it
+/// has no write access to the image's npm prefix and the update would just fail.
 #[cfg(feature = "container-wrap")]
-fn claude_shim_script() -> String {
+fn claude_shim_script(capability: &str) -> String {
     format!(
         concat!(
             "#!/bin/sh\n",
-            "export ANTHROPIC_BASE_URL=http://host.docker.internal:{port}\n",
-            "export CLAUDE_CODE_OAUTH_TOKEN={sentinel}\n",
+            "export ANTHROPIC_BASE_URL=http://host.containers.internal:{port}\n",
+            "export CLAUDE_CODE_OAUTH_TOKEN={capability}\n",
+            // The container is ephemeral and non-root, so claude can't self-update
+            // (no write access to the image's npm prefix); skip the failing attempt.
+            "export DISABLE_AUTOUPDATER=1\n",
             "real=''\n",
             "oldifs=\"$IFS\"; IFS=:\n",
             "for dir in $PATH; do\n",
@@ -316,7 +326,7 @@ fn claude_shim_script() -> String {
             "exec \"$real\" \"$@\"\n",
         ),
         port = crate::proxy::CLAUDE_PROXY_PORT,
-        sentinel = crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN,
+        capability = capability,
         shim_dir = SHIM_DIR,
     )
 }
@@ -456,8 +466,9 @@ mod tests {
         assert_eq!(&argv[image_idx + 4..], &["sh", "bash", "-l"]);
     }
 
-    // On Linux the container runs as the host uid/gid with a writable HOME, so
-    // bind-mounted files (owned by that user) are accessed as their owner.
+    // On Linux the container runs as the host uid/gid under `--userns=keep-id`,
+    // so bind-mounted files (owned by that user) are accessed as their owner and
+    // the image's own passwd entry resolves `HOME` correctly (no override needed).
     #[test]
     #[cfg(target_os = "linux")]
     fn container_argv_runs_as_host_uid_on_linux() {
@@ -467,11 +478,7 @@ mod tests {
                 .any(|w| w[0] == "--user" && w[1] == format!("{}:{}", host_uid(), host_gid())),
             "{argv:?}"
         );
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "-e" && w[1] == format!("HOME={CONTAINER_HOME}")),
-            "{argv:?}"
-        );
+        assert!(argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
     }
 
     // A default `.claude.json` is seeded only if absent, then the real command
@@ -503,14 +510,14 @@ mod tests {
 
     // With the proxy shim enabled, the container gets `--add-host` + the shim
     // env (`ENWIRO_SHIMS` + `ENWIRO_SHIM_claude`), NOT container-wide `ANTHROPIC_*`
-    // and never a real token. The shim script carries the proxy base URL + the
-    // non-secret sentinel.
+    // and never a real token. The shim script carries the proxy base URL + a
+    // freshly minted per-launch capability (not a fixed sentinel).
     #[test]
     fn container_argv_injects_claude_shim_when_enabled() {
         let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, true);
         assert!(
             argv.windows(2)
-                .any(|w| w[0] == "--add-host" && w[1] == "host.docker.internal:host-gateway"),
+                .any(|w| w[0] == "--add-host" && w[1] == "host.containers.internal:host-gateway"),
             "{argv:?}"
         );
         assert!(
@@ -525,18 +532,25 @@ mod tests {
             .expect("shim env present");
         assert!(
             shim.contains(&format!(
-                "ANTHROPIC_BASE_URL=http://host.docker.internal:{}",
+                "ANTHROPIC_BASE_URL=http://host.containers.internal:{}",
                 crate::proxy::CLAUDE_PROXY_PORT
             )),
             "{shim}"
         );
+        // The capability itself: a 64-char hex string (32 random bytes), not a
+        // fixed/predictable value.
+        let capability = shim
+            .lines()
+            .find_map(|line| line.strip_prefix("export CLAUDE_CODE_OAUTH_TOKEN="))
+            .expect("capability line present");
+        assert_eq!(capability.len(), 64, "{capability}");
         assert!(
-            shim.contains(&format!(
-                "CLAUDE_CODE_OAUTH_TOKEN={}",
-                crate::proxy::CLAUDE_PROXY_SENTINEL_TOKEN
-            )),
-            "{shim}"
+            capability.chars().all(|c| c.is_ascii_hexdigit()),
+            "{capability}"
         );
+        // The container is ephemeral/non-root, so claude's self-updater can't
+        // write anywhere and would just fail; the shim disables it.
+        assert!(shim.contains("export DISABLE_AUTOUPDATER=1"), "{shim}");
         // The proxy vars live only in the shim, never as container-wide env.
         assert!(
             !argv
@@ -549,6 +563,40 @@ mod tests {
             !argv.iter().any(|a| a.contains("ANTHROPIC_AUTH_TOKEN")),
             "{argv:?}"
         );
+    }
+
+    // Each launch mints its own capability, not a shared/fixed one: two calls
+    // must not produce the same value.
+    #[test]
+    fn container_argv_mints_a_distinct_capability_per_call() {
+        let extract_capability = |argv: &[String]| -> String {
+            argv.windows(2)
+                .find(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_SHIM_claude="))
+                .unwrap()[1]
+                .lines()
+                .find_map(|line| line.strip_prefix("export CLAUDE_CODE_OAUTH_TOKEN="))
+                .unwrap()
+                .to_string()
+        };
+        let first = extract_capability(&build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "claude",
+            &[],
+            true,
+            true,
+        ));
+        let second = extract_capability(&build_container_argv(
+            "enwiro/x",
+            "/p",
+            "x",
+            "claude",
+            &[],
+            true,
+            true,
+        ));
+        assert_ne!(first, second);
     }
 
     // Without the proxy shim (no token configured), no shim env or `--add-host`
@@ -599,7 +647,7 @@ mod tests {
         let terminal_args = vec!["--session".to_string(), "foo".to_string()];
         let args = build_terminal_container_args(
             &terminal_args,
-            "docker",
+            "podman",
             "enwiro/my-proj",
             "/p",
             "my-proj",
@@ -609,7 +657,7 @@ mod tests {
         // container invocation for the inner shell.
         assert_eq!(&args[0], "--session");
         assert_eq!(&args[1], "foo");
-        assert_eq!(&args[2], "docker");
+        assert_eq!(&args[2], "podman");
         assert_eq!(&args[3], "run");
         assert!(args.iter().any(|a| a == "bash"));
     }
