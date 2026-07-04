@@ -2,28 +2,32 @@
 //!
 //! A prompt-injected agent in the container could read a real OAuth token if we
 //! injected one as an env var. This proxy keeps the real token on the *host*: the
-//! container is pointed at `ANTHROPIC_BASE_URL=http://host.docker.internal:<port>`
-//! with a per-launch random capability token, and this proxy swaps that bearer
-//! for the real one before forwarding to Anthropic. The credential never enters
-//! the container, so it cannot be exfiltrated there.
+//! container is pointed at
+//! `ANTHROPIC_BASE_URL=http://host.containers.internal:<port>` with a per-launch
+//! random capability token, and this proxy swaps that bearer for the real one
+//! before forwarding to Anthropic. The credential never enters the container, so
+//! it cannot be exfiltrated there.
 //!
 //! It is a transparent pass-through: only `Authorization` is rewritten, every
 //! other header and the body are forwarded verbatim (the Claude Code harness
 //! headers must survive to avoid tripping Anthropic's abuse detection), and the
 //! response is streamed unbuffered so SSE works.
 //!
-//! It binds to the container bridge gateway (not all interfaces), so the LAN
-//! cannot reach it; if that address can't be determined or bound it fails closed
-//! (does not start) rather than exposing the token more widely.
+//! It binds all interfaces (`0.0.0.0`): rootless Podman has no host-bindable
+//! "bridge gateway" the way Docker does (verified — native bridge, forced
+//! netavark bridge, and pasta's synthetic gateway are all either unbindable or
+//! refuse loopback-only binds), so there is no narrower address to restrict to.
+//! Access control lives entirely in the capability check below, not the bind
+//! address.
 //!
-//! **Capability auth (this module's access control):** the bridge-gateway bind
-//! alone doesn't stop other *local* things from reaching the proxy — any process
-//! on the bridge, or (bind-address-independent) any local process/hostile browser
-//! tab via DNS rebinding, same class of bug as classic unauthenticated Jupyter
-//! servers. So every request must present a bearer token this daemon itself
-//! minted for that specific launch; anything else gets 401 before the real
-//! credential is ever used. Tokens are opaque, random, held in memory only (no
-//! disk persistence, no cross-restart carryover), and compared in constant time.
+//! **Capability auth (this module's actual access control):** any *local*
+//! process, or a hostile browser tab via DNS rebinding, can reach a bound TCP
+//! port regardless of which address it's bound to — the same class of bug as
+//! classic unauthenticated Jupyter servers. So every request must present a
+//! bearer token this daemon itself minted for that specific launch; anything
+//! else gets 401 before the real credential is ever used. Tokens are opaque,
+//! random, held in memory only (no disk persistence, no cross-restart
+//! carryover), and compared in constant time.
 //!
 //! v1 caveats: a capability is delivered to a container's `claude` shim and
 //! remains valid for the daemon's lifetime (no per-container revocation yet, no
@@ -152,62 +156,24 @@ pub async fn serve() {
     }
 }
 
-/// Bind the proxy to the container bridge gateway (the address containers use to
-/// reach the host, e.g. `172.17.0.1`) so that only bridge containers, not the
-/// wider LAN, can reach it.
-///
-/// Fail-closed: if the gateway can't be determined or bound, the proxy does NOT
-/// start. Binding to all interfaces instead would expose the auth token to every
-/// process on the network, which defeats the point, so we refuse rather than
-/// silently degrade. Claude launches then fail to authenticate (connection
-/// refused), which is the safe failure.
+/// Bind the proxy on all interfaces. Rootless Podman has no host-bindable
+/// "bridge gateway" to restrict to (see the module doc comment), so the
+/// capability check in [`is_authorized`] is the real access control, not the
+/// bind address. A bind failure (e.g. the port is already in use) is logged and
+/// the proxy does not start; claude launches then fail to authenticate
+/// (connection refused), which is the safe failure.
 async fn bind_listener() -> Option<TcpListener> {
-    let Some(ip) = bridge_gateway_ip() else {
-        tracing::error!(
-            "claude auth proxy: could not determine the container bridge gateway; refusing to \
-             start (binding all interfaces would expose the auth token). Claude launches will not \
-             authenticate until this is resolved."
-        );
-        return None;
-    };
-    let addr = SocketAddr::new(ip, CLAUDE_PROXY_PORT);
+    let addr = SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), CLAUDE_PROXY_PORT);
     match TcpListener::bind(addr).await {
         Ok(listener) => {
-            tracing::info!(%addr, "claude auth proxy listening (bridge gateway only)");
+            tracing::info!(%addr, "claude auth proxy listening");
             Some(listener)
         }
         Err(error) => {
-            tracing::error!(
-                %error,
-                %addr,
-                "claude auth proxy: bridge-gateway bind failed; refusing to fall back to all \
-                 interfaces (would expose the auth token)"
-            );
+            tracing::error!(%error, %addr, "claude auth proxy: bind failed; proxy will not start");
             None
         }
     }
-}
-
-/// The container engine's default bridge gateway IP (what `host-gateway`, and
-/// therefore the container, uses to reach the host). `None` if no engine, the
-/// engine can't be queried, or the output doesn't parse. Uses Docker's inspect
-/// format; other engines fall through to the all-interfaces bind.
-fn bridge_gateway_ip() -> Option<std::net::IpAddr> {
-    let engine = crate::launch::find_container_engine()?;
-    let output = std::process::Command::new(engine)
-        .args([
-            "network",
-            "inspect",
-            "bridge",
-            "--format",
-            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
 /// Never fails at the hyper layer: an unauthorized request becomes a 401 and a
