@@ -93,9 +93,11 @@ When both hold, the daemon returns a container invocation roughly equivalent to:
   colon is not mis-parsed.
 - `-it` is used when the caller's stdin is a terminal, `-i` otherwise.
 
-> The image tag is `enwiro/<name>`, so the environment name must be a valid OCI
-> tag. Names containing characters like `#` or `/` are not yet sanitised; use a
-> simple-named environment when trying this out.
+> The image tag is `enwiro/<name>`, with the environment name sanitized into a
+> valid OCI repository component first (lowercased, invalid characters
+> collapsed to `-`) — so a GitHub-issue env named e.g. `myrepo#513` looks for
+> `enwiro/myrepo-513`. This is a best-effort, lossy mapping, not a
+> collision-free encoding: e.g. `my#env` and `my.env` sanitize to the same tag.
 
 ### Running with the isolation build flag
 
