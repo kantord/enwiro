@@ -185,25 +185,8 @@ impl LoadedGear {
     /// appearing in two files is a hard error.
     pub fn from_env_dir(env_dir: &Path) -> anyhow::Result<Self> {
         let dir = gear_dir(env_dir);
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    gear: HashMap::new(),
-                });
-            }
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("Could not read gear directory {}", dir.display()));
-            }
-        };
-
-        let mut paths: Vec<_> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-            .collect();
-        paths.sort();
+        let paths = crate::dropin::list_json_files(&dir)
+            .with_context(|| format!("Could not read gear directory {}", dir.display()))?;
 
         let mut merged: HashMap<String, Gear> = HashMap::new();
         let mut sources: HashMap<String, String> = HashMap::new();

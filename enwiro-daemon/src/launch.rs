@@ -9,6 +9,7 @@
 
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 use enwiro_sdk::rpc::{LaunchResolveParams, LaunchResolveResult};
+use std::path::Path;
 
 /// Prefix for the per-environment OCI image tag. The trigger is purely the
 /// *presence* of an image named `enwiro/<env-name>`; building it is out-of-band.
@@ -50,7 +51,10 @@ fn is_terminal(command: &str) -> bool {
 // container branch. Replace both with a general launch-template registry
 // (binary-name -> strategy) so new terminals and per-app rules don't require
 // editing this function.
-pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
+pub fn resolve_launch(
+    params: &LaunchResolveParams,
+    #[allow(unused_variables)] workspaces_directory: &Path,
+) -> LaunchResolveResult {
     // Terminal template (issue #540): the terminal runs on the host; if the env
     // containerizes, its inner command is the container invocation for the shell
     // (`kitty <engine> run ... <image> <shell>`), otherwise it uses `$SHELL`.
@@ -61,16 +65,16 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
         {
             let image = container_image_tag(&params.env_name);
             if image_exists(engine, &image) {
+                let env = ContainerEnv {
+                    image: &image,
+                    environment_path: &params.env_path,
+                    environment_name: &params.env_name,
+                    inject_proxy_shim: claude_oauth_token().is_some(),
+                    workspaces_directory,
+                };
                 return LaunchResolveResult {
                     program: params.command.clone(),
-                    args: build_terminal_container_args(
-                        &params.args,
-                        engine,
-                        &image,
-                        &params.env_path,
-                        &params.env_name,
-                        claude_oauth_token().is_some(),
-                    ),
+                    args: build_terminal_container_args(&params.args, engine, &env),
                     env_vars: Vec::new(),
                 };
             }
@@ -95,18 +99,16 @@ pub fn resolve_launch(params: &LaunchResolveParams) -> LaunchResolveResult {
             // `claude` run *inside* the container (directly or from a shell) routes
             // through the host proxy. Container-scoped, not command-scoped: the
             // shim only affects `claude`, so wiring it for every launch is safe.
-            let inject_proxy_shim = claude_oauth_token().is_some();
+            let env = ContainerEnv {
+                image: &image,
+                environment_path: &params.env_path,
+                environment_name: &params.env_name,
+                inject_proxy_shim: claude_oauth_token().is_some(),
+                workspaces_directory,
+            };
             return LaunchResolveResult {
                 program: engine.to_string(),
-                args: build_container_argv(
-                    &image,
-                    &params.env_path,
-                    &params.env_name,
-                    &params.command,
-                    &params.args,
-                    params.interactive,
-                    inject_proxy_shim,
-                ),
+                args: build_container_argv(&env, &params.command, &params.args, params.interactive),
                 // The container path injects `ENWIRO_ENV` *inside* the
                 // container via `-e` (see `build_container_argv`), so the host
                 // `engine` process needs no extra vars.
@@ -187,6 +189,21 @@ pub(crate) fn find_container_engine() -> Option<&'static str> {
         .then_some(CONTAINER_ENGINE)
 }
 
+/// The parts of a containerized launch that stay constant regardless of what
+/// command actually runs inside it. Bundled so `build_container_argv` and
+/// `build_terminal_container_args` take one narrow, named thing instead of
+/// five loose positional fields that happen to travel together. Every field
+/// is itself `Copy`, so the whole struct is too.
+#[cfg(feature = "container-wrap")]
+#[derive(Clone, Copy)]
+struct ContainerEnv<'a> {
+    image: &'a str,
+    environment_path: &'a str,
+    environment_name: &'a str,
+    inject_proxy_shim: bool,
+    workspaces_directory: &'a Path,
+}
+
 /// Build the args for a *containerized terminal*: the terminal runs on the host
 /// (it is the `program`) with its own `terminal_args` preserved, followed by the
 /// container invocation that runs the env's shell inside the image. The terminal
@@ -195,23 +212,17 @@ pub(crate) fn find_container_engine() -> Option<&'static str> {
 fn build_terminal_container_args(
     terminal_args: &[String],
     engine: &str,
-    image: &str,
-    environment_path: &str,
-    environment_name: &str,
-    inject_proxy_shim: bool,
+    env: &ContainerEnv,
 ) -> Vec<String> {
     let mut args = terminal_args.to_vec();
     args.push(engine.to_string());
     // The inner command is a shell; the claude shim (if injected) lets `claude`
     // run from that shell route through the proxy.
     args.extend(build_container_argv(
-        image,
-        environment_path,
-        environment_name,
+        env,
         TERMINAL_CONTAINER_SHELL,
         &[],
         true,
-        inject_proxy_shim,
     ));
     args
 }
@@ -230,30 +241,57 @@ fn image_exists(engine: &str, image: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `--mount` args that bind `path` into the container at the identical path
+/// on both sides (no translation). Uses `--mount type=bind,source=,target=`
+/// rather than `-v src:dst` so a path containing a colon is not mis-parsed
+/// as the `-v`-syntax field separator.
+#[cfg(feature = "container-wrap")]
+fn bind_mount_args(path: &str) -> [String; 2] {
+    [
+        "--mount".to_string(),
+        format!("type=bind,source={path},target={path}"),
+    ]
+}
+
 /// Assemble the `run ...` args (engine excluded; it is the `program`). The env's
-/// project dir is bind-mounted at the *same* path it has on the host (paths
-/// match, so no translation), cwd set there, `ENWIRO_ENV` injected; `-it` when
-/// the caller's stdin is a TTY, `-i` otherwise.
-///
-/// The bind mount uses `--mount type=bind,source=,target=` rather than
-/// `-v src:dst` so a path containing a colon is not mis-parsed as the
-/// `-v`-syntax field separator.
+/// project dir is bind-mounted at the *same* path it has on the host, cwd set
+/// there, `ENWIRO_ENV` injected; `-it` when the caller's stdin is a TTY, `-i`
+/// otherwise.
 #[cfg(feature = "container-wrap")]
 fn build_container_argv(
-    image: &str,
-    environment_path: &str,
-    environment_name: &str,
+    env: &ContainerEnv,
     command: &str,
     child_args: &[String],
     interactive: bool,
-    inject_proxy_shim: bool,
 ) -> Vec<String> {
+    let ContainerEnv {
+        image,
+        environment_path,
+        environment_name,
+        inject_proxy_shim,
+        workspaces_directory,
+    } = *env;
     let mut argv = vec!["run".to_string(), "--rm".to_string()];
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
-    argv.push("--mount".to_string());
-    argv.push(format!(
-        "type=bind,source={environment_path},target={environment_path}"
-    ));
+    argv.extend(bind_mount_args(environment_path));
+    // Cookbooks may declare that this environment depends on additional host
+    // paths beyond its own directory to function -- e.g. a git worktree's
+    // `.git` is a pointer into a separate main repo holding the shared object
+    // database. The daemon has no idea *why* a path is needed (that's the
+    // cookbook's tool-specific business); it just mounts whatever was
+    // declared, at the same absolute path on both sides (required for tools
+    // like git that hard-code absolute paths into their own metadata).
+    //
+    // Declarations are written under `<workspaces_directory>/<environment_name>`
+    // (see `write_external_paths_if_present` in the host CLI), not under
+    // `environment_path`: an env's actual project location is whatever the
+    // cookbook returned (a bind-mounted clone, a worktree elsewhere, anything),
+    // while enwiro's own per-env metadata always lives in its managed
+    // workspaces directory, one level above the project-pointing symlink.
+    let env_dir = workspaces_directory.join(environment_name);
+    for path in enwiro_sdk::external_paths::load_external_paths(&env_dir) {
+        argv.extend(bind_mount_args(&path));
+    }
     argv.push("-w".to_string());
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
@@ -442,13 +480,16 @@ mod terminal_tests {
     fn host_terminal_runs_directly_with_enwiro_env() {
         // No `enwiro/__nope__` image (and/or feature off) → host terminal: run
         // it directly so it uses `$SHELL`; cwd + ENWIRO_ENV applied by the client.
-        let res = resolve_launch(&LaunchResolveParams {
-            env_name: "__nope__".to_string(),
-            env_path: "/tmp".to_string(),
-            command: "kitty".to_string(),
-            args: vec![],
-            interactive: false,
-        });
+        let res = resolve_launch(
+            &LaunchResolveParams {
+                env_name: "__nope__".to_string(),
+                env_path: "/tmp".to_string(),
+                command: "kitty".to_string(),
+                args: vec![],
+                interactive: false,
+            },
+            Path::new("/nonexistent-workspaces-dir"),
+        );
         assert_eq!(res.program, "kitty");
         assert!(res.args.is_empty());
         assert_eq!(
@@ -461,6 +502,18 @@ mod terminal_tests {
 #[cfg(all(test, feature = "container-wrap"))]
 mod tests {
     use super::*;
+
+    /// A `ContainerEnv` fixture for tests that only care about the command
+    /// being run, not the environment identity around it.
+    fn test_env(inject_proxy_shim: bool) -> ContainerEnv<'static> {
+        ContainerEnv {
+            image: "enwiro/x",
+            environment_path: "/p",
+            environment_name: "x",
+            inject_proxy_shim,
+            workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+        }
+    }
 
     #[test]
     fn image_tag_is_prefixed_env_name() {
@@ -494,17 +547,60 @@ mod tests {
         assert_eq!(sanitize_image_tag_component("my-proj"), "my-proj");
     }
 
+    // A cookbook-declared external path (e.g. a git worktree's main repo,
+    // reported by the cookbook -- see `enwiro_sdk::external_paths`) gets
+    // mounted alongside the env's own path. The daemon has no idea *why* the
+    // path was declared; it just mounts whatever it finds.
+    #[test]
+    fn container_argv_mounts_a_declared_external_path() {
+        let main_repo = tempfile::tempdir().unwrap();
+        let env_path = tempfile::tempdir().unwrap();
+        // Deliberately distinct from `env_path` -- see `build_container_argv`'s
+        // doc comment for why declarations live under `workspaces_directory`.
+        let workspaces_dir = tempfile::tempdir().unwrap();
+        let env_dir = workspaces_dir.path().join("x");
+        let data = enwiro_sdk::external_paths::ExternalPathsFileData {
+            version: enwiro_sdk::external_paths::SCHEMA_VERSION,
+            paths: vec![main_repo.path().to_str().unwrap().to_string()],
+        };
+        std::fs::create_dir_all(enwiro_sdk::external_paths::external_paths_dir(&env_dir)).unwrap();
+        std::fs::write(
+            enwiro_sdk::external_paths::external_paths_dir(&env_dir)
+                .join(enwiro_sdk::external_paths::external_paths_filename("git")),
+            serde_json::to_vec(&data).unwrap(),
+        )
+        .unwrap();
+
+        let env = ContainerEnv {
+            image: "enwiro/x",
+            environment_path: env_path.path().to_str().unwrap(),
+            environment_name: "x",
+            inject_proxy_shim: false,
+            workspaces_directory: workspaces_dir.path(),
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+        let expected = format!(
+            "type=bind,source={},target={}",
+            main_repo.path().display(),
+            main_repo.path().display()
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--mount" && w[1] == expected),
+            "{argv:?}"
+        );
+    }
+
     #[test]
     fn container_argv_mounts_env_path_at_same_path_and_sets_env() {
-        let argv = build_container_argv(
-            "enwiro/my-proj",
-            "/home/u/.enwiro_envs/my-proj/my-proj",
-            "my-proj",
-            "bash",
-            &["-l".to_string()],
-            true,
-            false,
-        );
+        let env = ContainerEnv {
+            image: "enwiro/my-proj",
+            environment_path: "/home/u/.enwiro_envs/my-proj/my-proj",
+            environment_name: "my-proj",
+            inject_proxy_shim: false,
+            workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+        };
+        let argv = build_container_argv(&env, "bash", &["-l".to_string()], true);
         // Before the image: run flags + bind mount + cwd + ENWIRO_ENV (plus
         // `--user`/HOME on Linux, checked separately).
         let image_idx = argv.iter().position(|a| a == "enwiro/my-proj").unwrap();
@@ -536,7 +632,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn container_argv_runs_as_host_uid_on_linux() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, false);
+        let argv = build_container_argv(&test_env(false), "bash", &[], true);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--user" && w[1] == format!("{}:{}", host_uid(), host_gid())),
@@ -550,7 +646,7 @@ mod tests {
     // workspace-trust) without baking anything into the image.
     #[test]
     fn container_argv_seeds_onboarding_then_execs_command() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, false);
+        let argv = build_container_argv(&test_env(false), "claude", &[], true);
         let script = &argv[argv.iter().position(|a| a == "-c").unwrap() + 1];
         assert!(script.contains("hasCompletedOnboarding"), "{script}");
         // both onboarding gates: theme/welcome AND per-workspace trust.
@@ -567,7 +663,7 @@ mod tests {
 
     #[test]
     fn container_argv_uses_dash_i_when_not_a_tty() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "echo", &[], false, false);
+        let argv = build_container_argv(&test_env(false), "echo", &[], false);
         assert!(argv.contains(&"-i".to_string()));
         assert!(!argv.contains(&"-it".to_string()));
     }
@@ -578,7 +674,7 @@ mod tests {
     // freshly minted per-launch capability (not a fixed sentinel).
     #[test]
     fn container_argv_injects_claude_shim_when_enabled() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "claude", &[], true, true);
+        let argv = build_container_argv(&test_env(true), "claude", &[], true);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--add-host" && w[1] == "host.containers.internal:host-gateway"),
@@ -642,24 +738,9 @@ mod tests {
                 .unwrap()
                 .to_string()
         };
-        let first = extract_capability(&build_container_argv(
-            "enwiro/x",
-            "/p",
-            "x",
-            "claude",
-            &[],
-            true,
-            true,
-        ));
-        let second = extract_capability(&build_container_argv(
-            "enwiro/x",
-            "/p",
-            "x",
-            "claude",
-            &[],
-            true,
-            true,
-        ));
+        let first = extract_capability(&build_container_argv(&test_env(true), "claude", &[], true));
+        let second =
+            extract_capability(&build_container_argv(&test_env(true), "claude", &[], true));
         assert_ne!(first, second);
     }
 
@@ -668,7 +749,7 @@ mod tests {
     // so check for the `-e` injection specifically, not the substring.)
     #[test]
     fn container_argv_no_proxy_when_disabled() {
-        let argv = build_container_argv("enwiro/x", "/p", "x", "bash", &[], true, false);
+        let argv = build_container_argv(&test_env(false), "bash", &[], true);
         assert!(
             !argv
                 .windows(2)
@@ -683,7 +764,14 @@ mod tests {
     #[test]
     fn container_argv_mount_survives_colon_in_path() {
         let colon_path = "/home/u/.enwiro_envs/proj:1/proj:1";
-        let argv = build_container_argv("enwiro/x", colon_path, "x", "bash", &[], true, false);
+        let env = ContainerEnv {
+            image: "enwiro/x",
+            environment_path: colon_path,
+            environment_name: "x",
+            inject_proxy_shim: false,
+            workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
         // The path appears verbatim inside a single `--mount` value...
         let mount_idx = argv
             .iter()
@@ -709,14 +797,14 @@ mod tests {
     #[test]
     fn terminal_container_args_preserve_terminal_args() {
         let terminal_args = vec!["--session".to_string(), "foo".to_string()];
-        let args = build_terminal_container_args(
-            &terminal_args,
-            "podman",
-            "enwiro/my-proj",
-            "/p",
-            "my-proj",
-            false,
-        );
+        let env = ContainerEnv {
+            image: "enwiro/my-proj",
+            environment_path: "/p",
+            environment_name: "my-proj",
+            inject_proxy_shim: false,
+            workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+        };
+        let args = build_terminal_container_args(&terminal_args, "podman", &env);
         // The terminal's own args come first (kitty parses them), then the
         // container invocation for the inner shell.
         assert_eq!(&args[0], "--session");
@@ -729,13 +817,16 @@ mod tests {
     #[test]
     fn host_path_returns_command_unchanged_when_no_image() {
         // No `enwiro/__nope__` image exists → host path.
-        let res = resolve_launch(&LaunchResolveParams {
-            env_name: "__nope__".to_string(),
-            env_path: "/tmp".to_string(),
-            command: "echo".to_string(),
-            args: vec!["hi".to_string()],
-            interactive: false,
-        });
+        let res = resolve_launch(
+            &LaunchResolveParams {
+                env_name: "__nope__".to_string(),
+                env_path: "/tmp".to_string(),
+                command: "echo".to_string(),
+                args: vec!["hi".to_string()],
+                interactive: false,
+            },
+            Path::new("/nonexistent-workspaces-dir"),
+        );
         assert_eq!(res.program, "echo");
         assert_eq!(res.args, vec!["hi".to_string()]);
         assert_eq!(
