@@ -150,11 +150,7 @@ impl<W: Write> CommandContext<W> {
                 continue;
             };
             let path = gear_dir.join(garnish.filename());
-            let result = serde_json::to_vec(&data)
-                .map_err(anyhow::Error::from)
-                .and_then(|bytes| enwiro_sdk::fs::atomic_write(&path, &bytes).map_err(Into::into));
-            if let Err(e) = result {
-                tracing::debug!(error = %e, garnish = garnish.name(), "garnish gear write failed, continuing");
+            if !enwiro_sdk::dropin::write_json_file(&path, &data) {
                 continue;
             }
             fire_hooks_if_enabled(cfg, &data, project_path);
@@ -167,16 +163,7 @@ impl<W: Write> CommandContext<W> {
                 let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
                 let gear_path = enwiro_sdk::gear::gear_dir(&env_dir)
                     .join(enwiro_sdk::gear::gear_filename(cookbook.name()));
-                match serde_json::to_vec(&json) {
-                    Ok(bytes) => {
-                        if let Err(e) = enwiro_sdk::fs::atomic_write(&gear_path, &bytes) {
-                            tracing::debug!(error = %e, "Failed to write gear file, continuing");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "Failed to serialise gear JSON, continuing");
-                    }
-                }
+                enwiro_sdk::dropin::write_json_file(&gear_path, &json);
             }
             Ok(None) => {}
             Err(e) => {
@@ -201,16 +188,7 @@ impl<W: Write> CommandContext<W> {
                     version: enwiro_sdk::external_paths::SCHEMA_VERSION,
                     paths,
                 };
-                match serde_json::to_vec(&data) {
-                    Ok(bytes) => {
-                        if let Err(e) = enwiro_sdk::fs::atomic_write(&file_path, &bytes) {
-                            tracing::debug!(error = %e, "Failed to write external-paths file, continuing");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "Failed to serialise external-paths JSON, continuing");
-                    }
-                }
+                enwiro_sdk::dropin::write_json_file(&file_path, &data);
             }
             Ok(_) => {}
             Err(e) => {

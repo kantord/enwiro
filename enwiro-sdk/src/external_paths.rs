@@ -106,7 +106,7 @@ pub fn load_external_paths(env_dir: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn write(dir: &Path, name: &str, paths: &[&str]) {
+    fn write_declaration(dir: &Path, name: &str, paths: &[&str]) {
         let data = ExternalPathsFileData {
             version: SCHEMA_VERSION,
             paths: paths.iter().map(|p| p.to_string()).collect(),
@@ -128,8 +128,8 @@ mod tests {
     #[test]
     fn load_merges_and_dedups_across_files() {
         let env_dir = tempfile::tempdir().unwrap();
-        write(env_dir.path(), "git", &["/repo/a", "/repo/b"]);
-        write(env_dir.path(), "github", &["/repo/b", "/repo/c"]);
+        write_declaration(env_dir.path(), "git", &["/repo/a", "/repo/b"]);
+        write_declaration(env_dir.path(), "github", &["/repo/b", "/repo/c"]);
         assert_eq!(
             load_external_paths(env_dir.path()),
             vec![
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn load_skips_an_unparsable_file_and_keeps_the_rest() {
         let env_dir = tempfile::tempdir().unwrap();
-        write(env_dir.path(), "good", &["/repo/a"]);
+        write_declaration(env_dir.path(), "good", &["/repo/a"]);
         std::fs::write(
             external_paths_dir(env_dir.path()).join("cookbook-bad.json"),
             b"not json",

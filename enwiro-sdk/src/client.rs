@@ -71,6 +71,63 @@ pub fn sort_cookbooks(cookbooks: &mut [Box<dyn CookbookTrait>]) {
     });
 }
 
+/// Parse `invoke_result`'s stdout as JSON `T`, or `None` for any failure
+/// (the RPC call itself failing, or malformed JSON). Shared by every
+/// cookbook-declared-metadata subcommand invoked via the daemon RPC (`gear`,
+/// `external-paths`, and future ones): all of them are best-effort by the
+/// same contract, so callers turn `None` into whatever "nothing declared"
+/// looks like for their own return type.
+fn best_effort_json_via_rpc<T: serde::de::DeserializeOwned>(
+    invoke_result: anyhow::Result<String>,
+    cookbook: &str,
+    subcommand: &str,
+) -> Option<T> {
+    let stdout = match invoke_result {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(%cookbook, %subcommand, error = %e, "Cookbook RPC failed");
+            return None;
+        }
+    };
+    match serde_json::from_str(&stdout) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::debug!(%cookbook, %subcommand, error = %e, "Cookbook stdout was not valid JSON");
+            None
+        }
+    }
+}
+
+/// Same contract as [`best_effort_json_via_rpc`], for the `CookbookClient`
+/// (direct subprocess) path: also checks the exit status before parsing,
+/// since a spawned subcommand can fail without ever erroring on spawn.
+fn best_effort_json_via_subprocess<T: serde::de::DeserializeOwned>(
+    spawn_result: anyhow::Result<Output>,
+    cookbook: &str,
+    recipe: &str,
+    subcommand: &str,
+) -> Option<T> {
+    let output = match spawn_result {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::debug!(%cookbook, %subcommand, error = %e, "Cookbook exec failed");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::debug!(%cookbook, %subcommand, %recipe, %stderr, "Cookbook subcommand returned non-zero");
+        return None;
+    }
+    match serde_json::from_slice(&output.stdout) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::debug!(%cookbook, %subcommand, error = %e, "Cookbook stdout was not valid JSON");
+            None
+        }
+    }
+}
+
 pub struct CookbookClient {
     plugin: Plugin,
     metadata: CookbookMetadata,
@@ -350,45 +407,25 @@ impl CookbookTrait for RpcCookbookClient {
         self.metadata.default_priority.unwrap_or(DEFAULT_PRIORITY)
     }
 
-    /// Best-effort `gear <recipe>` via the daemon. Any failure path
-    /// (cookbook doesn't implement gear, exec error, malformed JSON)
-    /// degrades to `Ok(None)` so a missing or broken `gear` never blocks
-    /// cooking — same contract as `CookbookClient::gear`.
+    /// Best-effort `gear <recipe>` via the daemon -- see
+    /// [`best_effort_json_via_rpc`] for the shared failure contract.
     fn gear(&self, recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
-        let stdout = match self.invoke("gear", vec![recipe.to_string()]) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear RPC failed");
-                return Ok(None);
-            }
-        };
-        match serde_json::from_str::<serde_json::Value>(&stdout) {
-            Ok(v) => Ok(Some(v)),
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear stdout was not valid JSON");
-                Ok(None)
-            }
-        }
+        Ok(best_effort_json_via_rpc(
+            self.invoke("gear", vec![recipe.to_string()]),
+            self.plugin.name.as_str(),
+            "gear",
+        ))
     }
 
-    /// Best-effort `external-paths <recipe>` via the daemon. Any failure
-    /// path (cookbook doesn't implement it, exec error, malformed JSON)
-    /// degrades to `Ok(Vec::new())` -- same contract as `gear`.
+    /// Best-effort `external-paths <recipe>` via the daemon -- see
+    /// [`best_effort_json_via_rpc`] for the shared failure contract.
     fn external_paths(&self, recipe: &str) -> anyhow::Result<Vec<String>> {
-        let stdout = match self.invoke("external-paths", vec![recipe.to_string()]) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths RPC failed");
-                return Ok(Vec::new());
-            }
-        };
-        match serde_json::from_str::<Vec<String>>(&stdout) {
-            Ok(paths) => Ok(paths),
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths stdout was not valid JSON");
-                Ok(Vec::new())
-            }
-        }
+        Ok(best_effort_json_via_rpc(
+            self.invoke("external-paths", vec![recipe.to_string()]),
+            self.plugin.name.as_str(),
+            "external-paths",
+        )
+        .unwrap_or_default())
     }
 }
 
@@ -444,57 +481,29 @@ impl CookbookTrait for CookbookClient {
         self.metadata.default_priority.unwrap_or(DEFAULT_PRIORITY)
     }
 
-    /// Invoke the cookbook binary's optional `gear <recipe>` subcommand and
-    /// parse its stdout as JSON. Returns `Ok(None)` if the subcommand fails
-    /// for any reason (old cookbook that doesn't implement `gear`, exec
-    /// error, malformed JSON) so a missing or broken `gear` never blocks
-    /// cooking. Best-effort by design.
+    /// Invoke the cookbook binary's optional `gear <recipe>` subcommand --
+    /// see [`best_effort_json_via_subprocess`] for the shared failure
+    /// contract.
     fn gear(&self, recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
-        let output = match self.spawn_with_payload(&["gear", recipe]) {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear exec failed");
-                return Ok(None);
-            }
-        };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::debug!(cookbook = %self.plugin.name, recipe = %recipe, %stderr, "Cookbook gear subcommand returned non-zero");
-            return Ok(None);
-        }
-        match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-            Ok(json) => Ok(Some(json)),
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook gear stdout was not valid JSON");
-                Ok(None)
-            }
-        }
+        Ok(best_effort_json_via_subprocess(
+            self.spawn_with_payload(&["gear", recipe]),
+            self.plugin.name.as_str(),
+            recipe,
+            "gear",
+        ))
     }
 
     /// Invoke the cookbook binary's optional `external-paths <recipe>`
-    /// subcommand and parse its stdout as a JSON string array. Returns
-    /// `Ok(Vec::new())` for any failure (old cookbook that doesn't
-    /// implement it, exec error, malformed JSON) -- same contract as `gear`.
+    /// subcommand -- see [`best_effort_json_via_subprocess`] for the shared
+    /// failure contract.
     fn external_paths(&self, recipe: &str) -> anyhow::Result<Vec<String>> {
-        let output = match self.spawn_with_payload(&["external-paths", recipe]) {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths exec failed");
-                return Ok(Vec::new());
-            }
-        };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::debug!(cookbook = %self.plugin.name, recipe = %recipe, %stderr, "Cookbook external-paths subcommand returned non-zero");
-            return Ok(Vec::new());
-        }
-        match serde_json::from_slice::<Vec<String>>(&output.stdout) {
-            Ok(paths) => Ok(paths),
-            Err(e) => {
-                tracing::debug!(cookbook = %self.plugin.name, error = %e, "Cookbook external-paths stdout was not valid JSON");
-                Ok(Vec::new())
-            }
-        }
+        Ok(best_effort_json_via_subprocess(
+            self.spawn_with_payload(&["external-paths", recipe]),
+            self.plugin.name.as_str(),
+            recipe,
+            "external-paths",
+        )
+        .unwrap_or_default())
     }
 }
 
