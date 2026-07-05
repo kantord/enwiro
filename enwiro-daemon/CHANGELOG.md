@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.15](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.14...enwiro-daemon-v0.0.15) - 2026-07-05
+
+### Added
+
+- harden claude-in-container auth and go Podman-only ([#683](https://github.com/kantord/enwiro/pull/683))
+- run isolated containers as the host user ([#682](https://github.com/kantord/enwiro/pull/682))
+- allow running claude from an isolated shell
+- bind claude auth proxy to teh container bridge ([#678](https://github.com/kantord/enwiro/pull/678))
+
+### Fixed
+
+- bind-mount a git worktree's main repo into the container ([#685](https://github.com/kantord/enwiro/pull/685))
+- sanitize environment names before using them as OCI image tags ([#686](https://github.com/kantord/enwiro/pull/686))
+
 ## [0.0.14](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.13...enwiro-daemon-v0.0.14) - 2026-07-02
 
 ### Added

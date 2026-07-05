@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.53](https://github.com/kantord/enwiro/compare/enwiro-v0.3.52...enwiro-v0.3.53) - 2026-07-05
+
+### Fixed
+
+- bind-mount a git worktree's main repo into the container ([#685](https://github.com/kantord/enwiro/pull/685))
+
 ## [0.3.52](https://github.com/kantord/enwiro/compare/enwiro-v0.3.51...enwiro-v0.3.52) - 2026-07-02
 
 ### Other
