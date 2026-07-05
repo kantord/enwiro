@@ -794,7 +794,17 @@ mod tests {
 
         let paths = resolve_external_paths(&config, "my-project@feature-x").unwrap();
 
-        assert_eq!(paths, vec![repo_path.to_str().unwrap().to_string()]);
+        // `repo.workdir()` resolves symlinks (libgit2 canonicalizes the repo
+        // path internally), so compare against the canonical form -- on
+        // macOS, `TempDir`'s path lives under `/var/folders/...`, itself a
+        // symlink to `/private/var/folders/...`, and the raw, unresolved
+        // path would never match. Same convention as
+        // `enwiro-cookbook-github`'s `test_discovers_regular_repo`.
+        let expected_repo_path = repo_path.canonicalize().unwrap();
+        assert_eq!(
+            paths,
+            vec![expected_repo_path.to_str().unwrap().to_string()]
+        );
     }
 
     #[test]
