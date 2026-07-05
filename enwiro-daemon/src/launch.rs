@@ -274,6 +274,22 @@ fn build_container_argv(
     let mut argv = vec!["run".to_string(), "--rm".to_string()];
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
     argv.extend(bind_mount_args(environment_path));
+    // `environment_path` is often enwiro's own stable per-env symlink
+    // (`<workspaces_directory>/<name>/<name>`), not the real underlying path --
+    // that indirection is what lets an env keep the same address across
+    // re-cooks even if what a cookbook produces underneath changes. But some
+    // tools hard-code the *real* absolute path into their own metadata (e.g. a
+    // git worktree's main repo references this worktree's own real path in its
+    // reverse `.git/worktrees/<name>/gitdir` pointer), which won't resolve
+    // inside a container that only sees the symlink path. Mount the real path
+    // too, purely additively: the symlink mount above is untouched, so cwd and
+    // every other consumer keep seeing the same stable address as before.
+    if let Ok(real_path) = std::fs::canonicalize(environment_path)
+        && let Some(real_path) = real_path.to_str()
+        && real_path != environment_path
+    {
+        argv.extend(bind_mount_args(real_path));
+    }
     // Cookbooks may declare that this environment depends on additional host
     // paths beyond its own directory to function -- e.g. a git worktree's
     // `.git` is a pointer into a separate main repo holding the shared object
@@ -288,6 +304,21 @@ fn build_container_argv(
     // cookbook returned (a bind-mounted clone, a worktree elsewhere, anything),
     // while enwiro's own per-env metadata always lives in its managed
     // workspaces directory, one level above the project-pointing symlink.
+    //
+    // Known side effect for git worktrees: mounting the main repo mounts its
+    // whole `.git`, including the object database every branch's commits live
+    // in and the `.git/worktrees/` directory listing every worktree of that
+    // repo. So this isn't scoped to "this worktree": any committed content on
+    // any branch of the repo is already reachable (`git show`/`checkout` any
+    // commit), and `git worktree list` just makes the other worktrees' names
+    // and commit hashes convenient to find (others show `prunable`, since
+    // their real checkout paths aren't mounted -- but their commits are, via
+    // the shared object database). Only *uncommitted* changes sitting in
+    // another worktree's own working directory stay inaccessible. Accepted
+    // for now: scoping `external_paths` down to a single branch's reachable
+    // objects would need cookbook-side git-internals knowledge disproportionate
+    // to the gain, and the underlying repo's access control already governs
+    // who can cook an env from it in the first place.
     let env_dir = workspaces_directory.join(environment_name);
     for path in enwiro_sdk::external_paths::load_external_paths(&env_dir) {
         argv.extend(bind_mount_args(&path));
@@ -589,6 +620,58 @@ mod tests {
                 .any(|w| w[0] == "--mount" && w[1] == expected),
             "{argv:?}"
         );
+    }
+
+    // `environment_path` is often enwiro's own stable per-env symlink, not the
+    // env's real underlying path -- e.g. a git worktree's main repo references
+    // the worktree's own *real* absolute path in its reverse `.git/worktrees/
+    // <name>/gitdir` pointer, which needs to resolve inside the container too.
+    #[test]
+    fn container_argv_additionally_mounts_the_real_path_behind_a_symlinked_env_path() {
+        let real_target = tempfile::tempdir().unwrap();
+        let symlink_parent = tempfile::tempdir().unwrap();
+        let symlinked_env_path = symlink_parent.path().join("env-symlink");
+        std::os::unix::fs::symlink(real_target.path(), &symlinked_env_path).unwrap();
+
+        let env = ContainerEnv {
+            environment_path: symlinked_env_path.to_str().unwrap(),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+
+        let symlink_mount = format!(
+            "type=bind,source={},target={}",
+            symlinked_env_path.display(),
+            symlinked_env_path.display()
+        );
+        let real_mount = format!(
+            "type=bind,source={},target={}",
+            real_target.path().display(),
+            real_target.path().display()
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--mount" && w[1] == symlink_mount),
+            "missing the primary symlink mount: {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--mount" && w[1] == real_mount),
+            "missing the additive real-path mount: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn container_argv_mounts_a_non_symlinked_env_path_only_once() {
+        let real_dir = tempfile::tempdir().unwrap();
+        let env = ContainerEnv {
+            environment_path: real_dir.path().to_str().unwrap(),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+
+        let mount_count = argv.windows(2).filter(|w| w[0] == "--mount").count();
+        assert_eq!(mount_count, 1, "{argv:?}");
     }
 
     #[test]
