@@ -765,14 +765,9 @@ mod tests {
         assert!(wt_repo.is_worktree(), "Should be a git worktree");
     }
 
-    // The host CLI calls `external_paths` as a fresh, separate process
-    // invocation strictly *after* `cook` already created the worktree (see
-    // `write_external_paths_if_present`) -- so this test cooks first, then
-    // resolves, to match the real production ordering. A naive
-    // `resolve_external_paths` call against the pre-cook state (branch not
-    // yet checked out) would pass even with the bug this test guards
-    // against, since the compound `repo@branch` key is only hidden from
-    // `build_repository_hashmap` *after* the branch is checked out.
+    // Matches real production ordering (external_paths runs as a fresh
+    // process after cook already checked the branch out) -- see
+    // resolve_external_paths's doc comment for why that timing matters.
     #[test]
     fn test_external_paths_reports_the_main_repo_for_an_already_cooked_branch_recipe() {
         let tmp = TempDir::new().unwrap();

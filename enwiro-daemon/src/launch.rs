@@ -555,10 +555,8 @@ mod tests {
     fn container_argv_mounts_a_declared_external_path() {
         let main_repo = tempfile::tempdir().unwrap();
         let env_path = tempfile::tempdir().unwrap();
-        // Declarations live under `<workspaces_directory>/<environment_name>`
-        // (enwiro's own per-env metadata dir, e.g. `~/.enwiro_envs/<name>`),
-        // not under the project's own path -- the project might be a
-        // bind-mounted clone or worktree anywhere on disk.
+        // Deliberately distinct from `env_path` -- see `build_container_argv`'s
+        // doc comment for why declarations live under `workspaces_directory`.
         let workspaces_dir = tempfile::tempdir().unwrap();
         let env_dir = workspaces_dir.path().join("x");
         let data = enwiro_sdk::external_paths::ExternalPathsFileData {
