@@ -95,11 +95,15 @@ pub fn parse_dispatch_args(args: &[OsString]) -> anyhow::Result<DispatchTarget> 
     })
 }
 
-/// `workspaces_directory/<name>/<name>` is the inner symlink to the
-/// cooked project root; the dispatcher execs there so `just <recipe>`
-/// finds the justfile.
-pub fn env_project_dir(workspaces_directory: &Path, env_name: &str) -> PathBuf {
-    workspaces_directory.join(env_name).join(env_name)
+/// The env's project directory, resolved the same way `enw wrap`/`enw info`
+/// do (respecting `main_folder` for composed environments, #375) so gear
+/// dispatch never disagrees with them about where the project lives.
+pub fn env_project_dir(workspaces_directory: &Path, env_name: &str) -> anyhow::Result<PathBuf> {
+    let workspaces_directory = workspaces_directory
+        .to_str()
+        .context("workspaces_directory is not valid UTF-8")?;
+    let environment = crate::environments::Environment::get_one(workspaces_directory, env_name)?;
+    Ok(PathBuf::from(environment.path))
 }
 
 pub fn active_env_name() -> anyhow::Result<String> {
@@ -218,7 +222,7 @@ pub fn dispatch(workspaces_directory: &Path, args: &[OsString]) -> anyhow::Resul
         None => active_env_name()?,
     };
     let env_dir = workspaces_directory.join(&env_name);
-    let project_dir = env_project_dir(workspaces_directory, &env_name);
+    let project_dir = env_project_dir(workspaces_directory, &env_name)?;
 
     let gear_map = LoadedGear::from_env_dir(&env_dir)
         .with_context(|| format!("could not load gear for env `{env_name}`"))?
@@ -511,11 +515,24 @@ mod tests {
         use super::*;
 
         #[test]
-        fn project_dir_appends_inner_symlink_name() {
+        fn project_dir_resolves_the_inner_symlink() {
+            let root = tempfile::tempdir().unwrap();
+            let env_dir = root.path().join("my-env");
+            std::fs::create_dir(&env_dir).unwrap();
+            let target = env_dir.join("target");
+            std::fs::create_dir(&target).unwrap();
+            std::os::unix::fs::symlink(&target, env_dir.join("my-env")).unwrap();
+
             assert_eq!(
-                env_project_dir(Path::new("/tmp/ws"), "my-env"),
-                PathBuf::from("/tmp/ws/my-env/my-env")
+                env_project_dir(root.path(), "my-env").unwrap(),
+                env_dir.join("my-env")
             );
+        }
+
+        #[test]
+        fn project_dir_errors_for_a_nonexistent_env() {
+            let root = tempfile::tempdir().unwrap();
+            assert!(env_project_dir(root.path(), "no-such-env").is_err());
         }
 
         #[test]
