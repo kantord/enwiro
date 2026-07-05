@@ -92,6 +92,26 @@ When both hold, the daemon returns a container invocation roughly equivalent to:
   Linux host. A `--mount` is used rather than `-v src:dst` so a path containing a
   colon is not mis-parsed.
 - `-it` is used when the caller's stdin is a terminal, `-i` otherwise.
+- If the project directory is itself a symlink (enwiro's own per-environment
+  layout uses one, so an environment keeps a stable address across re-cooks),
+  the real path behind it is bind-mounted too, alongside the symlink path.
+  Some tools hard-code the real absolute path into their own metadata - a git
+  worktree's main repo, for instance, references the worktree's real path in
+  its own internal bookkeeping - and need it to resolve inside the container.
+- Cookbooks can also declare that an environment depends on additional host
+  paths beyond its own project directory - e.g. a git worktree's main repo,
+  which holds the shared object database the worktree's `.git` points into.
+  Each declared path is mounted at its own identical host location.
+
+> For git worktrees specifically: mounting a worktree's main repo mounts its
+> whole `.git`, including the object database every branch's commits live in.
+> So this isn't scoped to just this worktree - any committed content on any
+> branch of the repo is already reachable from inside the container (`git
+> show`/`checkout` any commit), and `git worktree list` just makes the other
+> worktrees' names and commit hashes easy to find (others show `prunable`,
+> since their checkout paths aren't mounted, but their commits are). Only
+> *uncommitted* changes sitting in another worktree's own working directory
+> stay inaccessible.
 
 > The image tag is `enwiro/<name>`, with the environment name sanitized into a
 > valid OCI repository component first (lowercased, invalid characters
