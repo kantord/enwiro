@@ -159,6 +159,15 @@ pub fn env_info<W: Write>(ctx: &mut CommandContext<W>, args: EnvInfoArgs) -> any
         .or_else(resolve_env_name_from_daemon);
     let env_type = env_name.as_deref().and_then(|name| classify_env(ctx, name));
 
+    // Resolved project directory (post main_folder resolution, #375) -- the
+    // stable, external-tool-facing way to learn this without parsing
+    // meta.json's `main_folder` field directly.
+    let env_path = env_name
+        .as_deref()
+        .filter(|_| env_type.as_deref() == Some("environment"))
+        .and_then(|name| Environment::get_one(&ctx.config.workspaces_directory, name).ok())
+        .map(|e| e.path);
+
     let env_dir = env_name
         .as_deref()
         .map(|name| Path::new(&ctx.config.workspaces_directory).join(name));
@@ -184,6 +193,9 @@ pub fn env_info<W: Write>(ctx: &mut CommandContext<W>, args: EnvInfoArgs) -> any
             }
             if let Some(t) = &env_type {
                 map.insert("type".to_string(), serde_json::Value::String(t.clone()));
+            }
+            if let Some(p) = &env_path {
+                map.insert("path".to_string(), serde_json::Value::String(p.clone()));
             }
             if !gear.is_empty() {
                 let mut gear_names: Vec<&str> = gear.keys().map(|s| s.as_str()).collect();
@@ -211,6 +223,7 @@ pub fn env_info<W: Write>(ctx: &mut CommandContext<W>, args: EnvInfoArgs) -> any
         let extra_fields: Vec<(&str, Option<String>)> = vec![
             ("name", env_name.clone()),
             ("type", env_type.clone()),
+            ("path", env_path.clone()),
             ("status", status_str.map(|s| s.to_string())),
         ];
 
@@ -264,6 +277,52 @@ mod tests {
             output.contains("environment"),
             "output should show type as environment: {output}"
         );
+    }
+
+    #[rstest]
+    fn test_env_info_text_shows_resolved_path(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut ctx, _, _) = context_object;
+        ctx.create_mock_environment("my-env");
+
+        env_info(
+            &mut ctx,
+            EnvInfoArgs {
+                name: Some("my-env".to_string()),
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let output = ctx.get_output();
+        let expected_path = temp_dir.path().join("my-env").join("my-env");
+        assert!(
+            output.contains(expected_path.to_str().unwrap()),
+            "output should contain the resolved project path: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_env_info_json_shows_resolved_path(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut ctx, _, _) = context_object;
+        ctx.create_mock_environment("my-env");
+
+        env_info(
+            &mut ctx,
+            EnvInfoArgs {
+                name: Some("my-env".to_string()),
+                json: true,
+            },
+        )
+        .unwrap();
+
+        let output = ctx.get_output();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let expected_path = temp_dir.path().join("my-env").join("my-env");
+        assert_eq!(parsed["path"], expected_path.to_str().unwrap());
     }
 
     #[rstest]

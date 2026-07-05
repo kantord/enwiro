@@ -29,6 +29,12 @@ pub struct EnvStats {
     pub cookbook: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipe: Option<String>,
+    /// Name of the sub-symlink that represents this env's default project
+    /// directory, for envs with more than one (e.g. composed environments,
+    /// see #375). Absent for the common single-project case, where the
+    /// same-named symlink is always used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_folder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -226,16 +232,23 @@ pub fn record_prep_per_env(env_dir: &Path) {
     }
 }
 
-/// Save cookbook, recipe, and description metadata in per-env meta.json. Best-effort.
+/// Save cookbook, recipe, description, and main_folder metadata in per-env
+/// meta.json. Best-effort.
+///
+/// `main_folder` is written unconditionally on every cook so that newly
+/// cooked envs never depend on `resolve_project_symlink`'s same-named-symlink
+/// fallback (#375) -- only envs cooked before this existed do.
 pub fn record_cook_metadata_per_env(
     env_dir: &Path,
     cookbook: &str,
     recipe: &str,
     description: Option<&str>,
+    main_folder: &str,
 ) {
     let mut meta = load_env_meta(env_dir);
     meta.cookbook = Some(cookbook.to_string());
     meta.recipe = Some(recipe.to_string());
+    meta.main_folder = Some(main_folder.to_string());
     if let Some(d) = description {
         meta.description = Some(d.to_string());
     }
@@ -359,12 +372,14 @@ mod tests {
             "github",
             "kantord/enwiro#325",
             Some("Fix auth bug"),
+            "my-project",
         );
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.cookbook, Some("github".to_string()));
         assert_eq!(meta.recipe, Some("kantord/enwiro#325".to_string()));
         assert_eq!(meta.description, Some("Fix auth bug".to_string()));
+        assert_eq!(meta.main_folder, Some("my-project".to_string()));
     }
 
     #[test]
@@ -373,7 +388,7 @@ mod tests {
         let env_dir = dir.path().join("my-project");
         fs::create_dir(&env_dir).unwrap();
 
-        record_cook_metadata_per_env(&env_dir, "github", "owner/repo#42", None);
+        record_cook_metadata_per_env(&env_dir, "github", "owner/repo#42", None, "my-project");
 
         let raw = fs::read_to_string(env_dir.join("meta.json")).unwrap();
         assert!(
@@ -416,7 +431,13 @@ mod tests {
 
         record_activation_per_env(&env_dir);
         record_activation_per_env(&env_dir);
-        record_cook_metadata_per_env(&env_dir, "git", "my/project", Some("My project"));
+        record_cook_metadata_per_env(
+            &env_dir,
+            "git",
+            "my/project",
+            Some("My project"),
+            "my-project",
+        );
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.signals.activation_buffer.len(), 2);

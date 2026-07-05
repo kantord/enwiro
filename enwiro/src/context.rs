@@ -130,7 +130,13 @@ impl<W: Write> CommandContext<W> {
         description: Option<&str>,
     ) {
         let env_dir = Path::new(&self.config.workspaces_directory).join(env_name);
-        crate::usage_stats::record_cook_metadata_per_env(&env_dir, cookbook, recipe, description);
+        crate::usage_stats::record_cook_metadata_per_env(
+            &env_dir,
+            cookbook,
+            recipe,
+            description,
+            env_name,
+        );
     }
 
     /// Run every discovered Garnish plugin against the cooked project;
@@ -583,6 +589,31 @@ mod tests {
         assert!(env_dir.is_dir());
         let inner_link = env_dir.join("my-project");
         assert!(inner_link.is_symlink());
+    }
+
+    #[rstest]
+    fn test_cook_environment_writes_main_folder_to_meta(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.write_cache_entry("git", "my-project");
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project", cooked_dir.to_str().unwrap())],
+        ))];
+
+        context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
+
+        let env_dir = temp_dir.path().join("my-project");
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(meta.main_folder.as_deref(), Some("my-project"));
     }
 
     #[rstest]
