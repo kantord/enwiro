@@ -89,9 +89,12 @@ impl<W: Write> CommandContext<W> {
 
         tracing::debug!(name = %name, cookbook = %cookbook_name, "Found recipe in cache");
         let env_path = cookbook.cook(name)?;
-        let env = self.create_environment_symlink(name, &env_path)?;
         let flat_name = name.replace('/', "-");
+        // main_folder must be written before create_environment_symlink resolves its
+        // return value (via Environment::get_one) -- otherwise a re-cook could read a
+        // stale main_folder left over from a previous cook of the same env.
         self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
+        let env = self.create_environment_symlink(name, &env_path)?;
         self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
         self.write_external_paths_if_present(cookbook.as_ref(), name, &flat_name);
         self.write_garnish_gear(&env_path, &flat_name, cfg);
@@ -614,6 +617,49 @@ mod tests {
         let env_dir = temp_dir.path().join("my-project");
         let meta = crate::usage_stats::load_env_meta(&env_dir);
         assert_eq!(meta.main_folder.as_deref(), Some("my-project"));
+    }
+
+    #[rstest]
+    fn test_recooking_does_not_resolve_a_stale_main_folder(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let first_target = temp_dir.path().join("first-target");
+        fs::create_dir(&first_target).unwrap();
+        context_object.write_cache_entry("git", "my-project");
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project", first_target.to_str().unwrap())],
+        ))];
+        context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
+
+        // Simulate a leftover main_folder from a hypothetical composed env
+        // (#375) pointing at a sibling symlink that still exists on disk.
+        let env_dir = temp_dir.path().join("my-project");
+        let stale_target = temp_dir.path().join("stale-target");
+        fs::create_dir(&stale_target).unwrap();
+        std::os::unix::fs::symlink(&stale_target, env_dir.join("stale-folder")).unwrap();
+        let mut meta = crate::usage_stats::load_env_meta(&env_dir);
+        meta.main_folder = Some("stale-folder".to_string());
+        enwiro_daemon::meta::save_env_meta(&env_dir, &meta).unwrap();
+
+        let second_target = temp_dir.path().join("second-target");
+        fs::create_dir(&second_target).unwrap();
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project", second_target.to_str().unwrap())],
+        ))];
+
+        let env = context_object
+            .cook_environment("my-project", &CookConfig::default())
+            .unwrap();
+
+        assert_eq!(env.path, env_dir.join("my-project").to_str().unwrap());
     }
 
     #[rstest]

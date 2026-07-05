@@ -23,7 +23,9 @@ pub struct Environment {
 /// require main_folder to resolve.
 fn resolve_project_symlink(env_dir: &Path, id: &str) -> Option<PathBuf> {
     let meta = enwiro_daemon::meta::load_env_meta(env_dir);
-    if let Some(main_folder) = meta.main_folder {
+    if let Some(main_folder) = meta.main_folder
+        && is_plain_component(&main_folder)
+    {
         let candidate = env_dir.join(main_folder);
         if candidate.is_symlink() {
             return Some(candidate);
@@ -31,6 +33,12 @@ fn resolve_project_symlink(env_dir: &Path, id: &str) -> Option<PathBuf> {
     }
     let default = env_dir.join(id);
     default.is_symlink().then_some(default)
+}
+
+/// Whether `name` is safe to join onto `env_dir` as a single path segment
+/// (no traversal outside it): non-empty, no path separator, and not `.`/`..`.
+fn is_plain_component(name: &str) -> bool {
+    !name.is_empty() && !name.contains('/') && name != "." && name != ".."
 }
 
 impl Environment {
@@ -159,6 +167,25 @@ mod tests {
         let env_dir = new_format_env(root.path(), "my-env");
         symlink_to_fresh_dir(&env_dir, "my-env");
         write_main_folder(&env_dir, "does-not-exist");
+
+        let environments = Environment::get_all(root.path().to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            environments["my-env"].path,
+            env_dir.join("my-env").to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn get_all_falls_back_to_default_when_main_folder_attempts_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        let env_dir = new_format_env(root.path(), "my-env");
+        symlink_to_fresh_dir(&env_dir, "my-env");
+        // A symlink that genuinely lives outside env_dir -- if main_folder's
+        // traversal guard were missing, this would resolve to it instead of
+        // falling back to the default same-named symlink.
+        symlink_to_fresh_dir(root.path(), "escaped");
+        write_main_folder(&env_dir, "../escaped");
 
         let environments = Environment::get_all(root.path().to_str().unwrap()).unwrap();
 
