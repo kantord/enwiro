@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.24](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.23...enwiro-cookbook-git-v0.1.24) - 2026-07-05
+
+### Fixed
+
+- bind-mount a git worktree's main repo into the container ([#685](https://github.com/kantord/enwiro/pull/685))
+
 ## [0.1.23](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.22...enwiro-cookbook-git-v0.1.23) - 2026-06-28
 
 ### Other
