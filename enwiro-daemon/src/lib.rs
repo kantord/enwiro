@@ -44,6 +44,9 @@ pub struct DaemonConfig {
     /// Root directory under which env worktrees live; switch events name
     /// envs by basename, resolved as `workspaces_directory/<env_name>`.
     pub workspaces_directory: PathBuf,
+    /// OCI runtime for container launches (issue #540); see
+    /// `config::ConfigurationValues::container_runtime`.
+    pub container_runtime: Option<String>,
 }
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
@@ -259,6 +262,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let DaemonConfig {
         workspaces_directory,
+        container_runtime,
     } = config;
 
     let setsid_result = unsafe { libc::setsid() };
@@ -288,6 +292,7 @@ pub async fn run(
         rpc_socket_path.clone(),
         active_env,
         workspaces_directory.clone(),
+        container_runtime,
     ));
 
     // Host-side Claude auth proxy: keeps the OAuth token off the container.

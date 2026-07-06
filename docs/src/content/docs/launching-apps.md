@@ -131,6 +131,39 @@ path is still image-gated, nothing changes until you create a trigger image.
 To build just the daemon by hand instead:
 `cargo build --release -p enwiro-daemon --features container-wrap`.
 
+### Running under a different OCI runtime (microVM isolation)
+
+By default the container path uses whatever OCI runtime the engine defaults
+to (typically `runc` or `crun`). To run containers inside a lightweight VM
+instead -- a stronger isolation boundary, since each container gets its own
+guest kernel rather than sharing the host's -- set `container_runtime` in
+`~/.config/enwiro/enwiro.toml`:
+
+```toml
+container_runtime = "/usr/bin/krun"
+```
+
+[`krun`](https://github.com/containers/krun) is crun's own
+[libkrun](https://github.com/containers/libkrun)-backed OCI runtime handler:
+a drop-in `--runtime` swap, no separate CLI or exec model, verified working
+rootless with genuine KVM-backed isolation (a launched container's kernel
+version differs from the host's). Any `--runtime`-compatible value works, not
+just `krun` -- an explicit path to `crun`/`runc` pins that runtime instead of
+the engine's default, for example.
+
+Restart the daemon after changing it (`systemctl --user restart
+enwiro-daemon.service`), since it's read once at startup. This is a single
+global toggle applied to every containerized launch, not a per-environment or
+per-app setting.
+
+> `krun` ignores `--userns=keep-id`/`--user` entirely -- a container always
+> runs as `uid=0` in its own guest kernel regardless of those flags, so
+> enwiro skips them specifically for `krun`. It solves the problem those
+> flags exist for (root-owned files leaking onto the host) a different way:
+> `krun` does its own uid-mapping for the bind-mounted share independent of
+> `--userns`. Any *other* configured runtime still gets the normal
+> `--userns=keep-id`/`--user` treatment.
+
 ### Try it end to end
 
 ```sh
@@ -201,6 +234,11 @@ accordingly.
 - **Terminal emulators are wrapped specially.** A recognised terminal (currently
   kitty only) runs on the host with the environment's shell wrapped inside it, so
   the terminal needs no display passthrough. This is an experimental pilot.
+- **The OCI runtime is configurable, one setting for every environment.** See
+  [Running under a different OCI
+  runtime](#running-under-a-different-oci-runtime-microvm-isolation) above --
+  by default it's the engine's own default runtime; setting `container_runtime`
+  swaps in something like `krun` for microVM-level isolation instead.
 - **Claude Code is authenticated through a host-side proxy** so the credential
   never enters the container. See [Running Claude Code in
   isolation](#running-claude-code-in-isolation) above.
