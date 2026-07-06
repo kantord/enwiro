@@ -32,10 +32,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 test-helpers = []
 
 [dev-dependencies]
-proptest = "1.7"
-rstest = "0.26.0"
-sanitize-filename = "0.6"
-tempfile = "3.25.0"
+proptest = "=1.11.0"
+rstest = "=0.26.1"
+sanitize-filename = "=0.6.0"
+tempfile = "=3.27.0"
 
 [[bin]]
 name = "test-fake-plugin"

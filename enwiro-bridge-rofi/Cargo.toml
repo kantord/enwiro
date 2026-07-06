@@ -14,5 +14,5 @@ serde_json = "1"
 tracing.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
-proptest = "1.7"
+tempfile = "=3.27.0"
+proptest = "=1.11.0"
