@@ -140,16 +140,23 @@ guest kernel rather than sharing the host's -- set `container_runtime` in
 `~/.config/enwiro/enwiro.toml`:
 
 ```toml
-container_runtime = "/usr/bin/krun"
+container_runtime = "krun"
 ```
 
 [`krun`](https://github.com/containers/krun) is crun's own
 [libkrun](https://github.com/containers/libkrun)-backed OCI runtime handler:
 a drop-in `--runtime` swap, no separate CLI or exec model, verified working
 rootless with genuine KVM-backed isolation (a launched container's kernel
-version differs from the host's). Any `--runtime`-compatible value works, not
-just `krun` -- an explicit path to `crun`/`runc` pins that runtime instead of
-the engine's default, for example.
+version differs from the host's). A bare name like `krun` is resolved the same
+way the container engine itself is (a PATH lookup at launch time), so this
+value stays portable across machines with different install layouts -- prefer
+it over a hardcoded path like `/usr/bin/krun` unless you specifically need to
+pin one of several installed copies. Any `--runtime`-compatible value works,
+not just `krun` -- `crun`/`runc` pins that runtime instead of the engine's
+default, for example.
+
+Linux only: `krun` has no macOS build (it's a Linux-native OCI runtime tied to
+KVM), so this setting has no equivalent there yet.
 
 Restart the daemon after changing it (`systemctl --user restart
 enwiro-daemon.service`), since it's read once at startup. This is a single
