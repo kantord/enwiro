@@ -1,0 +1,16 @@
+{
+  "name": "enwiro-monorepo",
+  "private": true,
+  "description": "Repo-root dev tooling (Biome) + pnpm workspace. Per-app JS lives in each crate's own dir, e.g. enw-gui/web.",
+  "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "lint": "biome check",
+    "format": "biome check --write"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.16"
+  }
+}

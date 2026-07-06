@@ -65,3 +65,23 @@ jobs:
         working-directory: docs
       - run: pnpm build
         working-directory: docs
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+      - name: Biome check (format + lint, repo-wide)
+        run: pnpm exec biome check
+      - name: Audit dependencies
+        run: pnpm audit --audit-level high
+      - name: Type-check (tsc)
+        run: pnpm --filter ./enw-gui/web exec tsc -b
+      - name: Build frontend
+        run: pnpm --filter ./enw-gui/web build

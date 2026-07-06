@@ -62,3 +62,27 @@ install-release:
         echo "Installing $crate from crates.io..."
         cargo install "$crate" --force
     done
+
+# Build the whole enw-gui app: frontend (Vite) first, then the Rust binary
+gui-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pnpm install --frozen-lockfile
+    pnpm --filter ./enw-gui/web build
+    cargo build -p enw-gui --release
+
+# Run enw-gui locally: build the frontend statically, then cargo run the backend
+gui-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pnpm install
+    pnpm --filter ./enw-gui/web build
+    cargo run -p enw-gui
+
+# Regenerate the typed API client from the Rust OpenAPI spec (run after changing
+# enw-gui's API). Dumps openapi.json, then runs @hey-api/openapi-ts.
+gui-gen:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run -p enw-gui -- --dump-openapi > enw-gui/web/openapi.json
+    pnpm --filter ./enw-gui/web gen

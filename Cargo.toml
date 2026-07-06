@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "enwiro",
+    "enw-gui",
     "enwiro-adapter-i3wm",
     "enwiro-adapter-tmux",
     "enwiro-bridge-i3-activitywatch",

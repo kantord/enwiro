@@ -22,8 +22,8 @@ use anyhow::Context;
 use async_trait::async_trait;
 use enwiro_sdk::rpc::{
     APPLICATION_ERROR_CODE, CALL_CHAIN_ENV_VAR, CYCLE_DETECTED_CODE, CookbookInvokeParams,
-    CookbookInvokeResult, EnvCurrentResult, EnvMarkParams, EnvMarkResult, EnwiroRpcServer,
-    LaunchResolveParams, LaunchResolveResult,
+    CookbookInvokeResult, EnvCurrentResult, EnvListEntry, EnvListResult, EnvMarkParams,
+    EnvMarkResult, EnwiroRpcServer, LaunchResolveParams, LaunchResolveResult,
 };
 use futures_util::{SinkExt, StreamExt};
 use jsonrpsee::core::server::Methods;
@@ -264,6 +264,45 @@ impl EnwiroRpcServer for DaemonRpc {
         })
         .await
         .map_err(|e| app_err(format!("launch.resolve task failed: {e}")))
+    }
+
+    async fn env_list(&self) -> Result<EnvListResult, ErrorObjectOwned> {
+        let entries = std::fs::read_dir(&self.workspaces_directory).map_err(|e| {
+            app_err(format!(
+                "could not read workspaces directory {}: {e}",
+                self.workspaces_directory.display()
+            ))
+        })?;
+        let names: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+
+        let metas: std::collections::HashMap<String, crate::meta::EnvStats> = names
+            .iter()
+            .map(|name| {
+                (
+                    name.clone(),
+                    load_env_meta(&self.workspaces_directory.join(name)),
+                )
+            })
+            .collect();
+        let now = crate::meta::now_timestamp();
+        let launcher = crate::scoring::launcher_score(&metas, now);
+        let slot = crate::scoring::slot_scores(&metas, now);
+
+        let envs = metas
+            .into_iter()
+            .map(|(name, meta)| EnvListEntry {
+                launcher_score: launcher.get(&name).copied().unwrap_or(0.0),
+                slot_score: slot.get(&name).copied().unwrap_or(0.0),
+                description: meta.description,
+                status: meta.status,
+                name,
+            })
+            .collect();
+
+        Ok(EnvListResult { envs })
     }
 }
 

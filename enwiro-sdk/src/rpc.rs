@@ -139,6 +139,27 @@ pub struct LaunchResolveResult {
     pub env_vars: Vec<(String, String)>,
 }
 
+/// One environment in an `env.list` result: status plus the frecency-derived
+/// relevance scores the daemon computed centrally from its usage signals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvListEntry {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<crate::status::Status>,
+    pub launcher_score: f64,
+    pub slot_score: f64,
+}
+
+/// Result shape for `env.list`: every environment under the daemon's
+/// workspaces directory, scored in one place so consumers (GUI board,
+/// launcher, slot assignment) receive relevance instead of recomputing it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvListResult {
+    pub envs: Vec<EnvListEntry>,
+}
+
 /// Single source of truth for the client↔daemon RPC surface.
 #[jsonrpsee::proc_macros::rpc(server, client)]
 pub trait EnwiroRpc {
@@ -162,6 +183,9 @@ pub trait EnwiroRpc {
         &self,
         params: LaunchResolveParams,
     ) -> Result<LaunchResolveResult, jsonrpsee::types::ErrorObjectOwned>;
+
+    #[method(name = "env.list")]
+    async fn env_list(&self) -> Result<EnvListResult, jsonrpsee::types::ErrorObjectOwned>;
 }
 
 pub mod client;

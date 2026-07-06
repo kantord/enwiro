@@ -12,6 +12,7 @@ pub mod meta;
 #[cfg(feature = "container-wrap")]
 pub mod proxy;
 pub mod rpc;
+pub mod scoring;
 pub use config::ConfigurationValues;
 
 use std::fs;
