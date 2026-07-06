@@ -7,6 +7,11 @@ use enwiro_sdk::plugin::{PluginKind, get_plugins};
 pub struct ConfigurationValues {
     pub workspaces_directory: String,
     pub adapter: Option<String>,
+    /// OCI runtime to pass as `--runtime` for every container launch (e.g.
+    /// `/usr/bin/krun` for microVM isolation via libkrun). `None` uses
+    /// whatever the container engine defaults to. Global for now -- not
+    /// per-environment/per-app policy, which stays north-star (issue #540).
+    pub container_runtime: Option<String>,
 }
 
 impl ::std::default::Default for ConfigurationValues {
@@ -27,6 +32,7 @@ impl ::std::default::Default for ConfigurationValues {
         Self {
             workspaces_directory: default_workspaces_directory.to_str().unwrap().to_string(),
             adapter,
+            container_runtime: None,
         }
     }
 }

@@ -54,6 +54,7 @@ fn is_terminal(command: &str) -> bool {
 pub fn resolve_launch(
     params: &LaunchResolveParams,
     #[allow(unused_variables)] workspaces_directory: &Path,
+    #[allow(unused_variables)] container_runtime: Option<&str>,
 ) -> LaunchResolveResult {
     // Terminal template (issue #540): the terminal runs on the host; if the env
     // containerizes, its inner command is the container invocation for the shell
@@ -71,6 +72,7 @@ pub fn resolve_launch(
                     environment_name: &params.env_name,
                     inject_proxy_shim: claude_oauth_token().is_some(),
                     workspaces_directory,
+                    oci_runtime: container_runtime,
                 };
                 return LaunchResolveResult {
                     program: params.command.clone(),
@@ -105,6 +107,7 @@ pub fn resolve_launch(
                 environment_name: &params.env_name,
                 inject_proxy_shim: claude_oauth_token().is_some(),
                 workspaces_directory,
+                oci_runtime: container_runtime,
             };
             return LaunchResolveResult {
                 program: engine.to_string(),
@@ -202,6 +205,9 @@ struct ContainerEnv<'a> {
     environment_name: &'a str,
     inject_proxy_shim: bool,
     workspaces_directory: &'a Path,
+    /// `--runtime` override for a microVM-backed engine (e.g. `krun`, issue
+    /// #540); `None` uses the engine's own default.
+    oci_runtime: Option<&'a str>,
 }
 
 /// Build the args for a *containerized terminal*: the terminal runs on the host
@@ -253,6 +259,14 @@ fn bind_mount_args(path: &str) -> [String; 2] {
     ]
 }
 
+/// Whether a configured `--runtime` value names `krun` specifically (matched
+/// by basename, since it's typically a full path like `/usr/bin/krun`), as
+/// opposed to any other custom OCI runtime a user might configure.
+#[cfg(feature = "container-wrap")]
+fn is_krun_runtime(runtime: &str) -> bool {
+    Path::new(runtime).file_name() == Some(std::ffi::OsStr::new("krun"))
+}
+
 /// Assemble the `run ...` args (engine excluded; it is the `program`). The env's
 /// project dir is bind-mounted at the *same* path it has on the host, cwd set
 /// there, `ENWIRO_ENV` injected; `-it` when the caller's stdin is a TTY, `-i`
@@ -270,8 +284,20 @@ fn build_container_argv(
         environment_name,
         inject_proxy_shim,
         workspaces_directory,
+        oci_runtime,
     } = *env;
+    // An empty string means "unset", same as the config field being absent --
+    // guards against e.g. `container_runtime = ""` in a config file producing
+    // a broken `--runtime=` argv token instead of just using the default.
+    let oci_runtime = oci_runtime.filter(|r| !r.is_empty());
     let mut argv = vec!["run".to_string(), "--rm".to_string()];
+    // Global OCI-runtime override (issue #540, e.g. `krun` for microVM
+    // isolation via libkrun) -- a blunt, user-configured toggle applying to
+    // every container launch, not a per-environment/per-app policy (that
+    // stays north-star). `None` uses the engine's own default runtime.
+    if let Some(runtime) = oci_runtime {
+        argv.push(format!("--runtime={runtime}"));
+    }
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
     argv.extend(bind_mount_args(environment_path));
     // `environment_path` is often enwiro's own stable per-env symlink
@@ -339,7 +365,19 @@ fn build_container_argv(
     //
     // Linux only: on macOS the container runs in a VM whose file-sharing layer
     // maps ownership, and the daemon's uid is meaningless inside that VM.
-    if cfg!(target_os = "linux") {
+    //
+    // Also skipped specifically for `krun` (issue #540): verified hands-on
+    // that this microVM-backed runtime ignores `--userns` entirely and always
+    // runs as uid=0 inside its own guest kernel, so these flags would be
+    // silently inert there, not just redundant. It happens to still solve the
+    // *problem* these flags target (root-owned droppings) a different way --
+    // krun does its own uid-mapping for the bind-mounted share independent of
+    // `--userns` -- so nothing needs to replace them for krun specifically.
+    // Gated on krun by name, not "any configured runtime": an unrelated
+    // custom runtime (e.g. an explicit crun/runc path) still needs and
+    // supports these flags, and dropping them for it would silently reopen
+    // the exact root-owned-files/dubious-ownership problems they prevent.
+    if cfg!(target_os = "linux") && !oci_runtime.is_some_and(is_krun_runtime) {
         argv.push("--userns=keep-id".to_string());
         argv.push("--user".to_string());
         argv.push(format!("{}:{}", host_uid(), host_gid()));
@@ -520,6 +558,7 @@ mod terminal_tests {
                 interactive: false,
             },
             Path::new("/nonexistent-workspaces-dir"),
+            None,
         );
         assert_eq!(res.program, "kitty");
         assert!(res.args.is_empty());
@@ -543,6 +582,7 @@ mod tests {
             environment_name: "x",
             inject_proxy_shim,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+            oci_runtime: None,
         }
     }
 
@@ -608,6 +648,7 @@ mod tests {
             environment_name: "x",
             inject_proxy_shim: false,
             workspaces_directory: workspaces_dir.path(),
+            oci_runtime: None,
         };
         let argv = build_container_argv(&env, "bash", &[], true);
         let expected = format!(
@@ -682,6 +723,7 @@ mod tests {
             environment_name: "my-proj",
             inject_proxy_shim: false,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+            oci_runtime: None,
         };
         let argv = build_container_argv(&env, "bash", &["-l".to_string()], true);
         // Before the image: run flags + bind mount + cwd + ENWIRO_ENV (plus
@@ -722,6 +764,77 @@ mod tests {
             "{argv:?}"
         );
         assert!(argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
+    }
+
+    // A microVM-backed runtime (e.g. `krun`) ignores `--userns` entirely and
+    // always runs as uid=0 in its own guest kernel -- verified hands-on -- so
+    // these flags would be silently inert, not just redundant.
+    #[test]
+    fn container_argv_skips_userns_keep_id_for_krun() {
+        let env = ContainerEnv {
+            oci_runtime: Some("/usr/bin/krun"),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+        assert!(!argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
+        assert!(!argv.contains(&"--user".to_string()), "{argv:?}");
+    }
+
+    // Only krun is verified to ignore --userns; an unrelated custom runtime
+    // (e.g. an explicit crun/runc path) still needs and supports it, so
+    // dropping it there would silently reopen the root-owned-files problem
+    // these flags exist to prevent.
+    #[test]
+    fn container_argv_keeps_userns_keep_id_for_a_non_krun_runtime() {
+        let env = ContainerEnv {
+            oci_runtime: Some("/usr/bin/crun"),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+        assert!(argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--user" && w[1] == format!("{}:{}", host_uid(), host_gid())),
+            "{argv:?}"
+        );
+    }
+
+    // An empty string means "unset", matching the config field being absent,
+    // not a literal (broken) `--runtime=` argv token.
+    #[test]
+    fn container_argv_treats_empty_runtime_string_as_unset() {
+        let env = ContainerEnv {
+            oci_runtime: Some(""),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+        assert!(
+            !argv.iter().any(|a| a.starts_with("--runtime=")),
+            "{argv:?}"
+        );
+        assert!(argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
+    }
+
+    #[test]
+    fn container_argv_passes_runtime_flag_when_configured() {
+        let env = ContainerEnv {
+            oci_runtime: Some("/usr/bin/krun"),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+        assert!(
+            argv.contains(&"--runtime=/usr/bin/krun".to_string()),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn container_argv_omits_runtime_flag_by_default() {
+        let argv = build_container_argv(&test_env(false), "bash", &[], true);
+        assert!(
+            !argv.iter().any(|a| a.starts_with("--runtime=")),
+            "{argv:?}"
+        );
     }
 
     // A default `.claude.json` is seeded only if absent, then the real command
@@ -853,6 +966,7 @@ mod tests {
             environment_name: "x",
             inject_proxy_shim: false,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+            oci_runtime: None,
         };
         let argv = build_container_argv(&env, "bash", &[], true);
         // The path appears verbatim inside a single `--mount` value...
@@ -886,6 +1000,7 @@ mod tests {
             environment_name: "my-proj",
             inject_proxy_shim: false,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
+            oci_runtime: None,
         };
         let args = build_terminal_container_args(&terminal_args, "podman", &env);
         // The terminal's own args come first (kitty parses them), then the
@@ -909,6 +1024,7 @@ mod tests {
                 interactive: false,
             },
             Path::new("/nonexistent-workspaces-dir"),
+            None,
         );
         assert_eq!(res.program, "echo");
         assert_eq!(res.args, vec!["hi".to_string()]);

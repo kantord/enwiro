@@ -58,6 +58,7 @@ pub type SharedActiveEnv = Arc<Mutex<Option<ActiveEnvState>>>;
 struct DaemonRpc {
     active_env: SharedActiveEnv,
     workspaces_directory: PathBuf,
+    container_runtime: Option<String>,
 }
 
 /// `APPLICATION_ERROR_CODE` constructor — every "cookbook X failed at Y"
@@ -253,8 +254,13 @@ impl EnwiroRpcServer for DaemonRpc {
         // which is blocking; run it off the async worker so a slow/hung engine
         // can't stall other RPC handlers on this thread.
         let workspaces_directory = self.workspaces_directory.clone();
+        let container_runtime = self.container_runtime.clone();
         tokio::task::spawn_blocking(move || {
-            crate::launch::resolve_launch(&params, &workspaces_directory)
+            crate::launch::resolve_launch(
+                &params,
+                &workspaces_directory,
+                container_runtime.as_deref(),
+            )
         })
         .await
         .map_err(|e| app_err(format!("launch.resolve task failed: {e}")))
@@ -364,6 +370,7 @@ pub async fn serve(
     socket_path: PathBuf,
     active_env: SharedActiveEnv,
     workspaces_directory: PathBuf,
+    container_runtime: Option<String>,
 ) -> anyhow::Result<()> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
@@ -378,7 +385,14 @@ pub async fn serve(
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", socket_path.display()))?;
     }
-    serve_listener(listener, socket_path, active_env, workspaces_directory).await
+    serve_listener(
+        listener,
+        socket_path,
+        active_env,
+        workspaces_directory,
+        container_runtime,
+    )
+    .await
 }
 
 /// Run the accept loop against a pre-bound listener. Exposed so tests
@@ -389,10 +403,12 @@ pub async fn serve_listener(
     socket_path: PathBuf,
     active_env: SharedActiveEnv,
     workspaces_directory: PathBuf,
+    container_runtime: Option<String>,
 ) -> anyhow::Result<()> {
     let rpc = DaemonRpc {
         active_env,
         workspaces_directory,
+        container_runtime,
     };
     let methods: Methods = rpc.into_rpc().into();
     tracing::info!(path = %socket_path.display(), "rpc server listening");
