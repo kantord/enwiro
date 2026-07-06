@@ -63,17 +63,23 @@ impl<W: Write> CommandContext<W> {
         })
     }
 
-    pub fn cook_environment(&self, name: &str, cfg: &CookConfig) -> anyhow::Result<Environment> {
+    pub fn cook_environment(
+        &self,
+        env_name: &str,
+        recipe_name: &str,
+        cfg: &CookConfig,
+    ) -> anyhow::Result<Environment> {
         self.notifier
-            .notify_info(name, &format!("Preparing environment: {}", name));
-        let (cookbook_name, description) = self.find_recipe_in_cache(name).ok_or_else(|| {
-            tracing::error!(name = %name, "Recipe not in daemon cache");
-            anyhow!(
-                "No recipe '{}' in the daemon cache. \
-                 Check: systemctl --user status enwiro-daemon.service",
-                name
-            )
-        })?;
+            .notify_info(env_name, &format!("Preparing environment: {}", env_name));
+        let (cookbook_name, description) =
+            self.find_recipe_in_cache(recipe_name).ok_or_else(|| {
+                tracing::error!(name = %recipe_name, "Recipe not in daemon cache");
+                anyhow!(
+                    "No recipe '{}' in the daemon cache. \
+                     Check: systemctl --user status enwiro-daemon.service",
+                    recipe_name
+                )
+            })?;
 
         let cookbook = self
             .cookbooks
@@ -82,21 +88,26 @@ impl<W: Write> CommandContext<W> {
             .ok_or_else(|| {
                 anyhow!(
                     "Cache lists recipe '{}' under cookbook '{}', which is not installed",
-                    name,
+                    recipe_name,
                     cookbook_name
                 )
             })?;
 
-        tracing::debug!(name = %name, cookbook = %cookbook_name, "Found recipe in cache");
-        let env_path = cookbook.cook(name)?;
-        let flat_name = name.replace('/', "-");
+        tracing::debug!(env = %env_name, recipe = %recipe_name, cookbook = %cookbook_name, "Found recipe in cache");
+        let env_path = cookbook.cook(recipe_name)?;
+        let flat_name = env_name.replace('/', "-");
         // main_folder must be written before create_environment_symlink resolves its
         // return value (via Environment::get_one) -- otherwise a re-cook could read a
         // stale main_folder left over from a previous cook of the same env.
-        self.save_cook_metadata(&flat_name, &cookbook_name, name, description.as_deref());
-        let env = self.create_environment_symlink(name, &env_path)?;
-        self.write_gear_if_present(cookbook.as_ref(), name, &flat_name);
-        self.write_external_paths_if_present(cookbook.as_ref(), name, &flat_name);
+        self.save_cook_metadata(
+            &flat_name,
+            &cookbook_name,
+            recipe_name,
+            description.as_deref(),
+        );
+        let env = self.create_environment_symlink(env_name, &env_path)?;
+        self.write_gear_if_present(cookbook.as_ref(), recipe_name, &flat_name);
+        self.write_external_paths_if_present(cookbook.as_ref(), recipe_name, &flat_name);
         self.write_garnish_gear(&env_path, &flat_name, cfg);
         mark_via_daemon(&flat_name, "active", enwiro_sdk::rpc::MarkSource::Auto);
         Ok(env)
@@ -248,9 +259,28 @@ impl<W: Write> CommandContext<W> {
         match Environment::get_one(&self.config.workspaces_directory, &flat_name) {
             Ok(env) => Ok(env),
             Err(_) if explicitly_named => self
-                .cook_environment(&resolved, cfg)
+                .cook_environment(&resolved, &resolved, cfg)
                 .context("Could not cook environment"),
             Err(e) => Err(e),
+        }
+    }
+
+    /// Like `get_or_cook_environment`, but the environment name and the recipe
+    /// it is cooked from may differ (recipe aliasing, `enw activate foo=x`).
+    /// If the environment already exists, it is returned as-is and the recipe
+    /// is ignored.
+    pub fn get_or_cook_environment_as(
+        &self,
+        env_name: &str,
+        recipe_name: &str,
+        cfg: &CookConfig,
+    ) -> anyhow::Result<Environment> {
+        let flat_name = env_name.replace('/', "-");
+        match Environment::get_one(&self.config.workspaces_directory, &flat_name) {
+            Ok(env) => Ok(env),
+            Err(_) => self
+                .cook_environment(env_name, recipe_name, cfg)
+                .context("Could not cook environment"),
         }
     }
 
@@ -583,7 +613,7 @@ mod tests {
         ))];
 
         let env = context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "my-project");
 
@@ -611,7 +641,7 @@ mod tests {
         ))];
 
         context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
 
         let env_dir = temp_dir.path().join("my-project");
@@ -634,7 +664,7 @@ mod tests {
             vec![("my-project", first_target.to_str().unwrap())],
         ))];
         context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
 
         // Simulate a leftover main_folder from a hypothetical composed env
@@ -656,7 +686,7 @@ mod tests {
         ))];
 
         let env = context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
 
         assert_eq!(env.path, env_dir.join("my-project").to_str().unwrap());
@@ -680,7 +710,7 @@ mod tests {
         ))];
 
         let env = context_object
-            .cook_environment(recipe_name, &CookConfig::default())
+            .cook_environment(recipe_name, recipe_name, &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "my-project@feature-my-thing");
 
@@ -733,7 +763,8 @@ mod tests {
             vec![],
         ))];
 
-        let result = context_object.cook_environment("my-project", &CookConfig::default());
+        let result =
+            context_object.cook_environment("my-project", "my-project", &CookConfig::default());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -776,7 +807,7 @@ mod tests {
         // With the cache available, cook_environment should find the recipe
         // without calling list_recipes() on the failing cookbook
         let env = context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "my-project");
     }
@@ -798,7 +829,7 @@ mod tests {
         ))];
 
         let env = context_object
-            .cook_environment("owner/repo#42", &CookConfig::default())
+            .cook_environment("owner/repo#42", "owner/repo#42", &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "owner-repo#42");
     }
@@ -820,7 +851,8 @@ mod tests {
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        let result = context_object.cook_environment("my-project", &CookConfig::default());
+        let result =
+            context_object.cook_environment("my-project", "my-project", &CookConfig::default());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -959,7 +991,7 @@ mod tests {
         ))];
 
         context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
 
         let env_dir = temp_dir.path().join("my-project");
@@ -986,7 +1018,7 @@ mod tests {
         ))];
 
         context_object
-            .cook_environment(recipe_name, &CookConfig::default())
+            .cook_environment(recipe_name, recipe_name, &CookConfig::default())
             .unwrap();
 
         let env_dir = temp_dir.path().join("owner-repo#42");
@@ -996,6 +1028,50 @@ mod tests {
             Some(recipe_name),
             "recipe must persist the unflattened id so refresh can re-run `cookbook gear <recipe>`"
         );
+    }
+
+    #[rstest]
+    fn test_cook_environment_alias_flattens_env_name_only(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        let recipe_name = "owner/repo#42";
+        context_object.write_cache_entry("github", recipe_name);
+        let gear_data = serde_json::json!({"tool": "nvim"});
+        context_object.cookbooks = vec![Box::new(
+            FakeCookbook::new(
+                "github",
+                vec![recipe_name],
+                vec![(recipe_name, cooked_dir.to_str().unwrap())],
+            )
+            .with_gear(gear_data.clone()),
+        )];
+
+        let env = context_object
+            .cook_environment("team/foo", recipe_name, &CookConfig::default())
+            .unwrap();
+        assert_eq!(env.name, "team-foo");
+
+        // Env directory and inner symlink use the flattened env name.
+        let env_dir = temp_dir.path().join("team-foo");
+        assert!(env_dir.is_dir());
+        assert!(env_dir.join("team-foo").is_symlink());
+
+        // Meta records the unflattened recipe id, distinct from the env name.
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(meta.recipe.as_deref(), Some(recipe_name));
+        assert_eq!(meta.main_folder.as_deref(), Some("team-foo"));
+
+        // Gear was queried for the recipe but written under the env dir.
+        let gear_path = env_dir.join("gear.d").join("cookbook-github.json");
+        assert!(gear_path.exists());
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&gear_path).unwrap()).unwrap();
+        assert_eq!(written, gear_data);
     }
 
     #[rstest]
@@ -1015,7 +1091,7 @@ mod tests {
         ))];
 
         context_object
-            .cook_environment("owner/repo#42", &CookConfig::default())
+            .cook_environment("owner/repo#42", "owner/repo#42", &CookConfig::default())
             .unwrap();
 
         // Meta should be stored in the flat-named env directory
@@ -1045,7 +1121,8 @@ mod tests {
             vec![("my-project", cooked_dir.to_str().unwrap())],
         ))];
 
-        let result = context_object.cook_environment("my-project", &CookConfig::default());
+        let result =
+            context_object.cook_environment("my-project", "my-project", &CookConfig::default());
         assert!(result.is_ok());
 
         let logs = notifications.borrow();
@@ -1068,7 +1145,8 @@ mod tests {
             vec![],
         ))];
 
-        let result = context_object.cook_environment("my-project", &CookConfig::default());
+        let result =
+            context_object.cook_environment("my-project", "my-project", &CookConfig::default());
         assert!(result.is_err());
 
         let logs = notifications.borrow();
@@ -1100,7 +1178,7 @@ mod tests {
         )];
 
         context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
 
         let gear_path = temp_dir
@@ -1136,7 +1214,7 @@ mod tests {
         ))];
 
         context_object
-            .cook_environment("my-project", &CookConfig::default())
+            .cook_environment("my-project", "my-project", &CookConfig::default())
             .unwrap();
 
         let gear_dir = temp_dir.path().join("my-project").join("gear.d");

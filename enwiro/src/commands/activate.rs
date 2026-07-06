@@ -9,7 +9,9 @@ use enwiro_sdk::adapter::ManagedEnvInfo;
 #[command(
     author,
     version,
-    about = "Activate a workspace for a given environment, creating it if needed"
+    about = "Activate a workspace for a given environment, creating it if needed. \
+             Use NAME=RECIPE to create environment NAME from the recipe of RECIPE; \
+             if NAME already exists the recipe part is ignored."
 )]
 pub struct ActivateArgs {
     pub name: String,
@@ -42,12 +44,31 @@ fn build_managed_envs<W: Write>(context: &CommandContext<W>) -> Vec<ManagedEnvIn
         .collect()
 }
 
+/// Split "env=recipe" on the FIRST '='. No '=' means env name == recipe name.
+fn parse_activation_target(raw: &str) -> anyhow::Result<(String, String)> {
+    match raw.split_once('=') {
+        None => Ok((raw.to_string(), raw.to_string())),
+        Some((env, recipe)) => {
+            anyhow::ensure!(
+                !env.is_empty(),
+                "environment name is empty in '{raw}' (expected NAME=RECIPE)"
+            );
+            anyhow::ensure!(
+                !recipe.is_empty(),
+                "recipe name is empty in '{raw}' (expected NAME=RECIPE)"
+            );
+            Ok((env.to_string(), recipe.to_string()))
+        }
+    }
+}
+
 pub fn activate<W: Write>(
     context: &mut CommandContext<W>,
     args: ActivateArgs,
 ) -> anyhow::Result<()> {
+    let (env_name, recipe_name) = parse_activation_target(&args.name)?;
     let managed_envs = build_managed_envs(context);
-    let flat_name = args.name.replace('/', "-");
+    let flat_name = env_name.replace('/', "-");
     let env_dir = Path::new(&context.config.workspaces_directory).join(&flat_name);
 
     let cook_cfg = CookConfig {
@@ -55,21 +76,22 @@ pub fn activate<W: Write>(
     };
 
     let no_gear = std::collections::HashMap::new();
-    if let Err(e) = context
-        .adapter
-        .activate(&args.name, &managed_envs, &no_gear)
-    {
+    if let Err(e) = context.adapter.activate(&env_name, &managed_envs, &no_gear) {
         context
             .notifier
             .notify_error(&format!("Failed to activate workspace: {:#}", e));
         return Err(e).context("Could not activate workspace");
     }
 
-    if let Err(e) = context.get_or_cook_environment(&Some(args.name.clone()), &cook_cfg) {
-        context.notifier.notify_error(&format!(
-            "Could not set up environment '{}': {:#}",
-            args.name, e
-        ));
+    if let Err(e) = context.get_or_cook_environment_as(&env_name, &recipe_name, &cook_cfg) {
+        let target = if env_name == recipe_name {
+            format!("'{}'", env_name)
+        } else {
+            format!("'{}' (recipe '{}')", env_name, recipe_name)
+        };
+        context
+            .notifier
+            .notify_error(&format!("Could not set up environment {}: {:#}", target, e));
         tracing::warn!(error = %e, "Could not set up environment");
     }
 
@@ -78,13 +100,13 @@ pub fn activate<W: Write>(
         Err(e) => {
             context
                 .notifier
-                .notify_error(&format!("Could not read gear for '{}': {:#}", args.name, e));
+                .notify_error(&format!("Could not read gear for '{}': {:#}", env_name, e));
             tracing::warn!(error = %e, "Could not read gear, continuing without it");
             std::collections::HashMap::new()
         }
     };
     if !gear.is_empty()
-        && let Err(e) = context.adapter.activate(&args.name, &managed_envs, &gear)
+        && let Err(e) = context.adapter.activate(&env_name, &managed_envs, &gear)
     {
         context
             .notifier
@@ -468,6 +490,181 @@ mod tests {
             "notification must include the leaf error detail from the full error chain, \
              but got: {msg:?}"
         );
+    }
+
+    #[test]
+    fn test_parse_activation_target_plain_name() {
+        assert_eq!(
+            parse_activation_target("my-project").unwrap(),
+            ("my-project".to_string(), "my-project".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_activation_target_alias() {
+        assert_eq!(
+            parse_activation_target("foo=x").unwrap(),
+            ("foo".to_string(), "x".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_activation_target_splits_on_first_equals() {
+        assert_eq!(
+            parse_activation_target("foo=x=y").unwrap(),
+            ("foo".to_string(), "x=y".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_activation_target_rejects_empty_sides() {
+        assert!(parse_activation_target("=x").is_err());
+        assert!(parse_activation_target("foo=").is_err());
+        assert!(parse_activation_target("=").is_err());
+    }
+
+    #[rstest]
+    fn test_activate_alias_cooks_recipe_under_env_name(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut ctx, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        ctx.write_cache_entry("git", "x");
+        ctx.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["x"],
+            vec![("x", cooked_dir.to_str().unwrap())],
+        ))];
+
+        let result = activate(
+            &mut ctx,
+            ActivateArgs {
+                name: "foo=x".to_string(),
+                no_hooks: false,
+            },
+        );
+        assert!(result.is_ok());
+
+        // The environment is created under the alias name, not the recipe name.
+        let env_dir = temp_dir.path().join("foo");
+        assert!(env_dir.is_dir());
+        assert!(env_dir.join("foo").is_symlink());
+        assert!(!temp_dir.path().join("x").exists());
+
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(meta.recipe.as_deref(), Some("x"));
+        assert_eq!(meta.main_folder.as_deref(), Some("foo"));
+    }
+
+    #[rstest]
+    fn test_activate_alias_passes_env_name_to_adapter(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut ctx, activated, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        ctx.write_cache_entry("git", "x");
+        ctx.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["x"],
+            vec![("x", cooked_dir.to_str().unwrap())],
+        ))];
+
+        let result = activate(
+            &mut ctx,
+            ActivateArgs {
+                name: "foo=x".to_string(),
+                no_hooks: false,
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(*activated.borrow(), vec!["foo".to_string()]);
+    }
+
+    #[rstest]
+    fn test_activate_alias_with_existing_env_ignores_recipe(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut ctx, _, notifications) = context_object;
+
+        // Env "foo" already exists; no cookbooks and no cache, so any attempt
+        // to cook the recipe part would produce an error notification.
+        ctx.create_mock_environment("foo");
+
+        let result = activate(
+            &mut ctx,
+            ActivateArgs {
+                name: "foo=x".to_string(),
+                no_hooks: false,
+            },
+        );
+        assert!(result.is_ok());
+
+        let logs = notifications.borrow();
+        let error_count = logs.iter().filter(|log| log.starts_with("ERROR:")).count();
+        assert_eq!(error_count, 0);
+    }
+
+    #[rstest]
+    fn test_activate_rejects_empty_alias_sides_before_adapter(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut ctx, activated, _) = context_object;
+
+        for name in ["=x", "foo="] {
+            let result = activate(
+                &mut ctx,
+                ActivateArgs {
+                    name: name.to_string(),
+                    no_hooks: false,
+                },
+            );
+            assert!(result.is_err(), "'{name}' must be rejected");
+        }
+        assert!(
+            activated.borrow().is_empty(),
+            "the adapter must not be called for an invalid alias"
+        );
+    }
+
+    #[rstest]
+    fn test_activate_alias_allows_second_env_from_same_recipe(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut ctx, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        ctx.write_cache_entry("git", "x");
+        ctx.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["x"],
+            vec![("x", cooked_dir.to_str().unwrap())],
+        ))];
+
+        for name in ["x", "foo=x"] {
+            let result = activate(
+                &mut ctx,
+                ActivateArgs {
+                    name: name.to_string(),
+                    no_hooks: false,
+                },
+            );
+            assert!(result.is_ok());
+        }
+
+        for env_name in ["x", "foo"] {
+            let env_dir = temp_dir.path().join(env_name);
+            assert!(env_dir.is_dir(), "env '{env_name}' must exist");
+            let meta = crate::usage_stats::load_env_meta(&env_dir);
+            assert_eq!(meta.recipe.as_deref(), Some("x"));
+        }
     }
 
     #[rstest]

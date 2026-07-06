@@ -187,7 +187,7 @@ pub fn kanban<W: Write>(context: &mut CommandContext<W>, _args: KanbanArgs) -> a
             Action::CookAndMark(name, status) => {
                 terminal.draw(|f| draw_cooking(f, &name)).ok();
                 let cfg = crate::context::CookConfig { no_hooks: false };
-                context.cook_environment(&name, &cfg)?;
+                context.cook_environment(&name, &name, &cfg)?;
                 let flat_name = name.replace('/', "-");
                 crate::context::mark_via_daemon(
                     &flat_name,
