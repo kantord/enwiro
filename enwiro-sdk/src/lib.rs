@@ -5,6 +5,7 @@
 //! conventions, and any future plugin-protocol types.
 
 pub mod adapter;
+pub mod capability;
 pub mod client;
 pub mod config;
 pub mod cookbook;

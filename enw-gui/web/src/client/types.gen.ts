@@ -73,7 +73,11 @@ export type PostMarkData = {
 
 export type PostMarkErrors = {
     /**
-     * daemon unavailable
+     * daemon rejected the request (invalid status, unknown env)
+     */
+    400: unknown;
+    /**
+     * daemon unreachable
      */
     502: unknown;
 };

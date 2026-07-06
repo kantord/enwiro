@@ -11,11 +11,14 @@
 mod api;
 mod board;
 
+use std::sync::OnceLock;
+
 use axum::Json;
 use axum::extract::Request;
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use enwiro_sdk::capability::CapabilitySet;
 use rust_embed::RustEmbed;
 use utoipa_axum::router::OpenApiRouter;
 
@@ -65,6 +68,47 @@ async fn guard_host(req: Request, next: Next) -> Result<Response, StatusCode> {
     }
 }
 
+/// This process's capability token (see `enwiro_sdk::capability`), minted once
+/// at startup.
+fn capability() -> &'static CapabilitySet {
+    static CAPABILITY: OnceLock<CapabilitySet> = OnceLock::new();
+    CAPABILITY.get_or_init(CapabilitySet::new)
+}
+
+/// Capability-token auth, Jupyter-style: loopback binding only stops *remote*
+/// access, and `guard_host` above only stops a browser-driven DNS-rebinding
+/// attack — neither stops another local process/user hitting this port
+/// directly. Every `/api` request must carry the token minted for this
+/// process, either as `?token=` (present on the `/` URL we print/open, in
+/// case a caller wants to hit the API directly) or as `Authorization: Bearer`
+/// (attached by the frontend to every call once it has read the token from
+/// the URL).
+///
+/// Static assets (the compiled SPA shell) are deliberately NOT gated here:
+/// the browser's requests for `/assets/*.js`/`.css` never carry the page
+/// URL's query string, so gating them would 401 the frontend's own JS/CSS
+/// before it ever runs and could read the token — the SPA shell isn't secret,
+/// only the API surface it calls is.
+async fn guard_capability(req: Request, next: Next) -> Result<Response, StatusCode> {
+    if !req.uri().path().starts_with("/api") {
+        return Ok(next.run(req).await);
+    }
+    let query_token = token_from_query(req.uri());
+    let authorized = capability().is_authorized(req.headers())
+        || query_token.is_some_and(|token| capability().contains(token));
+    if authorized {
+        Ok(next.run(req).await)
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+fn token_from_query(uri: &Uri) -> Option<&str> {
+    uri.query()?
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+}
+
 fn load_workspaces_directory() -> String {
     let config: enwiro_daemon::ConfigurationValues = enwiro_sdk::config::load_user_config("enwiro")
         .ok()
@@ -98,10 +142,12 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::get(move || async move { Json(openapi) }),
         )
         .fallback(static_handler)
+        .layer(axum::middleware::from_fn(guard_capability))
         .layer(axum::middleware::from_fn(guard_host));
 
+    let token = capability().mint();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let url = format!("http://{}", listener.local_addr()?);
+    let url = format!("http://{}/?token={token}", listener.local_addr()?);
     println!("enw-gui serving on {url}");
 
     let _ = open::that(&url);

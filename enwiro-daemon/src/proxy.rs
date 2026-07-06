@@ -35,12 +35,12 @@
 //! Anthropic infra and never traverses this proxy); and it does not by itself
 //! stop an *authorized* (capability-holding) but compromised claude process.
 
-use std::collections::HashSet;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use bytes::Bytes;
+use enwiro_sdk::capability::CapabilitySet;
 use futures_util::StreamExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
@@ -50,7 +50,6 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 
 /// Port the daemon's Claude auth proxy listens on. Shared with `launch.rs`,
@@ -59,71 +58,27 @@ pub(crate) const CLAUDE_PROXY_PORT: u16 = 8909;
 
 const UPSTREAM: &str = "https://api.anthropic.com";
 
-/// Length, in bytes, of a minted capability token before hex-encoding (32 bytes
-/// = 256 bits, comfortably above the ~128-bit floor for a bearer secret).
-const CAPABILITY_BYTES: usize = 32;
-
 /// Capability tokens currently valid for use against this proxy, one per launch
 /// that was given the claude shim. In-memory only: cleared on daemon restart:
 /// there is no persistence and (yet) no per-container revocation, so a token
 /// stays valid for the daemon's lifetime once minted. The set is expected to
 /// stay tiny (proportional to concurrently-running enwiro-launched containers).
-fn capabilities() -> &'static Mutex<HashSet<String>> {
-    static CAPABILITIES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    CAPABILITIES.get_or_init(|| Mutex::new(HashSet::new()))
+/// See `enwiro_sdk::capability` for the token format and comparison details.
+fn capabilities() -> &'static CapabilitySet {
+    static CAPABILITIES: OnceLock<CapabilitySet> = OnceLock::new();
+    CAPABILITIES.get_or_init(CapabilitySet::new)
 }
 
 /// Mint a fresh random capability token, register it as valid, and return it for
-/// the caller to hand to exactly one launch (via the claude shim). Never returns
-/// a token that isn't also recorded as valid, so every minted token authorizes
-/// immediately.
+/// the caller to hand to exactly one launch (via the claude shim).
 pub(crate) fn mint_capability() -> String {
-    let mut bytes = [0u8; CAPABILITY_BYTES];
-    rand::fill(&mut bytes);
-    let token = hex_encode(&bytes);
-    capabilities()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(token.clone());
-    token
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    capabilities().mint()
 }
 
 /// True iff `headers` carries `Authorization: Bearer <token>` for a token this
-/// daemon minted. Compares in constant time (no early-exit on the first
-/// differing byte, which would otherwise leak timing information about how much
-/// of a guess matched) and checks every registered capability rather than
-/// short-circuiting on the first candidate.
+/// daemon minted.
 fn is_authorized(headers: &HeaderMap) -> bool {
-    let Some(presented) = bearer_token(headers) else {
-        return false;
-    };
-    let presented = presented.as_bytes();
-    let tokens = capabilities()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut valid = subtle::Choice::from(0u8);
-    for token in tokens.iter() {
-        // `ct_eq` requires equal-length inputs; a length mismatch alone isn't
-        // secret, so it's fine to check it (and skip) before the constant-time
-        // byte comparison.
-        if token.len() == presented.len() {
-            valid |= token.as_bytes().ct_eq(presented);
-        }
-    }
-    valid.into()
-}
-
-/// Extract the bearer value from an `Authorization: Bearer <token>` header, or
-/// `None` if absent/malformed.
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(hyper::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+    capabilities().is_authorized(headers)
 }
 
 type ProxyBody = BoxBody<Bytes, std::io::Error>;
@@ -269,6 +224,10 @@ async fn forward(
 
 #[cfg(test)]
 mod tests {
+    // Token format, comparison, and header-parsing edge cases are covered by
+    // `enwiro_sdk::capability`'s own test suite; these just confirm this
+    // module's free-function wiring (shared process-wide `capabilities()`
+    // singleton) delegates to it correctly.
     use super::*;
 
     fn bearer_headers(token: &str) -> HeaderMap {
@@ -281,44 +240,16 @@ mod tests {
     }
 
     #[test]
-    fn minted_capability_is_hex_and_correct_length() {
-        let token = mint_capability();
-        assert_eq!(token.len(), CAPABILITY_BYTES * 2, "{token}");
-        assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{token}");
-    }
-
-    #[test]
-    fn mint_produces_distinct_tokens() {
-        assert_ne!(mint_capability(), mint_capability());
-    }
-
-    #[test]
-    fn a_minted_capability_authorizes() {
-        let token = mint_capability();
-        assert!(is_authorized(&bearer_headers(&token)));
+    fn mint_produces_distinct_tokens_that_authorize() {
+        let a = mint_capability();
+        let b = mint_capability();
+        assert_ne!(a, b);
+        assert!(is_authorized(&bearer_headers(&a)));
+        assert!(is_authorized(&bearer_headers(&b)));
     }
 
     #[test]
     fn an_unminted_token_does_not_authorize() {
-        // Exercises the shared, process-wide capability set (other tests in this
-        // module mint real tokens into it), so use a value distinct from any real
-        // 64-hex-char token: real capabilities are exactly `CAPABILITY_BYTES * 2`
-        // hex characters, this deliberately isn't.
         assert!(!is_authorized(&bearer_headers("not-a-real-capability")));
-    }
-
-    #[test]
-    fn missing_authorization_header_does_not_authorize() {
-        assert!(!is_authorized(&HeaderMap::new()));
-    }
-
-    #[test]
-    fn non_bearer_authorization_does_not_authorize() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            hyper::header::AUTHORIZATION,
-            "Basic dXNlcjpwYXNz".parse().unwrap(),
-        );
-        assert!(!is_authorized(&headers));
     }
 }

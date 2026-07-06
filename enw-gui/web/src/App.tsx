@@ -29,6 +29,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { G_ACTIONS, useKeyboardControls } from '@/keyboard'
 import { cn } from '@/lib/utils'
 import { CARD_RENDER_CAP, type Mode, useBoardStore } from '@/store'
+import { UnauthorizedError } from './capabilityToken'
 
 function BoardCard({ card }: { card: CardData }) {
   const moveCard = useBoardStore((s) => s.moveCard)
@@ -299,7 +300,9 @@ function App() {
         </header>
         {board.isError ? (
           <Centered>
-            Couldn't load the board. Is the enwiro daemon running?
+            {board.error instanceof UnauthorizedError
+              ? 'Session expired. Restart enw-gui and open the link it prints.'
+              : "Couldn't load the board. Is the enwiro daemon running?"}
           </Centered>
         ) : columns === null ? (
           <BoardSkeleton />

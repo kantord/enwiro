@@ -45,25 +45,36 @@ async fn get_board(State(state): State<AppState>) -> Json<Board> {
     request_body = MarkRequest,
     responses(
         (status = 200, body = MarkResponse),
-        (status = 502, description = "daemon unavailable"),
+        (status = 400, description = "daemon rejected the request (invalid status, unknown env)"),
+        (status = 502, description = "daemon unreachable"),
     ),
 )]
-async fn post_mark(Json(req): Json<MarkRequest>) -> Result<Json<MarkResponse>, StatusCode> {
+async fn post_mark(
+    Json(req): Json<MarkRequest>,
+) -> Result<Json<MarkResponse>, (StatusCode, String)> {
     use enwiro_sdk::rpc::{EnvMarkParams, EnwiroRpcClient, MarkSource};
 
-    let client = enwiro_sdk::rpc::connect()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    client
+    // Distinguish "couldn't reach the daemon at all" (502, a transport problem)
+    // from "the daemon rejected this specific request" (400, the daemon was
+    // reachable and had something concrete to say about why) — collapsing
+    // both into the same status/empty body left callers unable to tell a bad
+    // request apart from a dead daemon.
+    let client = enwiro_sdk::rpc::connect().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("could not reach enwiro daemon: {e}"),
+        )
+    })?;
+    let result = client
         .env_mark(EnvMarkParams {
             env_name: req.env_name,
             status: req.status,
             source: MarkSource::User,
         })
         .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    Ok(Json(MarkResponse { ok: true }))
+    Ok(Json(MarkResponse { ok: result.ok }))
 }
 
 /// Build the `/api` router and its OpenAPI document.
