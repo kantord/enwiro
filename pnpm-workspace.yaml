@@ -11,4 +11,10 @@ packages:
 #   lifecycle scripts. pnpm blocks all dependency build scripts by default;
 #   anything needing one must be listed here explicitly.
 minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - hono@4.12.25
+  - js-yaml@4.1.2
 onlyBuiltDependencies: []
+overrides:
+  hono@<4.12.25: ^4.12.25
+  js-yaml@>=4.0.0 <=4.1.1: ^4.1.2
