@@ -1,6 +1,3 @@
-# Repo-root pnpm workspace. Covers root dev tooling (Biome) + the enw-gui
-# frontend. `docs/` is intentionally NOT a member: it is a self-contained
-# pnpm project with its own lockfile and deploy workflow.
 packages:
   - 'enw-gui/web'
 
@@ -17,4 +14,4 @@ minimumReleaseAgeExclude:
 onlyBuiltDependencies: []
 overrides:
   hono@<4.12.25: ^4.12.25
-  js-yaml@>=4.0.0 <=4.1.1: ^4.1.2
+  js-yaml@>=4.0.0 <=4.1.1: ^5.0.0
