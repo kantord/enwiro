@@ -5,6 +5,9 @@ edition = "2024"
 description = "Local web GUI for enwiro: a single binary that serves an embedded React SPA to the browser"
 license = "GPL-3.0-or-later"
 repository.workspace = true
+# Not published to crates.io: the binary embeds the Vite build from web/dist,
+# which cannot be reproduced from a crates.io tarball.
+publish = false
 
 [[bin]]
 name = "enw-gui"
