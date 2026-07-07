@@ -1,13 +1,15 @@
 [package]
-name = "enw-gui"
-version = "0.0.0"
+name = "enwiro-gui"
+version = "0.1.0"
 edition = "2024"
 description = "Local web GUI for enwiro: a single binary that serves an embedded React SPA to the browser"
 license = "GPL-3.0-or-later"
 repository.workspace = true
-# Not published to crates.io: the binary embeds the Vite build from web/dist,
-# which cannot be reproduced from a crates.io tarball.
-publish = false
+# web/dist is gitignored but must ship in the crates.io tarball so that
+# `cargo install enwiro-gui` needs no JS toolchain: CI builds the SPA right
+# before `cargo publish`, and this include list (which overrides gitignore
+# for packaging) snapshots the built assets into the package.
+include = ["src/**", "build.rs", "web/dist/**"]
 
 [[bin]]
 name = "enw-gui"

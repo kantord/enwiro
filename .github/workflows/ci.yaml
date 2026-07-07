@@ -82,6 +82,6 @@ jobs:
       - name: Audit dependencies
         run: pnpm audit --audit-level high
       - name: Type-check (tsc)
-        run: pnpm --filter ./enw-gui/web exec tsc -b
+        run: pnpm --filter ./enwiro-gui/web exec tsc -b
       - name: Build frontend
-        run: pnpm --filter ./enw-gui/web build
+        run: pnpm --filter ./enwiro-gui/web build

@@ -9,8 +9,8 @@
     "ignoreUnknown": false,
     "includes": [
       "**",
-      "!**/enw-gui/web/src/index.css",
-      "!**/enw-gui/web/src/client"
+      "!**/enwiro-gui/web/src/index.css",
+      "!**/enwiro-gui/web/src/client"
     ]
   },
   "formatter": {

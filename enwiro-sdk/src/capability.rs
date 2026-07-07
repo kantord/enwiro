@@ -9,7 +9,7 @@
 //! instead of relying on network topology alone.
 //!
 //! First used by `enwiro-daemon`'s host-side Claude auth proxy (issue #540);
-//! also used by `enw-gui` to gate its own local API.
+//! also used by `enwiro-gui` to gate its own local API.
 
 use std::collections::HashSet;
 use std::sync::Mutex;

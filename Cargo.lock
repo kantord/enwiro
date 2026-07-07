@@ -928,25 +928,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enw-gui"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "axum",
- "enwiro-daemon",
- "enwiro-sdk",
- "mime_guess",
- "open",
- "rust-embed",
- "serde",
- "serde_json",
- "tokio",
- "tower-http 0.7.0",
- "utoipa",
- "utoipa-axum",
-]
-
-[[package]]
 name = "enwiro"
 version = "0.3.54"
 dependencies = [
@@ -1153,6 +1134,25 @@ dependencies = [
  "git2",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "enwiro-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "enwiro-daemon",
+ "enwiro-sdk",
+ "mime_guess",
+ "open",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http 0.7.0",
+ "utoipa",
+ "utoipa-axum",
 ]
 
 [[package]]

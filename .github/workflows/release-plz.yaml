@@ -32,6 +32,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # Build the enwiro-gui frontend so the publish step below packages real
+      # assets: web/dist is gitignored but listed in enwiro-gui's Cargo.toml
+      # `include`, so whatever this build produces is what ships in the
+      # crates.io tarball.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build enwiro-gui frontend
+        run: pnpm --filter ./enwiro-gui/web build
       # Publish crates individually, skipping ones already on crates.io.
       # This works around release-plz's gix slotmap overflow during index
       # polling (GitoxideLabs/gitoxide#1788).
@@ -55,7 +70,13 @@ jobs:
           ' | tsort)
           for pkg in $order; do
             echo "Publishing $pkg..."
-            if cargo publish -p "$pkg" 2>&1 | tee /tmp/publish.log; then
+            # enwiro-gui's tarball includes the freshly built (gitignored)
+            # web/dist, which cargo's VCS dirty-check would otherwise reject.
+            flags=""
+            if [ "$pkg" = "enwiro-gui" ]; then
+              flags="--allow-dirty"
+            fi
+            if cargo publish -p "$pkg" $flags 2>&1 | tee /tmp/publish.log; then
               continue
             fi
             if grep -q 'already exists on crates.io' /tmp/publish.log; then
