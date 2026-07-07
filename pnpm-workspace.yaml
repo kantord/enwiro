@@ -1,5 +1,5 @@
 packages:
-  - 'enw-gui/web'
+  - 'enwiro-gui/web'
 
 # Supply-chain hardening:
 # - minimumReleaseAge: refuse to install a package version published less

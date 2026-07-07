@@ -16,7 +16,7 @@ importers:
         specifier: 2.4.16
         version: 2.4.16
 
-  enw-gui/web:
+  enwiro-gui/web:
     dependencies:
       '@base-ui/react':
         specifier: ^1.5.0

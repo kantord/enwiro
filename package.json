@@ -1,7 +1,7 @@
 {
   "name": "enwiro-monorepo",
   "private": true,
-  "description": "Repo-root dev tooling (Biome) + pnpm workspace. Per-app JS lives in each crate's own dir, e.g. enw-gui/web.",
+  "description": "Repo-root dev tooling (Biome) + pnpm workspace. Per-app JS lives in each crate's own dir, e.g. enwiro-gui/web.",
   "packageManager": "pnpm@11.9.0",
   "engines": {
     "node": ">=22"

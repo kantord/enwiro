@@ -1,6 +1,6 @@
 //! Frecency scoring over `UserIntentSignals` buffers - the project's single
 //! relevance model. `enw ls` feeds these scores to the launcher (rofi) and the
-//! adapter slot assignment; `enw-gui` sorts kanban columns with them. Moved
+//! adapter slot assignment; `enwiro-gui` sorts kanban columns with them. Moved
 //! here from `enwiro::usage_stats` so every consumer shares one formula.
 
 use std::collections::HashMap;
