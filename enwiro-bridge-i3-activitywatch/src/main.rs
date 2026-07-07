@@ -197,6 +197,23 @@ async fn focused_env(i3: &mut I3) -> Result<Option<String>> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("metadata") => {
+            let metadata = enwiro_sdk::bridge::BridgeMetadata::with_capabilities([
+                enwiro_sdk::bridge::LISTEN_CAPABILITY,
+            ]);
+            println!("{}", metadata.to_json());
+            Ok(())
+        }
+        Some("listen") => listen().await,
+        _ => anyhow::bail!("usage: enwiro-bridge-i3-activitywatch <listen|metadata>"),
+    }
+}
+
+/// Long-running watch loop, spawned and supervised by enwiro-daemon
+/// (issue #485). Heartbeats the focused i3 workspace's env to aw-server.
+async fn listen() -> Result<()> {
     let hostname_os = hostname::get().context("read hostname")?;
     let hostname = hostname_os.to_string_lossy().into_owned();
     let bucket_id = format!("{}_{}", CLIENT_NAME, hostname);

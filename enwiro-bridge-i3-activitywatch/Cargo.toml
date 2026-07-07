@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1"
+enwiro-sdk.workspace = true
 hostname = "0.4"
 i3ipc-types = "0.16.0"
 serde = { version = "1", features = ["derive"] }

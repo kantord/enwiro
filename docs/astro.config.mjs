@@ -40,6 +40,10 @@ export default defineConfig({
             { slug: 'adapters/creating-an-adapter' },
           ],
         },
+        {
+          label: 'Bridges',
+          items: [{ slug: 'bridges' }, { slug: 'bridges/creating-a-bridge' }],
+        },
       ],
     }),
   ],

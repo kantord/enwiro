@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(strum_macros::Display, Hash, Eq, PartialEq, Clone, Debug)]
 pub enum PluginKind {
     Adapter,
+    Bridge,
     Cookbook,
     Garnish,
 }

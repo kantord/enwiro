@@ -251,6 +251,38 @@ pub(crate) fn parse_switch_event(line: &str) -> Option<(String, i64)> {
 /// and drain the cookbook/adapter stdout channel.
 const TICK_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Namespace prefix for bridge process keys in the pool, so a bridge can
+/// never collide with a cookbook of the same name in the stream dispatch.
+const BRIDGE_KEY_PREFIX: &str = "bridge:";
+
+/// Process sources for bridges that declare the `listen` capability in
+/// their `metadata` output. Bridges that don't (probe failure, timeout,
+/// no capability) are left alone.
+fn bridge_listen_sources(
+    bridges: impl IntoIterator<Item = enwiro_sdk::plugin::Plugin>,
+) -> Vec<ProcessSource> {
+    let mut sources = Vec::new();
+    for plugin in bridges {
+        let metadata = enwiro_sdk::bridge::fetch_bridge_metadata(&plugin.executable);
+        if !metadata.has_capability(enwiro_sdk::bridge::LISTEN_CAPABILITY) {
+            tracing::debug!(bridge = %plugin.name, "Bridge does not declare the listen capability, leaving it alone");
+            continue;
+        }
+        tracing::info!(bridge = %plugin.name, "Bridge declares listen capability, autostarting");
+        sources.push(ProcessSource {
+            identity: ProcessIdentity {
+                bin: plugin.executable.clone(),
+                key: format!("{BRIDGE_KEY_PREFIX}{}", plugin.name),
+            },
+            args: vec!["listen".to_string()],
+            env: Default::default(),
+            current_dir: None,
+            props: None,
+        });
+    }
+    sources
+}
+
 /// Run the daemon. Awaits until SIGTERM/SIGINT/SIGHUP.
 ///
 /// `config.workspaces_directory` is the root under which enwiro environments
@@ -346,6 +378,7 @@ pub async fn run(
             props,
         });
     }
+    desired.extend(bridge_listen_sources(get_plugins(PluginKind::Bridge)));
 
     for (key, err) in pool.reconcile(desired.clone()) {
         tracing::warn!(key = ?key, error = ?err, "Could not spawn listen subprocess");
@@ -379,6 +412,10 @@ pub async fn run(
                                 Some(rpc::ActiveEnvState { env_name: env_name.clone(), timestamp });
                             on_workspace_switch(&workspaces_directory.join(&env_name), timestamp);
                         }
+                    } else if let Some(bridge) = item.key.key.strip_prefix(BRIDGE_KEY_PREFIX) {
+                        // Bridges emit no events the daemon acts on; their
+                        // stdout is surfaced as a log channel only.
+                        tracing::info!(bridge, line = %item.line, "bridge output");
                     } else if let Some(entry) = recipe_state.get_mut(&item.key.key) {
                         match serde_json::from_str::<RecipeUpdate>(&item.line) {
                             Ok(RecipeUpdate::Recipes { data }) => {
@@ -602,6 +639,50 @@ mod tests {
     fn build_cache_content_empty_state_produces_empty_string() {
         let state: HashMap<String, CookbookEntry> = HashMap::new();
         assert_eq!(build_cache_content(&state), "");
+    }
+
+    fn fake_bridge(
+        dir: &std::path::Path,
+        name: &str,
+        script_body: &str,
+    ) -> enwiro_sdk::plugin::Plugin {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(format!("enwiro-bridge-{name}"));
+        std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        enwiro_sdk::plugin::Plugin {
+            name: enwiro_sdk::plugin::PluginName::new(name).unwrap(),
+            kind: PluginKind::Bridge,
+            executable: path.to_string_lossy().to_string(),
+        }
+    }
+
+    #[test]
+    fn bridge_declaring_listen_gets_a_listen_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = fake_bridge(
+            dir.path(),
+            "aw",
+            r#"echo '{"capabilities":[{"name":"listen"}]}'"#,
+        );
+        let sources = bridge_listen_sources([bridge]);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].identity.key, "bridge:aw");
+        assert_eq!(sources[0].args, vec!["listen".to_string()]);
+    }
+
+    #[test]
+    fn bridge_without_listen_capability_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = fake_bridge(dir.path(), "rofi", "echo '{}'");
+        assert!(bridge_listen_sources([bridge]).is_empty());
+    }
+
+    #[test]
+    fn bridge_predating_the_metadata_convention_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = fake_bridge(dir.path(), "legacy", "echo 'rofi row one'");
+        assert!(bridge_listen_sources([bridge]).is_empty());
     }
 
     #[test]
