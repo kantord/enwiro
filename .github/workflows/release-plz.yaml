@@ -48,6 +48,7 @@ jobs:
             | [$m.workspace_members[] | . as $id | $m.packages[] | select(.id == $id) | .name] as $ws
             | $m.packages[]
             | select(.name as $n | $ws | index($n))
+            | select(.publish != [])
             | . as $p
             | "\($p.name) \($p.name)",
               (.dependencies[] | select(.name as $d | $ws | index($d)) | "\(.name) \($p.name)")
