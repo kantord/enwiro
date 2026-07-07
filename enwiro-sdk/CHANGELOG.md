@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.8.1...enwiro-sdk-v0.9.0) - 2026-07-07
+
+### Added
+
+- add experimental web gui ([#692](https://github.com/kantord/enwiro/pull/692))
+
+### Other
+
+- *(deps)* pin dependencies ([#698](https://github.com/kantord/enwiro/pull/698))
+
 ## [0.8.1](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.8.0...enwiro-sdk-v0.8.1) - 2026-07-05
 
 ### Fixed

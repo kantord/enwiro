@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.16](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.15...enwiro-daemon-v0.0.16) - 2026-07-07
+
+### Added
+
+- add experimental web gui ([#692](https://github.com/kantord/enwiro/pull/692))
+- add a global OCI-runtime override for microVM isolation via krun ([#694](https://github.com/kantord/enwiro/pull/694))
+- let envs declare a main_folder ([#688](https://github.com/kantord/enwiro/pull/688))
+
+### Fixed
+
+- mount a git worktree's real path alongside its env symlink ([#690](https://github.com/kantord/enwiro/pull/690))
+- *(deps)* update rust crate rand to 0.10 ([#684](https://github.com/kantord/enwiro/pull/684))
+
+### Other
+
+- *(deps)* pin dependencies ([#698](https://github.com/kantord/enwiro/pull/698))
+
 ## [0.0.15](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.14...enwiro-daemon-v0.0.15) - 2026-07-05
 
 ### Added
