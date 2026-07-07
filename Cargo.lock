@@ -992,6 +992,7 @@ name = "enwiro-bridge-i3-activitywatch"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "enwiro-sdk",
  "hostname",
  "i3ipc-types",
  "serde",

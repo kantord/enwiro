@@ -533,6 +533,18 @@ fn main() -> anyhow::Result<()> {
     let rofi_retv = env::var("ROFI_RETV").unwrap_or_else(|_| "0".to_string());
     let args: Vec<String> = env::args().collect();
 
+    // The daemon probes every bridge with `metadata` at startup (issue
+    // #485). Answer before the ROFI_RETV dispatch so the probe can never
+    // be mistaken for a rofi selection. This bridge is invoked by rofi,
+    // not daemon-managed, so it declares no capabilities.
+    if args.get(1).map(String::as_str) == Some("metadata") {
+        println!(
+            "{}",
+            enwiro_sdk::bridge::BridgeMetadata::default().to_json()
+        );
+        return Ok(());
+    }
+
     tracing::debug!(rofi_retv = %rofi_retv, "Bridge invoked");
 
     match rofi_retv.as_str() {
