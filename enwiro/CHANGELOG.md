@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.54](https://github.com/kantord/enwiro/compare/enwiro-v0.3.53...enwiro-v0.3.54) - 2026-07-07
+
+### Added
+
+- allow aliasing recipes ([#697](https://github.com/kantord/enwiro/pull/697))
+- add experimental web gui ([#692](https://github.com/kantord/enwiro/pull/692))
+- let envs declare a main_folder ([#688](https://github.com/kantord/enwiro/pull/688))
+
+### Other
+
+- *(deps)* pin dependencies ([#698](https://github.com/kantord/enwiro/pull/698))
+
 ## [0.3.53](https://github.com/kantord/enwiro/compare/enwiro-v0.3.52...enwiro-v0.3.53) - 2026-07-05
 
 ### Fixed
