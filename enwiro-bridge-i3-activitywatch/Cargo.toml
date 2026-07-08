@@ -1,9 +1,0 @@
-[package]
-name = "enwiro-bridge-i3-activitywatch"
-version = "0.1.3"
-edition = "2024"
-description = "DEPRECATED: renamed to enwiro-bridge-activitywatch, which works with any enwiro adapter"
-license = "GPL-3.0-or-later"
-repository.workspace = true
-
-[dependencies]

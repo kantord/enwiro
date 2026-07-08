@@ -1004,10 +1004,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "enwiro-bridge-i3-activitywatch"
-version = "0.1.3"
-
-[[package]]
 name = "enwiro-bridge-rofi"
 version = "0.1.28"
 dependencies = [
