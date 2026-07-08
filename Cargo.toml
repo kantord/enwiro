@@ -6,6 +6,7 @@ members = [
     "enwiro-adapter-i3wm",
     "enwiro-adapter-tmux",
     "enwiro-bridge-activitywatch",
+    "enwiro-bridge-i3-activitywatch",
     "enwiro-bridge-rofi",
     "enwiro-cookbook-chezmoi",
     "enwiro-cookbook-git",
