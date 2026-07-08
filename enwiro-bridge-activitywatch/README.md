@@ -1,3 +1,3 @@
-# enwiro-bridge-i3-activitywatch
+# enwiro-bridge-activitywatch
 
 See [enwiro documentation](https://kantord.github.io/enwiro/).

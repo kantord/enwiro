@@ -3,27 +3,21 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use enwiro_sdk::rpc::EnwiroRpcClient;
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio_i3ipc::I3;
 
 const CLIENT_NAME: &str = "aw-watcher-enwiro";
 const EVENT_TYPE: &str = "currentenv";
-const AW_BASE_URL: &str = "http://localhost:5600";
+const DEFAULT_AW_BASE_URL: &str = "http://localhost:5600";
+
+fn aw_base_url() -> String {
+    std::env::var("AW_BASE_URL").unwrap_or_else(|_| DEFAULT_AW_BASE_URL.to_string())
+}
 const INTERVAL: Duration = Duration::from_secs(5);
 const PULSETIME_SECS: f64 = 15.0;
 const META_CACHE_TTL: Duration = Duration::from_secs(10);
-
-fn extract_env_from_workspace_name(name: &str) -> Option<String> {
-    let (_, rest) = name.split_once(':')?;
-    let trimmed = rest.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
 
 fn is_known_env(env_name: &str) -> bool {
     enwiro_envs_dir().join(env_name).is_dir()
@@ -185,17 +179,20 @@ impl AwClient {
     }
 }
 
-async fn focused_env(i3: &mut I3) -> Result<Option<String>> {
-    let workspaces = i3.get_workspaces().await?;
-    Ok(workspaces
-        .iter()
-        .find(|w| w.focused)
-        .and_then(|w| extract_env_from_workspace_name(&w.name)))
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // Explicit INFO default: with the `env-filter` feature unified in via
+    // enwiro-sdk, plain `fmt::init()` logs nothing unless RUST_LOG is set,
+    // which would leave the daemon's bridge log channel empty. No ANSI:
+    // stdout is read by the daemon, not a terminal.
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::level_filters::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
 
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
@@ -207,51 +204,67 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some("listen") => listen().await,
-        _ => anyhow::bail!("usage: enwiro-bridge-i3-activitywatch <listen|metadata>"),
+        _ => anyhow::bail!("usage: enwiro-bridge-activitywatch <listen|metadata>"),
     }
 }
 
 /// Long-running watch loop, spawned and supervised by enwiro-daemon
-/// (issue #485). Heartbeats the focused i3 workspace's env to aw-server.
+/// (issue #485). Polls the daemon's `env.current` RPC and heartbeats the
+/// active env to aw-server, so it works with any adapter that emits
+/// switch events (issue #710).
 async fn listen() -> Result<()> {
     let hostname_os = hostname::get().context("read hostname")?;
     let hostname = hostname_os.to_string_lossy().into_owned();
     let bucket_id = format!("{}_{}", CLIENT_NAME, hostname);
-    let aw = AwClient::new(AW_BASE_URL);
+    let base_url = aw_base_url();
+    let aw = AwClient::new(&base_url);
 
     loop {
         match aw.create_bucket(&bucket_id, &hostname) {
             Ok(()) => break,
             Err(e) => {
-                tracing::warn!(error = %e, "waiting for aw-server at {AW_BASE_URL}");
+                tracing::warn!(error = %e, "waiting for aw-server at {base_url}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     }
-    tracing::info!(%bucket_id, %AW_BASE_URL, "watching i3 focus");
+    tracing::info!(%bucket_id, %base_url, "watching the daemon's active env");
 
-    let mut i3 = I3::connect().await.context("connect to i3")?;
     let mut cache = MetaCache::new();
+    let mut client = None;
 
     loop {
-        match focused_env(&mut i3).await {
-            Ok(Some(env_name)) if is_known_env(&env_name) => {
-                let data = build_heartbeat_data(&env_name, &mut cache);
-                if let Err(e) = aw.heartbeat(&bucket_id, &data, PULSETIME_SECS) {
-                    tracing::warn!(error = %e, "heartbeat failed");
+        if client.is_none() {
+            match enwiro_sdk::rpc::connect().await {
+                Ok(c) => client = Some(c),
+                Err(e) => tracing::warn!(error = %e, "waiting for enwiro-daemon RPC socket"),
+            }
+        }
+        if let Some(c) = &client {
+            match EnwiroRpcClient::env_current(c).await {
+                Ok(result) => match result.env_name {
+                    Some(env_name) if is_known_env(&env_name) => {
+                        let data = build_heartbeat_data(&env_name, &mut cache);
+                        if let Err(e) = aw.heartbeat(&bucket_id, &data, PULSETIME_SECS) {
+                            tracing::warn!(error = %e, "heartbeat failed");
+                        }
+                    }
+                    Some(env_name) => {
+                        tracing::debug!(
+                            %env_name,
+                            "daemon reports an active env but its dir is missing - skipping",
+                        );
+                    }
+                    None => {
+                        tracing::debug!("no switch event observed since daemon start - skipping");
+                    }
+                },
+                Err(e) => {
+                    // The jsonrpsee client is dead once its connection drops
+                    // (e.g. daemon restart); rebuild it on the next tick.
+                    tracing::warn!(error = %e, "env.current failed - reconnecting");
+                    client = None;
                 }
-            }
-            Ok(Some(env_name)) => {
-                tracing::debug!(
-                    %env_name,
-                    "workspace matches `<num>: <env>` but env dir missing — skipping",
-                );
-            }
-            Ok(None) => {
-                tracing::debug!("no focused env — skipping heartbeat");
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "i3 query failed");
             }
         }
         tokio::time::sleep(INTERVAL).await;
@@ -261,25 +274,6 @@ async fn listen() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_workspace_name() {
-        assert_eq!(
-            extract_env_from_workspace_name("8: chezmoi"),
-            Some("chezmoi".to_string())
-        );
-        assert_eq!(
-            extract_env_from_workspace_name("12:   spaced   "),
-            Some("spaced".to_string())
-        );
-    }
-
-    #[test]
-    fn rejects_workspace_name_without_env() {
-        assert_eq!(extract_env_from_workspace_name("8"), None);
-        assert_eq!(extract_env_from_workspace_name("8:"), None);
-        assert_eq!(extract_env_from_workspace_name("8:   "), None);
-    }
 
     #[test]
     fn build_data_sets_title_to_env_name() {

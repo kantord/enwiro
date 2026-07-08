@@ -48,9 +48,11 @@ Implement `listen` as a subcommand that runs until killed. Blocking forever
 is fine; the daemon owns the lifecycle. Don't daemonize or fork - stay in
 the foreground.
 
-`enwiro-bridge-i3-activitywatch` is the reference implementation: `metadata`
-declares `listen`, and `listen` runs a watch loop that heartbeats the focused
-i3 workspace's environment to ActivityWatch.
+`enwiro-bridge-activitywatch` is the reference implementation: `metadata`
+declares `listen`, and `listen` runs a watch loop that polls the daemon's
+`env.current` RPC and heartbeats the active environment to ActivityWatch.
+Daemon-spawned bridges inherit the RPC socket path via the environment, so
+`enwiro_sdk::rpc::connect()` works out of the box.
 
 ## Argv Hygiene
 

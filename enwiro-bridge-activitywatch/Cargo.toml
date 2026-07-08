@@ -1,8 +1,8 @@
 [package]
-name = "enwiro-bridge-i3-activitywatch"
+name = "enwiro-bridge-activitywatch"
 version = "0.1.2"
 edition = "2024"
-description = "ActivityWatch bridge for enwiro: reports the focused i3 workspace's enwiro env as aw-server heartbeats"
+description = "ActivityWatch bridge for enwiro: reports the active enwiro env as aw-server heartbeats"
 license = "GPL-3.0-or-later"
 repository.workspace = true
 
@@ -10,12 +10,10 @@ repository.workspace = true
 anyhow = "1"
 enwiro-sdk.workspace = true
 hostname = "0.4"
-i3ipc-types = "0.16.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1.37.0", features = ["macros", "rt", "time"] }
-tokio-i3ipc = "0.16.0"
 tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 ureq = { version = "3", features = ["json"] }
