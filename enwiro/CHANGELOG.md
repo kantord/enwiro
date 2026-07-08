@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.55](https://github.com/kantord/enwiro/compare/enwiro-v0.3.54...enwiro-v0.3.55) - 2026-07-08
+
+### Other
+
+- updated the following local packages: enwiro-sdk, enwiro-sdk, enwiro-daemon
+
 ## [0.3.54](https://github.com/kantord/enwiro/compare/enwiro-v0.3.53...enwiro-v0.3.54) - 2026-07-07
 
 ### Added

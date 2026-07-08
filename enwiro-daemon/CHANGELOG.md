@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.17](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.16...enwiro-daemon-v0.0.17) - 2026-07-08
+
+### Added
+
+- autostart bridges that have this capability ([#711](https://github.com/kantord/enwiro/pull/711))
+
+### Other
+
+- release enwiro-gui ([#709](https://github.com/kantord/enwiro/pull/709))
+
 ## [0.0.16](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.15...enwiro-daemon-v0.0.16) - 2026-07-07
 
 ### Added

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.27](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.26...enwiro-bridge-rofi-v0.1.27) - 2026-07-08
+
+### Added
+
+- autostart bridges that have this capability ([#711](https://github.com/kantord/enwiro/pull/711))
+
 ## [0.1.26](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.25...enwiro-bridge-rofi-v0.1.26) - 2026-07-07
 
 ### Other

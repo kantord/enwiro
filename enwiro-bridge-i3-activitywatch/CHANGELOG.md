@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/kantord/enwiro/compare/enwiro-bridge-i3-activitywatch-v0.1.1...enwiro-bridge-i3-activitywatch-v0.1.2) - 2026-07-08
+
+### Added
+
+- autostart bridges that have this capability ([#711](https://github.com/kantord/enwiro/pull/711))
+
+### Other
+
+- add basic docs site ([#539](https://github.com/kantord/enwiro/pull/539))
+
 ## [0.1.1](https://github.com/kantord/enwiro/compare/enwiro-bridge-i3-activitywatch-v0.1.0...enwiro-bridge-i3-activitywatch-v0.1.1) - 2026-05-21
 
 ### Fixed
