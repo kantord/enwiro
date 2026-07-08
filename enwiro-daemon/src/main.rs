@@ -11,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
         enwiro_daemon::DaemonConfig {
             workspaces_directory: PathBuf::from(config.workspaces_directory),
             container_runtime: config.container_runtime,
+            adapter: config.adapter,
         },
         enwiro_daemon::meta::record_switch_per_env,
     )

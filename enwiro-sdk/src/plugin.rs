@@ -145,6 +145,15 @@ pub fn get_plugins(plugin_kind: PluginKind) -> HashSet<Plugin> {
     results
 }
 
+/// Resolve a plugin by kind and name. The single name-to-binary resolution
+/// path shared by every consumer of a *configured* plugin choice (the CLI's
+/// adapter commands, the daemon's listen adapter).
+pub fn get_plugin_by_name(plugin_kind: PluginKind, name: &str) -> Option<Plugin> {
+    get_plugins(plugin_kind)
+        .into_iter()
+        .find(|p| p.name.as_str() == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

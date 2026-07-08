@@ -48,6 +48,10 @@ pub struct DaemonConfig {
     /// OCI runtime for container launches (issue #540); see
     /// `config::ConfigurationValues::container_runtime`.
     pub container_runtime: Option<String>,
+    /// Name of the adapter whose `listen` subcommand feeds switch events
+    /// (`config::ConfigurationValues::adapter`). `None` means no adapter
+    /// was configured or auto-selected.
+    pub adapter: Option<String>,
 }
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
@@ -283,6 +287,30 @@ fn bridge_listen_sources(
     sources
 }
 
+/// Resolve the adapter whose `listen` subcommand feeds switch events.
+/// Choosing the name is `ConfigurationValues`' job alone (explicit config,
+/// or its single-installed-adapter auto-select); this only resolves the
+/// chosen name to a binary and explains why events are off when it can't.
+/// The daemon used to ignore the choice and spawn an arbitrary installed
+/// adapter, silently starving switch consumers when the wrong one won.
+fn select_listen_adapter(configured: Option<&str>) -> Option<enwiro_sdk::plugin::Plugin> {
+    let Some(name) = configured else {
+        tracing::warn!(
+            "No adapter configured or auto-selected; switch events disabled. \
+             Set `adapter` in enwiro.toml if more than one adapter is installed."
+        );
+        return None;
+    };
+    let found = enwiro_sdk::plugin::get_plugin_by_name(PluginKind::Adapter, name);
+    if found.is_none() {
+        tracing::warn!(
+            adapter = name,
+            "Configured adapter is not installed; switch events disabled"
+        );
+    }
+    found
+}
+
 /// Run the daemon. Awaits until SIGTERM/SIGINT/SIGHUP.
 ///
 /// `config.workspaces_directory` is the root under which enwiro environments
@@ -296,6 +324,7 @@ pub async fn run(
     let DaemonConfig {
         workspaces_directory,
         container_runtime,
+        adapter,
     } = config;
 
     let setsid_result = unsafe { libc::setsid() };
@@ -338,7 +367,8 @@ pub async fn run(
     let mut last_cache_content: Option<String> = None;
 
     let mut desired: Vec<ProcessSource> = Vec::new();
-    if let Some(plugin) = get_plugins(PluginKind::Adapter).into_iter().next() {
+    if let Some(plugin) = select_listen_adapter(adapter.as_deref()) {
+        tracing::info!(adapter = %plugin.name, "Spawning adapter listen subprocess");
         desired.push(ProcessSource {
             identity: ProcessIdentity {
                 bin: plugin.executable.clone(),
@@ -639,6 +669,16 @@ mod tests {
     fn build_cache_content_empty_state_produces_empty_string() {
         let state: HashMap<String, CookbookEntry> = HashMap::new();
         assert_eq!(build_cache_content(&state), "");
+    }
+
+    #[test]
+    fn no_configured_adapter_selects_none() {
+        assert!(select_listen_adapter(None).is_none());
+    }
+
+    #[test]
+    fn configured_but_uninstalled_adapter_selects_none() {
+        assert!(select_listen_adapter(Some("definitely-not-installed")).is_none());
     }
 
     fn fake_bridge(

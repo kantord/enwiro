@@ -5,7 +5,7 @@ use std::process::{Command, Stdio};
 
 use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo, RunPayload};
 use enwiro_sdk::gear::Gear;
-use enwiro_sdk::plugin::{PluginKind, get_plugins};
+use enwiro_sdk::plugin::{PluginKind, get_plugin_by_name};
 
 pub trait EnwiroAdapterTrait {
     fn get_active_environment_name(&self) -> anyhow::Result<String>;
@@ -111,10 +111,7 @@ impl EnwiroAdapterTrait for EnwiroAdapterExternal {
 
 impl EnwiroAdapterExternal {
     pub fn new(adapter_name: &str) -> anyhow::Result<Self> {
-        let plugins = get_plugins(PluginKind::Adapter);
-        let plugin = plugins
-            .into_iter()
-            .find(|p| p.name.as_str() == adapter_name)
+        let plugin = get_plugin_by_name(PluginKind::Adapter, adapter_name)
             .context(format!("Adapter '{}' not found", adapter_name))?;
 
         Ok(Self {
