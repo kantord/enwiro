@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.57](https://github.com/kantord/enwiro/compare/enwiro-v0.3.56...enwiro-v0.3.57) - 2026-07-08
+
+### Fixed
+
+- spawn the configured listen adapter when multiple ones exist ([#718](https://github.com/kantord/enwiro/pull/718))
+
 ## [0.3.56](https://github.com/kantord/enwiro/compare/enwiro-v0.3.55...enwiro-v0.3.56) - 2026-07-08
 
 ### Other
