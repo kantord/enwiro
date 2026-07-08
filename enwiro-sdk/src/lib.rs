@@ -17,6 +17,7 @@ pub mod garnish;
 pub mod gear;
 pub mod listen;
 pub mod logging;
+pub mod pattern;
 pub mod plugin;
 pub mod process;
 pub mod rpc;
@@ -25,5 +26,5 @@ pub mod status;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
 
-pub use cookbook::{CookbookMetadata, CookbookPayload, Recipe};
+pub use cookbook::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 pub use logging::init_logging;

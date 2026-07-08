@@ -1766,7 +1766,7 @@ fn main() -> anyhow::Result<()> {
                 std::collections::HashSet::new();
             enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, move || {
                 let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
-                    data: collect_recipes(),
+                    data: collect_recipes().into_iter().map(Into::into).collect(),
                 }];
                 updates.extend(collect_status_events(&config, &mut done_cache));
                 updates

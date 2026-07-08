@@ -30,6 +30,28 @@ pub struct CachedRecipe {
     pub scores: Option<EnvScores>,
 }
 
+/// Cache-file counterpart of [`crate::cookbook::PatternRecipe`]: a pattern
+/// claim with its owning cookbook. The pattern is stored anchored and the
+/// description template pre-validated (see [`crate::pattern`]). Pattern
+/// lines have no `name`, so cache consumers that predate patterns skip them
+/// as unparseable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedPatternRecipe {
+    pub cookbook: String,
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One line of the daemon recipe cache. Untagged: pattern lines carry
+/// `pattern` instead of `name`, concrete lines are unchanged [`CachedRecipe`]s.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CachedEntry {
+    Pattern(CachedPatternRecipe),
+    Concrete(CachedRecipe),
+}
+
 pub trait CookbookTrait {
     fn list_recipes(&self) -> anyhow::Result<Vec<Recipe>>;
     fn cook(&self, recipe: &str) -> anyhow::Result<String>;

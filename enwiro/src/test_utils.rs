@@ -148,6 +148,22 @@ pub mod test_utilities {
                 .expect("Could not write cache file");
         }
 
+        /// Populate the daemon recipe cache with raw JSONL lines, overwriting
+        /// any previous contents. For tests that mix concrete and pattern
+        /// entries; pattern lines must already be anchored, as the daemon
+        /// would store them.
+        pub fn write_cache_lines(&self, lines: &[String]) {
+            let cache_dir = self
+                .cache_dir
+                .as_ref()
+                .expect("cache_dir must be set by the fixture");
+            std::fs::create_dir_all(cache_dir).expect("Could not create cache dir");
+            let mut content = lines.join("\n");
+            content.push('\n');
+            std::fs::write(cache_dir.join("recipes.cache"), content)
+                .expect("Could not write cache file");
+        }
+
         /// Like `write_cache_entries`, but each entry also carries an
         /// `equivalent_to` list: `(cookbook, name, description, equivalents)`.
         pub fn write_cache_entries_with_equivalents(

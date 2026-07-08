@@ -7,7 +7,7 @@ use crate::{
     notifier::{DesktopNotifier, Notifier},
 };
 use enwiro_daemon::ConfigurationValues;
-use enwiro_sdk::client::{CachedRecipe, CookbookTrait, RpcCookbookClient};
+use enwiro_sdk::client::{CachedEntry, CookbookTrait, RpcCookbookClient};
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, path::PathBuf};
 
@@ -16,6 +16,15 @@ use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, pa
 pub struct CookConfig {
     /// Skip firing garnish `run_on: [Cook]` cli entries. Gear files are still written.
     pub no_hooks: bool,
+}
+
+/// A recipe name resolved against the daemon cache: which cookbook cooks it,
+/// its (possibly template-rendered) description, and whether it was matched
+/// via a pattern claim rather than a concrete cache entry.
+struct ResolvedRecipe {
+    cookbook: String,
+    description: Option<String>,
+    via_pattern: bool,
 }
 
 pub struct CommandContext<W: Write> {
@@ -71,15 +80,19 @@ impl<W: Write> CommandContext<W> {
     ) -> anyhow::Result<Environment> {
         self.notifier
             .notify_info(env_name, &format!("Preparing environment: {}", env_name));
-        let (cookbook_name, description) =
-            self.find_recipe_in_cache(recipe_name).ok_or_else(|| {
-                tracing::error!(name = %recipe_name, "Recipe not in daemon cache");
-                anyhow!(
-                    "No recipe '{}' in the daemon cache. \
-                     Check: systemctl --user status enwiro-daemon.service",
-                    recipe_name
-                )
-            })?;
+        let resolved = self.find_recipe_in_cache(recipe_name).ok_or_else(|| {
+            tracing::error!(name = %recipe_name, "Recipe not in daemon cache");
+            anyhow!(
+                "No recipe '{}' in the daemon cache. \
+                 Check: systemctl --user status enwiro-daemon.service",
+                recipe_name
+            )
+        })?;
+        let ResolvedRecipe {
+            cookbook: cookbook_name,
+            description,
+            via_pattern,
+        } = resolved;
 
         let cookbook = self
             .cookbooks
@@ -92,6 +105,13 @@ impl<W: Write> CommandContext<W> {
                     cookbook_name
                 )
             })?;
+
+        // A pattern-routed cook does something the recipe list never showed
+        // (e.g. creating a new branch) — surface the rendered description so
+        // a typo'd name is noticed instead of silently becoming a branch.
+        if via_pattern && let Some(rendered) = &description {
+            self.notifier.notify_info(env_name, rendered);
+        }
 
         tracing::debug!(env = %env_name, recipe = %recipe_name, cookbook = %cookbook_name, "Found recipe in cache");
         let env_path = cookbook.cook(recipe_name)?;
@@ -117,20 +137,48 @@ impl<W: Write> CommandContext<W> {
         self.find_recipe_in_cache(recipe_name).is_some()
     }
 
-    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<(String, Option<String>)> {
+    /// Resolve a recipe name against the daemon cache: exact concrete match
+    /// first (across the whole cache), then pattern claims in cache order —
+    /// the cache is priority-sorted, so first match wins, mirroring how
+    /// duplicate concrete names are already arbitrated. Pattern matches
+    /// render their `{group}` description template with the matched name's
+    /// capture groups.
+    fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<ResolvedRecipe> {
         let cache = match &self.cache_dir {
             Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
             None => enwiro_daemon::DaemonCache::open().ok()?,
         };
         let cached = cache.read_recipes().ok()??;
-        for line in cached.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(entry) = serde_json::from_str::<CachedRecipe>(line)
-                && entry.name == recipe_name
+        let entries: Vec<CachedEntry> = cached
+            .lines()
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| serde_json::from_str::<CachedEntry>(line).ok())
+            .collect();
+
+        for entry in &entries {
+            if let CachedEntry::Concrete(concrete) = entry
+                && concrete.name == recipe_name
             {
-                return Some((entry.cookbook, entry.description));
+                return Some(ResolvedRecipe {
+                    cookbook: concrete.cookbook.clone(),
+                    description: concrete.description.clone(),
+                    via_pattern: false,
+                });
+            }
+        }
+        for entry in &entries {
+            if let CachedEntry::Pattern(pattern) = entry
+                && let Some(rendered) = enwiro_sdk::pattern::match_rendering(
+                    &pattern.pattern,
+                    pattern.description.as_deref(),
+                    recipe_name,
+                )
+            {
+                return Some(ResolvedRecipe {
+                    cookbook: pattern.cookbook.clone(),
+                    description: rendered,
+                    via_pattern: true,
+                });
             }
         }
         None
@@ -622,6 +670,138 @@ mod tests {
         assert!(env_dir.is_dir());
         let inner_link = env_dir.join("my-project");
         assert!(inner_link.is_symlink());
+    }
+
+    fn concrete_cache_line(cookbook: &str, name: &str) -> String {
+        serde_json::to_string(&enwiro_sdk::client::CachedRecipe {
+            cookbook: cookbook.to_string(),
+            name: name.to_string(),
+            description: None,
+            sort_order: 0,
+            equivalent_to: Vec::new(),
+            scores: None,
+        })
+        .unwrap()
+    }
+
+    /// A pattern cache line as the daemon stores it: already anchored.
+    fn pattern_cache_line(cookbook: &str, pattern: &str, description: Option<&str>) -> String {
+        serde_json::to_string(&enwiro_sdk::client::CachedPatternRecipe {
+            cookbook: cookbook.to_string(),
+            pattern: enwiro_sdk::pattern::anchor(pattern),
+            description: description.map(str::to_string),
+        })
+        .unwrap()
+    }
+
+    #[rstest]
+    fn test_cook_environment_via_pattern_match_creates_env_and_notifies(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, notifications) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.write_cache_lines(&[
+            concrete_cache_line("git", "my-project"),
+            pattern_cache_line(
+                "git",
+                "my-project@(?P<branch>.+)",
+                Some("Create new branch '{branch}' in my-project"),
+            ),
+        ]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["my-project"],
+            vec![("my-project@new-idea", cooked_dir.to_str().unwrap())],
+        ))];
+
+        let env = context_object
+            .cook_environment(
+                "my-project@new-idea",
+                "my-project@new-idea",
+                &CookConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(env.name, "my-project@new-idea");
+
+        // The rendered pattern description is surfaced as a notification so
+        // an unintended branch creation is visible.
+        assert!(
+            notifications
+                .borrow()
+                .iter()
+                .any(|n| n.contains("Create new branch 'new-idea' in my-project")),
+            "notifications: {:?}",
+            notifications.borrow()
+        );
+
+        // ... and persisted as the env description.
+        let env_dir = temp_dir.path().join("my-project@new-idea");
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(
+            meta.description.as_deref(),
+            Some("Create new branch 'new-idea' in my-project")
+        );
+    }
+
+    #[rstest]
+    fn test_exact_cache_entry_shadows_pattern_match(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, context_object, _, _) = context_object;
+
+        // The pattern line comes FIRST and claims everything; the exact
+        // concrete entry must still win.
+        context_object.write_cache_lines(&[
+            pattern_cache_line("greedy", "(?P<anything>.+)", None),
+            concrete_cache_line("git", "my-project"),
+        ]);
+
+        let resolved = context_object.find_recipe_in_cache("my-project").unwrap();
+        assert_eq!(resolved.cookbook, "git");
+        assert!(!resolved.via_pattern);
+    }
+
+    #[rstest]
+    fn test_pattern_matches_resolve_in_cache_order(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, context_object, _, _) = context_object;
+
+        // Both patterns match; the cache is priority-sorted, so the first
+        // line wins.
+        context_object.write_cache_lines(&[
+            pattern_cache_line("first", "my-project@(?P<branch>.+)", None),
+            pattern_cache_line("second", "(?P<anything>.+)", None),
+        ]);
+
+        let resolved = context_object
+            .find_recipe_in_cache("my-project@feature")
+            .unwrap();
+        assert_eq!(resolved.cookbook, "first");
+        assert!(resolved.via_pattern);
+    }
+
+    #[rstest]
+    fn test_name_matching_no_entry_is_not_found(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, context_object, _, _) = context_object;
+
+        context_object.write_cache_lines(&[
+            concrete_cache_line("git", "my-project"),
+            pattern_cache_line("git", "my-project@(?P<branch>.+)", None),
+        ]);
+
+        // Typo in the repo part: neither the exact entry nor the pattern
+        // claims it.
+        assert!(
+            context_object
+                .find_recipe_in_cache("my-porject@feature")
+                .is_none()
+        );
     }
 
     #[rstest]

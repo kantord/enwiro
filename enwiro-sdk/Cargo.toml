@@ -15,7 +15,9 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 home.workspace = true
 http = "1"
 jsonrpsee = { version = "=0.26", default-features = false, features = ["macros", "async-client", "server-core"] }
+leon = "3.0.2"
 rand = "0.10"
+regex = "1.12.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 strum_macros = "0.28.0"

@@ -146,6 +146,36 @@ impl Recipe {
     }
 }
 
+/// A pattern recipe: a regex claim over recipe names the cookbook can cook
+/// on demand even though they are not listed concretely — e.g. the git
+/// cookbook claiming `repo@<any-branch>` so a not-yet-existing branch can be
+/// cooked (#246). See [`crate::pattern`] for the pattern/template contract:
+/// Rust `regex` syntax, emitted unanchored, `{group}` description template
+/// rendered from the pattern's named capture groups.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternRecipe {
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// One item in a cookbook's recipe listing: a concrete recipe or a pattern
+/// claim. Untagged on the wire — pattern entries carry `pattern` instead of
+/// `name`, so consumers that only know concrete recipes skip pattern lines
+/// as unparseable instead of misreading them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RecipeItem {
+    Pattern(PatternRecipe),
+    Concrete(Recipe),
+}
+
+impl From<Recipe> for RecipeItem {
+    fn from(recipe: Recipe) -> Self {
+        RecipeItem::Concrete(recipe)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
