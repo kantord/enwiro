@@ -15,10 +15,11 @@ glue that connects the two.
   [rofi](https://github.com/davatorium/rofi). Invoked by rofi itself in
   script mode; nothing runs in the background.
 
-- **enwiro-bridge-i3-activitywatch** - Reports the focused i3 workspace's
-  enwiro environment to [ActivityWatch](https://activitywatch.net/) as
-  heartbeats, so your time tracking knows which environment you were working
-  in. Runs as a long-running process managed by the daemon.
+- **enwiro-bridge-activitywatch** - Reports the active enwiro environment to
+  [ActivityWatch](https://activitywatch.net/) as heartbeats, so your time
+  tracking knows which environment you were working in. Works with any
+  adapter (it asks the daemon which environment is active). Runs as a
+  long-running process managed by the daemon.
 
 ## Installing a Bridge
 

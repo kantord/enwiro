@@ -988,22 +988,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "enwiro-bridge-i3-activitywatch"
+name = "enwiro-bridge-activitywatch"
 version = "0.1.2"
 dependencies = [
  "anyhow",
  "enwiro-sdk",
  "hostname",
- "i3ipc-types",
  "serde",
  "serde_json",
  "time",
  "tokio",
- "tokio-i3ipc",
  "tracing",
  "tracing-subscriber",
  "ureq",
 ]
+
+[[package]]
+name = "enwiro-bridge-i3-activitywatch"
+version = "0.1.2"
 
 [[package]]
 name = "enwiro-bridge-rofi"

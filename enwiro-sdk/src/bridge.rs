@@ -90,13 +90,38 @@ pub fn fetch_bridge_metadata_with_timeout(executable: &str, timeout: Duration) -
     }
 }
 
+/// How many times to retry a spawn that fails with ETXTBSY, and how long
+/// to wait between attempts. A process forked concurrently (e.g. by another
+/// thread) can briefly hold a freshly written bridge binary's write fd
+/// open, making exec fail with "text file busy"; it clears as soon as that
+/// child execs or exits.
+const EXEC_BUSY_RETRIES: u32 = 10;
+const EXEC_BUSY_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+fn spawn_probe(executable: &str) -> std::io::Result<std::process::Child> {
+    let mut attempt = 0;
+    loop {
+        let result = Command::new(executable)
+            .arg("metadata")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        match result {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && attempt < EXEC_BUSY_RETRIES =>
+            {
+                attempt += 1;
+                std::thread::sleep(EXEC_BUSY_RETRY_DELAY);
+            }
+            other => return other,
+        }
+    }
+}
+
 fn probe_metadata(executable: &str, timeout: Duration) -> anyhow::Result<BridgeMetadata> {
-    let mut child = Command::new(executable)
-        .arg("metadata")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
+    let mut child = spawn_probe(executable)
         .map_err(|e| anyhow::anyhow!("Failed to spawn bridge metadata command: {e}"))?;
 
     let deadline = Instant::now() + timeout;
