@@ -629,36 +629,17 @@ fn cook_pr(
     print_worktree_path(&wt_path)
 }
 
-// NOTE: deliberately NOT shared with `detect::default_branch_name`. That one
-// is local-preferred (for comparing a checked-out branch); this one resolves
-// the *remote* default (origin/HEAD -> remote origin/main|master) and errors
-// when there's no remote default, which is what issue-branch creation needs.
+/// Unlike the git cookbook, issue-branch creation has no local-HEAD
+/// fallback: these repos are GitHub clones by definition, so a missing
+/// remote default is a config problem worth an actionable error.
 fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
-    // Try origin/HEAD symbolic ref
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
-        && let Ok(resolved) = reference.resolve()
-        && let Ok(name) = resolved.shorthand()
-    {
-        return Ok(name.strip_prefix("origin/").unwrap_or(name).to_string());
-    }
-
-    // origin/HEAD not set - try common default branch names
-    tracing::warn!("origin/HEAD is not set, probing for default branch");
-    for candidate in ["main", "master"] {
-        if repo
-            .find_reference(&format!("refs/remotes/origin/{}", candidate))
-            .is_ok()
-        {
-            tracing::debug!(branch = candidate, "Using fallback default branch");
-            return Ok(candidate.to_string());
-        }
-    }
-
-    anyhow::bail!(
-        "Could not determine default branch: origin/HEAD is not set and \
-         neither origin/main nor origin/master exist. \
-         Try running: git remote set-head origin --auto"
-    )
+    enwiro_sdk::git::remote_default_branch(repo).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine default branch: origin/HEAD is not set and \
+             neither origin/main nor origin/master exist. \
+             Try running: git remote set-head origin --auto"
+        )
+    })
 }
 
 /// Create a worktree for an issue. Assumes no existing worktree was found

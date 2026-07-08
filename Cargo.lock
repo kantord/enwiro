@@ -1165,6 +1165,7 @@ dependencies = [
  "config",
  "dirs",
  "futures-util",
+ "git2",
  "home",
  "http",
  "jsonrpsee",

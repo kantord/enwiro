@@ -53,11 +53,9 @@ fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyho
     }
 }
 
-/// Pattern-routed cook (#246): `repo@branch` where the branch is not listed
-/// because it doesn't exist yet. Creates the branch at the fork point and
-/// reuses the normal branch-worktree path. Also covers the stale-cache race
-/// where the branch appeared after discovery: `ensure_local_branch` reuses
-/// an existing branch instead of failing.
+/// Pattern-routed cook (#246): `repo@branch` names discovery didn't list —
+/// usually because the branch doesn't exist yet, but also the stale-cache
+/// race where it appeared after discovery ran.
 fn cook_new_branch(
     config: &ConfigurationValues,
     recipes: &HashMap<String, RecipeInfo>,
@@ -85,10 +83,6 @@ fn cook_new_branch(
     resolve_branch_worktree(config, &repo_path, branch_name, false)
 }
 
-/// Create `branch_name` if it doesn't exist yet, forking from the remote
-/// default branch, or from local HEAD when the repo has no remote default.
-/// Mirrors the github cookbook's issue-branch logic minus the fetch — this
-/// cookbook never touches the network.
 fn ensure_local_branch(repo: &Repository, branch_name: &str) -> anyhow::Result<()> {
     if repo
         .find_branch(branch_name, git2::BranchType::Local)
@@ -104,8 +98,11 @@ fn ensure_local_branch(repo: &Repository, branch_name: &str) -> anyhow::Result<(
     Ok(())
 }
 
+/// No `git fetch` first (unlike the github cookbook's issue-branch path):
+/// this cookbook never touches the network, so the fork point is the local
+/// view of the remote default branch — or plain HEAD for remote-less repos.
 fn fork_point_commit(repo: &Repository) -> anyhow::Result<git2::Commit<'_>> {
-    if let Some(default_branch) = remote_default_branch(repo)
+    if let Some(default_branch) = enwiro_sdk::git::remote_default_branch(repo)
         && let Ok(reference) =
             repo.find_reference(&format!("refs/remotes/origin/{}", default_branch))
         && let Ok(commit) = reference.peel_to_commit()
@@ -116,25 +113,6 @@ fn fork_point_commit(repo: &Repository) -> anyhow::Result<git2::Commit<'_>> {
         .context("Could not resolve repo HEAD")?
         .peel_to_commit()
         .context("Could not resolve HEAD to a commit")
-}
-
-/// The remote default branch name: origin/HEAD's target, else probe
-/// origin/main and origin/master. `None` when the repo has no remote
-/// default (local-only repo — fork from local HEAD instead).
-fn remote_default_branch(repo: &Repository) -> Option<String> {
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
-        && let Ok(resolved) = reference.resolve()
-        && let Ok(name) = resolved.shorthand()
-    {
-        return Some(name.strip_prefix("origin/").unwrap_or(name).to_string());
-    }
-    ["main", "master"]
-        .iter()
-        .find(|candidate| {
-            repo.find_reference(&format!("refs/remotes/origin/{}", candidate))
-                .is_ok()
-        })
-        .map(|name| name.to_string())
 }
 
 /// The short branch name (remote prefix stripped) and the worktree path a
@@ -552,9 +530,7 @@ fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One pattern claim per base repo (#246): any `repo@<branch>` name is
-/// cookable, creating the branch on demand when it doesn't exist. Patterns
-/// are emitted unanchored per the `enwiro_sdk::pattern` contract.
+/// Emitted unanchored; the daemon anchors them (see `enwiro_sdk::pattern`).
 fn branch_pattern_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<RecipeItem> {
     let mut repo_names: Vec<&String> = repos.keys().filter(|n| is_base_repo_recipe(n)).collect();
     repo_names.sort();
@@ -569,8 +545,6 @@ fn branch_pattern_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<RecipeItem
         .collect()
 }
 
-/// Full recipe listing for the listen stream: concrete recipes plus one
-/// branch-creation pattern per base repo.
 fn collect_recipe_items(config: &ConfigurationValues) -> Vec<RecipeItem> {
     let Ok(repos) = build_repository_hashmap(config) else {
         return Vec::new();

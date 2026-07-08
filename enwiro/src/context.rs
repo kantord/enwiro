@@ -18,9 +18,6 @@ pub struct CookConfig {
     pub no_hooks: bool,
 }
 
-/// A recipe name resolved against the daemon cache: which cookbook cooks it,
-/// its (possibly template-rendered) description, and whether it was matched
-/// via a pattern claim rather than a concrete cache entry.
 struct ResolvedRecipe {
     cookbook: String,
     description: Option<String>,
@@ -137,12 +134,10 @@ impl<W: Write> CommandContext<W> {
         self.find_recipe_in_cache(recipe_name).is_some()
     }
 
-    /// Resolve a recipe name against the daemon cache: exact concrete match
-    /// first (across the whole cache), then pattern claims in cache order —
-    /// the cache is priority-sorted, so first match wins, mirroring how
-    /// duplicate concrete names are already arbitrated. Pattern matches
-    /// render their `{group}` description template with the matched name's
-    /// capture groups.
+    /// Exact matches shadow pattern claims, so the exact pass scans the
+    /// whole cache before any pattern is tried. The cache is priority-sorted,
+    /// so the first pattern match wins — the same arbitration duplicate
+    /// concrete names already get.
     fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<ResolvedRecipe> {
         let cache = match &self.cache_dir {
             Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),

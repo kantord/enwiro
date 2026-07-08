@@ -15,6 +15,8 @@ pub mod external_paths;
 pub mod fs;
 pub mod garnish;
 pub mod gear;
+#[cfg(feature = "git")]
+pub mod git;
 pub mod listen;
 pub mod logging;
 pub mod pattern;

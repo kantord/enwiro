@@ -199,10 +199,9 @@ struct SortableCachedRecipe {
 /// Serialize a per-cookbook recipe state map into the cache file's
 /// JSON-lines format: concrete recipes sorted globally by (sort_order,
 /// cookbook priority, name), then pattern claims sorted by (cookbook
-/// priority, pattern). Pattern entries are validated here (compilable
-/// pattern, template keys ⊆ capture groups — see `enwiro_sdk::pattern`)
-/// and stored anchored; invalid ones are dropped with a warning so no
-/// consumer ever sees them. All descriptions are length-capped.
+/// priority, pattern). Patterns are validated and anchored here
+/// (`enwiro_sdk::pattern`), invalid ones dropped — consumers never see a
+/// pattern that doesn't compile or whose template keys don't resolve.
 pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> String {
     let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
     let mut all_patterns: Vec<(u32, CachedPatternRecipe)> = Vec::new();
