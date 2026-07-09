@@ -45,11 +45,13 @@ pub struct CachedPatternRecipe {
 
 /// One line of the daemon recipe cache. Untagged: pattern lines carry
 /// `pattern` instead of `name`, concrete lines are unchanged [`CachedRecipe`]s.
+/// `Concrete` stays first for the same reason as [`crate::cookbook::RecipeItem`]:
+/// a stray `pattern` field must not flip a named entry into a claim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum CachedEntry {
-    Pattern(CachedPatternRecipe),
     Concrete(CachedRecipe),
+    Pattern(CachedPatternRecipe),
 }
 
 pub trait CookbookTrait {

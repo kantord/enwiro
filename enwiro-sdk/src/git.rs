@@ -1,6 +1,6 @@
 //! Shared git2 helpers for cookbooks (behind the `git` feature).
 //!
-//! Single source of truth for "what is this repo's remote default branch" —
+//! Single source of truth for "what is this repo's remote default branch" -
 //! the git and github cookbooks both fork new branches from it and must
 //! agree on how it is resolved.
 

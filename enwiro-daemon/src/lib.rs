@@ -200,7 +200,7 @@ struct SortableCachedRecipe {
 /// JSON-lines format: concrete recipes sorted globally by (sort_order,
 /// cookbook priority, name), then pattern claims sorted by (cookbook
 /// priority, pattern). Patterns are validated and anchored here
-/// (`enwiro_sdk::recipe_pattern`), invalid ones dropped — consumers never see a
+/// (`enwiro_sdk::recipe_pattern`), invalid ones dropped - consumers never see a
 /// pattern that doesn't compile or whose template keys don't resolve.
 pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> String {
     let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
@@ -260,8 +260,11 @@ fn cached_concrete_entry(cookbook: &str, recipe: &enwiro_sdk::Recipe) -> CachedR
     }
 }
 
-/// Validate, anchor, and truncate one cookbook-emitted pattern claim.
-/// `None` (with a warning) drops the entry before any consumer sees it.
+/// Validate and anchor one cookbook-emitted pattern claim. `None` (with a
+/// warning) drops the entry before any consumer sees it. The description
+/// TEMPLATE is stored exactly as validated - truncating it could cut
+/// through a `{key}` and store an unparseable template; length-capping is
+/// the renderer's job (`match_name` truncates the rendered output).
 fn cached_pattern_entry(
     cookbook: &str,
     pattern: &enwiro_sdk::PatternRecipe,
@@ -280,10 +283,7 @@ fn cached_pattern_entry(
     Some(CachedPatternRecipe {
         cookbook: cookbook.to_string(),
         pattern: enwiro_sdk::recipe_pattern::anchor(&pattern.pattern),
-        description: pattern
-            .description
-            .as_deref()
-            .map(enwiro_sdk::recipe_pattern::truncate_description),
+        description: pattern.description.clone(),
     })
 }
 
@@ -679,7 +679,7 @@ mod tests {
         let output = build_cache_content(&state);
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 2);
-        // Concrete first — old consumers read a prefix of the file they
+        // Concrete first - old consumers read a prefix of the file they
         // fully understand.
         let concrete: CachedRecipe = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(concrete.name, "my-project");
@@ -719,6 +719,32 @@ mod tests {
         assert_eq!(patterns.len(), 2);
         assert_eq!(patterns[0].cookbook, "high");
         assert_eq!(patterns[1].cookbook, "low");
+    }
+
+    #[test]
+    fn build_cache_content_stores_long_pattern_templates_intact() {
+        // A template cut at the cap could split a `{key}` into an
+        // unparseable template; what was validated must be what is stored.
+        let template = format!(
+            "{}{{branch}} suffix past the cap",
+            "d".repeat(enwiro_sdk::recipe_pattern::MAX_DESCRIPTION_CHARS)
+        );
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            pattern_entry(10, "p@(?P<branch>.+)", Some(&template)),
+        );
+
+        let patterns = parse_pattern_lines(&build_cache_content(&state));
+        assert_eq!(patterns[0].description.as_deref(), Some(template.as_str()));
+        // ... and the stored entry still renders at match time.
+        let matched = enwiro_sdk::recipe_pattern::match_name(
+            &patterns[0].pattern,
+            patterns[0].description.as_deref(),
+            "p@new-idea",
+        )
+        .unwrap();
+        assert!(matched.description.is_some());
     }
 
     #[test]

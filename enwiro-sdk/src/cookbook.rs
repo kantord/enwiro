@@ -147,7 +147,7 @@ impl Recipe {
 }
 
 /// A pattern recipe: a regex claim over recipe names the cookbook can cook
-/// on demand even though they are not listed concretely — e.g. the git
+/// on demand even though they are not listed concretely - e.g. the git
 /// cookbook claiming `repo@<any-branch>` so a not-yet-existing branch can be
 /// cooked (#246). See [`crate::recipe_pattern`] for the pattern/template contract:
 /// Rust `regex` syntax, emitted unanchored, `{group}` description template
@@ -160,14 +160,17 @@ pub struct PatternRecipe {
 }
 
 /// One item in a cookbook's recipe listing: a concrete recipe or a pattern
-/// claim. Untagged on the wire — pattern entries carry `pattern` instead of
+/// claim. Untagged on the wire - pattern entries carry `pattern` instead of
 /// `name`, so consumers that only know concrete recipes skip pattern lines
-/// as unparseable instead of misreading them.
+/// as unparseable instead of misreading them. `Concrete` must stay first:
+/// untagged tries variants in order, and `name` winning over `pattern`
+/// means a stray extra `pattern` field on a concrete recipe cannot flip it
+/// into a regex claim (pattern entries still parse - they have no `name`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RecipeItem {
-    Pattern(PatternRecipe),
     Concrete(Recipe),
+    Pattern(PatternRecipe),
 }
 
 impl From<Recipe> for RecipeItem {
@@ -179,6 +182,23 @@ impl From<Recipe> for RecipeItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recipe_item_with_name_and_stray_pattern_field_stays_concrete() {
+        let item: RecipeItem =
+            serde_json::from_str(r#"{"name":"docs","pattern":"docs-.*","sort_order":3}"#).unwrap();
+        let RecipeItem::Concrete(recipe) = item else {
+            panic!("a named entry must not deserialize as a pattern claim");
+        };
+        assert_eq!(recipe.name, "docs");
+    }
+
+    #[test]
+    fn recipe_item_without_name_parses_as_pattern() {
+        let item: RecipeItem =
+            serde_json::from_str(r#"{"pattern":"repo@(?P<branch>.+)"}"#).unwrap();
+        assert!(matches!(item, RecipeItem::Pattern(_)));
+    }
 
     #[test]
     fn metadata_from_json_valid() {

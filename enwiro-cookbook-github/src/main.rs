@@ -427,7 +427,7 @@ fn list_recipes() -> anyhow::Result<()> {
 
 /// One claim per configured repo covering every `repo#<number>` name.
 /// The searches behind `collect_recipes` are scoped (assigned issues, open
-/// PRs), but `cook` probes the forge for what a number is — so any issue or
+/// PRs), but `cook` probes the forge for what a number is - so any issue or
 /// PR is cookable, not just the listed ones. Emitted unanchored; the daemon
 /// anchors them (see `enwiro_sdk::recipe_pattern`).
 fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
@@ -441,11 +441,17 @@ fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
         .into_iter()
         .map(|short_name| {
             RecipeItem::Pattern(PatternRecipe {
+                // [0-9]{1,19}, not \d+: the regex crate's \d is Unicode and
+                // unbounded, which would claim names whose number
+                // parse_recipe_name's u64 parse then rejects.
                 pattern: format!(
-                    "{}#(?P<number>\\d+)",
+                    "{}#(?P<number>[0-9]{{1,19}})",
                     enwiro_sdk::recipe_pattern::escape(&short_name)
                 ),
-                description: Some(format!("Work on PR or issue #{{number}} in {}", short_name)),
+                description: Some(format!(
+                    "Work on PR or issue #{{number}} in {}",
+                    enwiro_sdk::recipe_pattern::escape_template(&short_name)
+                )),
             })
         })
         .collect()
@@ -977,12 +983,23 @@ mod tests {
                 .expect("emitted pattern must pass daemon validation");
         }
 
-        // Short repo name, any number — and nothing else. `next.js` must be
+        // Short repo name, any number - and nothing else. `next.js` must be
         // escaped: the dot may not match arbitrary characters.
         let anchored = enwiro_sdk::recipe_pattern::anchor(&patterns[1].pattern);
         assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#123").is_some());
         assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next-js#123").is_none());
         assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#abc").is_none());
+        // Only ASCII digits that fit in u64: the claim must not cover names
+        // parse_recipe_name later rejects.
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#٤٢").is_none());
+        assert!(
+            enwiro_sdk::recipe_pattern::match_name(
+                &anchored,
+                None,
+                "next.js#99999999999999999999999"
+            )
+            .is_none()
+        );
         assert!(
             enwiro_sdk::recipe_pattern::match_name(&anchored, None, "other/next.js#5").is_none()
         );

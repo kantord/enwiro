@@ -53,7 +53,7 @@ fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyho
     }
 }
 
-/// Pattern-routed cook (#246): `repo@branch` names discovery didn't list —
+/// Pattern-routed cook (#246): `repo@branch` names discovery didn't list -
 /// usually because the branch doesn't exist yet, but also the stale-cache
 /// race where it appeared after discovery ran.
 fn cook_new_branch(
@@ -100,7 +100,7 @@ fn ensure_local_branch(repo: &Repository, branch_name: &str) -> anyhow::Result<(
 
 /// No `git fetch` first (unlike the github cookbook's issue-branch path):
 /// this cookbook never touches the network, so the fork point is the local
-/// view of the remote default branch — or plain HEAD for remote-less repos.
+/// view of the remote default branch - or plain HEAD for remote-less repos.
 fn fork_point_commit(repo: &Repository) -> anyhow::Result<git2::Commit<'_>> {
     if let Some(default_branch) = enwiro_sdk::git::remote_default_branch(repo)
         && let Ok(reference) =
@@ -551,7 +551,10 @@ fn branch_pattern_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<RecipeItem
                     "{}@(?P<branch>.+)",
                     enwiro_sdk::recipe_pattern::escape(repo_name)
                 ),
-                description: Some(format!("Create new branch '{{branch}}' in {}", repo_name)),
+                description: Some(format!(
+                    "Create new branch '{{branch}}' in {}",
+                    enwiro_sdk::recipe_pattern::escape_template(repo_name)
+                )),
             })
         })
         .collect()
@@ -1225,7 +1228,7 @@ mod tests {
             wt_dir.to_str().unwrap(),
         );
 
-        // The branch is not listed anywhere — this is the pattern-routed path.
+        // The branch is not listed anywhere - this is the pattern-routed path.
         let result = resolve_recipe_path(&config, "my-project@brand-new-branch").unwrap();
 
         assert!(result.exists(), "Worktree path should exist on disk");

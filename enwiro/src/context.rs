@@ -104,7 +104,7 @@ impl<W: Write> CommandContext<W> {
             })?;
 
         // A pattern-routed cook does something the recipe list never showed
-        // (e.g. creating a new branch) — surface the rendered description so
+        // (e.g. creating a new branch) - surface the rendered description so
         // a typo'd name is noticed instead of silently becoming a branch.
         if via_pattern && let Some(rendered) = &description {
             self.notifier.notify_info(env_name, rendered);
@@ -136,7 +136,7 @@ impl<W: Write> CommandContext<W> {
 
     /// Exact matches shadow pattern claims, so the exact pass scans the
     /// whole cache before any pattern is tried. The cache is priority-sorted,
-    /// so the first pattern match wins — the same arbitration duplicate
+    /// so the first pattern match wins - the same arbitration duplicate
     /// concrete names already get.
     fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<ResolvedRecipe> {
         let cache = match &self.cache_dir {

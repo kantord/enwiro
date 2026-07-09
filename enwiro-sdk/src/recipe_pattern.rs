@@ -2,7 +2,7 @@
 //! cook on demand without listing them concretely (e.g. a git repo claiming
 //! `repo@<any-new-branch>`).
 //!
-//! Patterns use Rust `regex` syntax — no backreferences or lookaround — and
+//! Patterns use Rust `regex` syntax - no backreferences or lookaround - and
 //! are emitted unanchored by cookbooks; the daemon anchors them at
 //! cache-build time so a pattern always matches the whole recipe name.
 //! The accompanying description is a `{group}` template rendered with the
@@ -17,6 +17,21 @@ use anyhow::Context;
 /// Re-exported so cookbooks can embed literal strings (repo names) in their
 /// patterns without carrying their own regex dependency.
 pub use regex::escape;
+
+/// Escape literal text for embedding in a description template: `\`, `{`,
+/// and `}` are template syntax, so e.g. a repo directory named `app{v2}`
+/// would otherwise invalidate the template (dropping the whole pattern
+/// claim at daemon validation) or capture-substitute inside the repo name.
+pub fn escape_template(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '\\' | '{' | '}') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
 
 /// Maximum length of a recipe description, in chars, in the daemon cache and
 /// in any rendered pattern description. Longer text is cut and suffixed
@@ -38,12 +53,19 @@ pub fn anchor(pattern: &str) -> String {
     format!("^(?:{})$", pattern)
 }
 
-/// Validate a cookbook-emitted pattern entry: the anchored pattern must
-/// compile, and every `{key}` in the description template must name one of
-/// the pattern's capture groups. Run at daemon cache-build time so invalid
-/// entries are dropped before any consumer sees them.
+/// Validate a cookbook-emitted pattern entry: the pattern must compile, and
+/// every `{key}` in the description template must name one of the pattern's
+/// capture groups. Run at daemon cache-build time so invalid entries are
+/// dropped before any consumer sees them.
+///
+/// The RAW pattern is compiled, not the anchored form: a standalone-valid
+/// pattern has balanced parentheses, so [`anchor`]'s `^(?:...)$` wrapper
+/// provably cannot be escaped. Validating only the wrapped form would let
+/// re-balancing garbage like `x)|(?:` through - invalid on its own, but
+/// wrapped it becomes the valid `^(?:x)|(?:)$`, whose top-level `|` matches
+/// every name.
 pub fn validate(pattern: &str, description: Option<&str>) -> anyhow::Result<()> {
-    let compiled = regex::Regex::new(&anchor(pattern))
+    let compiled = regex::Regex::new(pattern)
         .with_context(|| format!("invalid recipe pattern '{}'", pattern))?;
     let Some(template) = description else {
         return Ok(());
@@ -71,7 +93,7 @@ pub struct PatternMatch {
 }
 
 /// Match `name` against an already-anchored cached pattern. `None` means no
-/// match — an uncompilable pattern also counts as a non-match, since cache
+/// match - an uncompilable pattern also counts as a non-match, since cache
 /// entries were validated at build time and can only be broken by hand.
 pub fn match_name(
     anchored_pattern: &str,
@@ -142,6 +164,13 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_patterns_that_rebalance_the_anchor_wrapper() {
+        // Invalid standalone, but `^(?:x)|(?:)$` compiles with a top-level
+        // `|` that matches every name - validate must reject the raw form.
+        assert!(validate("x)|(?:", None).is_err());
+    }
+
+    #[test]
     fn validate_accepts_pattern_without_description() {
         validate("anything@(.+)", None).unwrap();
     }
@@ -195,5 +224,31 @@ mod tests {
         let anchored = anchor(&format!("{}@(.+)", escape("a.b")));
         assert!(match_name(&anchored, None, "axb@branch").is_none());
         assert!(match_name(&anchored, None, "a.b@branch").is_some());
+    }
+
+    #[test]
+    fn escape_template_makes_braced_literals_safe() {
+        for repo in ["app{v2}", "my{repo", "my}repo", "back\\slash", "x{branch}y"] {
+            let template = format!(
+                "Create new branch '{{branch}}' in {}",
+                escape_template(repo)
+            );
+            validate("p@(?P<branch>.+)", Some(&template))
+                .unwrap_or_else(|e| panic!("template for {repo:?} must validate: {e}"));
+            let matched = match_name(&anchor("p@(?P<branch>.+)"), Some(&template), "p@feat")
+                .unwrap()
+                .description
+                .unwrap();
+            assert_eq!(
+                matched,
+                format!("Create new branch 'feat' in {}", repo),
+                "literal repo name must render verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn escape_template_leaves_plain_text_unchanged() {
+        assert_eq!(escape_template("my-project"), "my-project");
     }
 }
