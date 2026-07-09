@@ -25,8 +25,10 @@ use tokio::signal::unix::{SignalKind, signal};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use enwiro_sdk::adapter::AdapterCapability;
+use enwiro_sdk::bridge::BridgeCapability;
 use enwiro_sdk::client::{CachedPatternRecipe, CachedRecipe, CookbookClient, CookbookTrait};
-use enwiro_sdk::cookbook::{CookbookPayload, RecipeItem};
+use enwiro_sdk::cookbook::{CookbookCapability, CookbookPayload, RecipeItem};
 use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamItem, StreamKind};
@@ -315,29 +317,122 @@ const BRIDGE_KEY_PREFIX: &str = "bridge:";
 /// Process sources for bridges that declare the `listen` capability in
 /// their `metadata` output. Bridges that don't (probe failure, timeout,
 /// no capability) are left alone.
+///
+/// Like every capability dispatch in this file, the match is exhaustive on
+/// the kind's capability enum: a capability added to the SDK won't compile
+/// here until the daemon decides how to handle it.
 fn bridge_listen_sources(
     bridges: impl IntoIterator<Item = enwiro_sdk::plugin::Plugin>,
 ) -> Vec<ProcessSource> {
     let mut sources = Vec::new();
     for plugin in bridges {
         let metadata = enwiro_sdk::bridge::fetch_bridge_metadata(&plugin.executable);
-        if !metadata.has_capability(enwiro_sdk::bridge::LISTEN_CAPABILITY) {
-            tracing::debug!(bridge = %plugin.name, "Bridge does not declare the listen capability, leaving it alone");
-            continue;
+        if metadata.capabilities.is_empty() {
+            tracing::debug!(bridge = %plugin.name, "Bridge declares no capabilities, leaving it alone");
         }
-        tracing::info!(bridge = %plugin.name, "Bridge declares listen capability, autostarting");
-        sources.push(ProcessSource {
-            identity: ProcessIdentity {
-                bin: plugin.executable.clone(),
-                key: format!("{BRIDGE_KEY_PREFIX}{}", plugin.name),
-            },
-            args: vec!["listen".to_string()],
-            env: Default::default(),
-            current_dir: None,
-            props: None,
-        });
+        for capability in metadata.capabilities.recognized() {
+            match capability {
+                BridgeCapability::Listen => {
+                    tracing::info!(bridge = %plugin.name, "Bridge declares listen capability, autostarting");
+                    sources.push(ProcessSource {
+                        identity: ProcessIdentity {
+                            bin: plugin.executable.clone(),
+                            key: format!("{BRIDGE_KEY_PREFIX}{}", plugin.name),
+                        },
+                        args: vec!["listen".to_string()],
+                        env: Default::default(),
+                        current_dir: None,
+                        props: None,
+                    });
+                }
+            }
+        }
     }
     sources
+}
+
+/// Register every cookbook in the recipe state and return listen sources
+/// for the ones that declare the `listen` capability. A cookbook without
+/// it is still a full citizen for RPC-driven subcommands (`cook`, `gear`,
+/// ...) - the daemon just doesn't spawn anything for it, instead of the
+/// old behavior of blindly spawning `listen` and crash-looping plugins
+/// that never had the subcommand.
+fn cookbook_sources(
+    cookbooks: impl IntoIterator<Item = enwiro_sdk::plugin::Plugin>,
+    recipe_state: &mut HashMap<String, CookbookEntry>,
+) -> Vec<ProcessSource> {
+    let mut sources = Vec::new();
+    for plugin in cookbooks {
+        let name = plugin.name.to_string();
+        let executable = plugin.executable.clone();
+        let client = CookbookClient::new_user_level_only(plugin);
+        recipe_state.insert(
+            name.clone(),
+            CookbookEntry {
+                priority: client.priority(),
+                recipes: Vec::new(),
+            },
+        );
+        if client.metadata().capabilities.is_empty() {
+            tracing::debug!(cookbook = %name, "Cookbook declares no capabilities, not spawning listen");
+        }
+        for capability in client.metadata().capabilities.recognized() {
+            match capability {
+                CookbookCapability::Listen => {
+                    tracing::info!(cookbook = %name, "Cookbook declares listen capability, autostarting");
+                    let payload = CookbookPayload::new(client.config().clone());
+                    sources.push(ProcessSource {
+                        identity: ProcessIdentity {
+                            bin: executable.clone(),
+                            key: name.clone(),
+                        },
+                        args: vec!["listen".to_string()],
+                        env: Default::default(),
+                        current_dir: None,
+                        props: serde_json::to_value(&payload).ok(),
+                    });
+                }
+            }
+        }
+    }
+    sources
+}
+
+/// Listen source for the configured adapter, if it declares the `listen`
+/// capability in its `metadata` output. Adapters predating the metadata
+/// convention probe to no capabilities and are left alone - the daemon
+/// then runs without switch events rather than crash-looping the adapter.
+fn adapter_listen_source(plugin: &enwiro_sdk::plugin::Plugin) -> Option<ProcessSource> {
+    let metadata = enwiro_sdk::adapter::fetch_adapter_metadata(&plugin.executable);
+    let mut source = None;
+    for capability in metadata.capabilities.recognized() {
+        match capability {
+            AdapterCapability::Listen => {
+                tracing::info!(adapter = %plugin.name, "Spawning adapter listen subprocess");
+                source = Some(ProcessSource {
+                    identity: ProcessIdentity {
+                        bin: plugin.executable.clone(),
+                        key: "adapter".to_string(),
+                    },
+                    args: vec![
+                        "listen".to_string(),
+                        "--debounce-secs".to_string(),
+                        "5".to_string(),
+                    ],
+                    env: Default::default(),
+                    current_dir: None,
+                    props: None,
+                });
+            }
+        }
+    }
+    if source.is_none() {
+        tracing::warn!(
+            adapter = %plugin.name,
+            "Configured adapter does not declare the listen capability; switch events disabled"
+        );
+    }
+    source
 }
 
 /// Resolve the adapter whose `listen` subcommand feeds switch events.
@@ -421,46 +516,12 @@ pub async fn run(
 
     let mut desired: Vec<ProcessSource> = Vec::new();
     if let Some(plugin) = select_listen_adapter(adapter.as_deref()) {
-        tracing::info!(adapter = %plugin.name, "Spawning adapter listen subprocess");
-        desired.push(ProcessSource {
-            identity: ProcessIdentity {
-                bin: plugin.executable.clone(),
-                key: "adapter".to_string(),
-            },
-            args: vec![
-                "listen".to_string(),
-                "--debounce-secs".to_string(),
-                "5".to_string(),
-            ],
-            env: Default::default(),
-            current_dir: None,
-            props: None,
-        });
+        desired.extend(adapter_listen_source(&plugin));
     }
-    for plugin in get_plugins(PluginKind::Cookbook) {
-        let name = plugin.name.to_string();
-        let executable = plugin.executable.clone();
-        let client = CookbookClient::new_user_level_only(plugin);
-        let payload = CookbookPayload::new(client.config().clone());
-        let props = serde_json::to_value(&payload).ok();
-        recipe_state.insert(
-            name.clone(),
-            CookbookEntry {
-                priority: client.priority(),
-                recipes: Vec::new(),
-            },
-        );
-        desired.push(ProcessSource {
-            identity: ProcessIdentity {
-                bin: executable,
-                key: name,
-            },
-            args: vec!["listen".to_string()],
-            env: Default::default(),
-            current_dir: None,
-            props,
-        });
-    }
+    desired.extend(cookbook_sources(
+        get_plugins(PluginKind::Cookbook),
+        &mut recipe_state,
+    ));
     desired.extend(bridge_listen_sources(get_plugins(PluginKind::Bridge)));
 
     for (key, err) in pool.reconcile(desired.clone()) {
@@ -904,6 +965,92 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bridge = fake_bridge(dir.path(), "legacy", "echo 'rofi row one'");
         assert!(bridge_listen_sources([bridge]).is_empty());
+    }
+
+    fn fake_plugin(
+        dir: &std::path::Path,
+        kind: PluginKind,
+        name: &str,
+        script_body: &str,
+    ) -> enwiro_sdk::plugin::Plugin {
+        use std::os::unix::fs::PermissionsExt;
+        let prefix = format!("enwiro-{kind}").to_lowercase();
+        let path = dir.join(format!("{prefix}-{name}"));
+        std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        enwiro_sdk::plugin::Plugin {
+            name: enwiro_sdk::plugin::PluginName::new(name).unwrap(),
+            kind,
+            executable: path.to_string_lossy().to_string(),
+        }
+    }
+
+    #[test]
+    fn cookbook_declaring_listen_gets_a_listen_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let cookbook = fake_plugin(
+            dir.path(),
+            PluginKind::Cookbook,
+            "fake",
+            r#"echo '{"capabilities":[{"name":"listen"}]}'"#,
+        );
+        let mut recipe_state = HashMap::new();
+        let sources = cookbook_sources([cookbook], &mut recipe_state);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].identity.key, "fake");
+        assert_eq!(sources[0].args, vec!["listen".to_string()]);
+        assert!(
+            sources[0].props.is_some(),
+            "listen sources must carry the config payload"
+        );
+    }
+
+    #[test]
+    fn cookbook_without_listen_is_registered_but_not_spawned() {
+        let dir = tempfile::tempdir().unwrap();
+        let cookbook = fake_plugin(dir.path(), PluginKind::Cookbook, "fake", "echo '{}'");
+        let mut recipe_state = HashMap::new();
+        assert!(cookbook_sources([cookbook], &mut recipe_state).is_empty());
+        assert!(
+            recipe_state.contains_key("fake"),
+            "a non-listening cookbook must still be registered for its recipes"
+        );
+    }
+
+    #[test]
+    fn cookbook_predating_the_metadata_convention_is_not_spawned() {
+        let dir = tempfile::tempdir().unwrap();
+        let cookbook = fake_plugin(dir.path(), PluginKind::Cookbook, "legacy", "exit 2");
+        let mut recipe_state = HashMap::new();
+        assert!(cookbook_sources([cookbook], &mut recipe_state).is_empty());
+    }
+
+    #[test]
+    fn adapter_declaring_listen_gets_a_listen_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = fake_plugin(
+            dir.path(),
+            PluginKind::Adapter,
+            "fake",
+            r#"echo '{"capabilities":[{"name":"listen"}]}'"#,
+        );
+        let source = adapter_listen_source(&adapter).expect("listen source");
+        assert_eq!(source.identity.key, "adapter");
+        assert_eq!(
+            source.args,
+            vec![
+                "listen".to_string(),
+                "--debounce-secs".to_string(),
+                "5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn adapter_without_listen_capability_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = fake_plugin(dir.path(), PluginKind::Adapter, "fake", "echo '{}'");
+        assert!(adapter_listen_source(&adapter).is_none());
     }
 
     #[test]

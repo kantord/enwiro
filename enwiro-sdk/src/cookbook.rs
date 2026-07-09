@@ -7,9 +7,38 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::metadata::{Capability, DeclaredCapabilities};
+
+/// The capabilities a cookbook is allowed to declare. Required subcommands
+/// (`list-recipes`, `cook`, `metadata`) are the kind's base contract and
+/// are never declared here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CookbookCapability {
+    /// The daemon spawns and supervises the cookbook's `listen` subcommand,
+    /// feeding it the resolved config payload on stdin.
+    Listen,
+}
+
+impl Capability for CookbookCapability {
+    fn wire_name(self) -> &'static str {
+        match self {
+            CookbookCapability::Listen => "listen",
+        }
+    }
+
+    fn from_wire_name(name: &str) -> Option<Self> {
+        match name {
+            "listen" => Some(CookbookCapability::Listen),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CookbookMetadata {
+    #[serde(skip_serializing_if = "DeclaredCapabilities::is_empty")]
+    pub capabilities: DeclaredCapabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_priority: Option<u32>,
     /// Field names the cookbook accepts from project-level `.enwiro.toml`
@@ -26,6 +55,10 @@ impl CookbookMetadata {
 
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("CookbookMetadata is always serializable")
+    }
+
+    pub fn has(&self, capability: CookbookCapability) -> bool {
+        self.capabilities.has(capability)
     }
 }
 
@@ -232,7 +265,7 @@ mod tests {
     fn metadata_to_json_uses_camel_case() {
         let m = CookbookMetadata {
             default_priority: Some(20),
-            project_overridable: vec![],
+            ..Default::default()
         };
         assert_eq!(m.to_json(), r#"{"defaultPriority":20}"#);
     }
@@ -240,10 +273,28 @@ mod tests {
     #[test]
     fn metadata_to_json_includes_project_overridable_when_nonempty() {
         let m = CookbookMetadata {
-            default_priority: None,
             project_overridable: vec!["repo_globs".to_string()],
+            ..Default::default()
         };
         assert_eq!(m.to_json(), r#"{"projectOverridable":["repo_globs"]}"#);
+    }
+
+    #[test]
+    fn metadata_declares_and_answers_capabilities() {
+        let m = CookbookMetadata {
+            capabilities: DeclaredCapabilities::declare([CookbookCapability::Listen]),
+            ..Default::default()
+        };
+        assert!(m.has(CookbookCapability::Listen));
+        assert_eq!(m.to_json(), r#"{"capabilities":[{"name":"listen"}]}"#);
+        let parsed = CookbookMetadata::from_json(&m.to_json()).unwrap();
+        assert!(parsed.has(CookbookCapability::Listen));
+    }
+
+    #[test]
+    fn metadata_without_capabilities_field_parses_to_none_declared() {
+        let m = CookbookMetadata::from_json(r#"{"defaultPriority":10}"#).unwrap();
+        assert!(!m.has(CookbookCapability::Listen));
     }
 
     #[test]

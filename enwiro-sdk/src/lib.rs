@@ -7,6 +7,8 @@
 pub mod adapter;
 pub mod bridge;
 pub mod capability;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod client;
 pub mod config;
 pub mod cookbook;
@@ -19,6 +21,7 @@ pub mod gear;
 pub mod git;
 pub mod listen;
 pub mod logging;
+pub mod metadata;
 pub mod plugin;
 pub mod process;
 pub mod recipe_pattern;

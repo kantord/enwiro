@@ -1160,6 +1160,7 @@ version = "0.10.2"
 dependencies = [
  "anyhow",
  "async-trait",
+ "clap",
  "config",
  "dirs",
  "futures-util",

@@ -7,7 +7,10 @@ use tokio_stream::StreamExt;
 
 mod rebalance;
 
-use enwiro_sdk::adapter::{ActivatePayload, ManagedEnvInfo, RunPayload};
+use enwiro_sdk::adapter::{
+    ActivatePayload, AdapterCapability, AdapterMetadata, ManagedEnvInfo, RunPayload,
+};
+use enwiro_sdk::cli::AdapterCore;
 use enwiro_sdk::process::ProcessSpec;
 
 #[derive(clap::Args)]
@@ -18,22 +21,10 @@ pub struct ListenArgs {
 
 #[derive(Parser)]
 enum EnwiroAdapterI3WmCLI {
-    GetActiveWorkspaceId(GetActiveWorkspaceIdArgs),
-    Activate(ActivateArgs),
+    #[command(flatten)]
+    Core(AdapterCore),
     Listen(ListenArgs),
-    Run(RunArgs),
 }
-
-#[derive(clap::Args)]
-pub struct GetActiveWorkspaceIdArgs {}
-
-#[derive(clap::Args)]
-pub struct ActivateArgs {
-    pub name: String,
-}
-
-#[derive(clap::Args)]
-pub struct RunArgs {}
 
 /// Best-effort parse; activate falls back to defaults so a malformed
 /// payload doesn't block the workspace switch.
@@ -521,7 +512,13 @@ async fn main() -> anyhow::Result<()> {
     let args = EnwiroAdapterI3WmCLI::parse();
 
     match args {
-        EnwiroAdapterI3WmCLI::GetActiveWorkspaceId(_) => {
+        EnwiroAdapterI3WmCLI::Core(AdapterCore::Metadata) => {
+            println!(
+                "{}",
+                AdapterMetadata::with_capabilities([AdapterCapability::Listen]).to_json()
+            );
+        }
+        EnwiroAdapterI3WmCLI::Core(AdapterCore::GetActiveWorkspaceId(_)) => {
             let mut i3 = I3::connect().await?;
             let workspaces = i3.get_workspaces().await?;
             tracing::debug!(count = workspaces.len(), "Retrieved workspaces");
@@ -533,7 +530,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::debug!(name = %environment_name, "Extracted environment name");
             print!("{}", environment_name);
         }
-        EnwiroAdapterI3WmCLI::Activate(args) => {
+        EnwiroAdapterI3WmCLI::Core(AdapterCore::Activate(args)) => {
             use rebalance::derive::derive;
             use rebalance::i3_op::{I3Op, render};
             use rebalance::optimize::optimize;
@@ -617,7 +614,7 @@ async fn main() -> anyhow::Result<()> {
                 apply_plan(&mut i3, &plan, &gear_commands).await?;
             }
         }
-        EnwiroAdapterI3WmCLI::Run(_) => {
+        EnwiroAdapterI3WmCLI::Core(AdapterCore::Run(_)) => {
             let payload = RunPayload::read_from_stdin()?;
             tracing::debug!(env = %payload.env_name, command = %payload.command, "Spawning command in new terminal");
             spawn_run_in_terminal(&payload)?;

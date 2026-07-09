@@ -1,15 +1,15 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use enwiro_sdk::adapter::RunPayload;
+use enwiro_sdk::adapter::{AdapterCapability, AdapterMetadata, RunPayload};
+use enwiro_sdk::cli::AdapterCore;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 use std::os::unix::process::CommandExt;
 
 #[derive(Parser)]
 enum EnwiroAdapterTmuxCli {
-    GetActiveWorkspaceId,
-    Activate(ActivateArgs),
-    Run(RunArgs),
+    #[command(flatten)]
+    Core(AdapterCore),
     Listen(ListenArgs),
 }
 
@@ -18,14 +18,6 @@ pub struct ListenArgs {
     #[arg(long, default_value = "5")]
     pub debounce_secs: u64,
 }
-
-#[derive(clap::Args)]
-pub struct ActivateArgs {
-    pub name: String,
-}
-
-#[derive(clap::Args)]
-pub struct RunArgs {}
 
 fn validate_session_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
@@ -102,7 +94,13 @@ fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-adapter-tmux.log");
     let args = EnwiroAdapterTmuxCli::parse();
     match args {
-        EnwiroAdapterTmuxCli::GetActiveWorkspaceId => {
+        EnwiroAdapterTmuxCli::Core(AdapterCore::Metadata) => {
+            println!(
+                "{}",
+                AdapterMetadata::with_capabilities([AdapterCapability::Listen]).to_json()
+            );
+        }
+        EnwiroAdapterTmuxCli::Core(AdapterCore::GetActiveWorkspaceId(_)) => {
             let tmux_env = std::env::var("TMUX").ok();
             if !is_in_tmux(tmux_env.as_deref()) {
                 print!("");
@@ -120,7 +118,7 @@ fn main() -> anyhow::Result<()> {
             };
             print!("{}", parse_session_name(success, &stdout));
         }
-        EnwiroAdapterTmuxCli::Run(_) => {
+        EnwiroAdapterTmuxCli::Core(AdapterCore::Run(_)) => {
             let payload = RunPayload::read_from_stdin()?;
             validate_session_name(&payload.env_name)?;
             ensure_session(&payload.env_name)?;
@@ -141,7 +139,7 @@ fn main() -> anyhow::Result<()> {
         EnwiroAdapterTmuxCli::Listen(listen_args) => {
             listen(listen_args.debounce_secs)?;
         }
-        EnwiroAdapterTmuxCli::Activate(activate_args) => {
+        EnwiroAdapterTmuxCli::Core(AdapterCore::Activate(activate_args)) => {
             let name = &activate_args.name;
             validate_session_name(name)?;
             ensure_session(name)?;

@@ -17,8 +17,10 @@ prefix.
 
 ## The `metadata` Subcommand
 
-A bridge may implement a `metadata` subcommand that prints a JSON object to
-stdout and exits:
+Every enwiro plugin kind (cookbooks, adapters, bridges) shares one metadata
+convention: a `metadata` subcommand that prints a JSON object with an
+optional `capabilities` list declaring the plugin's optional abilities. For
+bridges it looks like this - a JSON object printed to stdout, then exit:
 
 ```json
 { "capabilities": [{ "name": "listen" }] }
