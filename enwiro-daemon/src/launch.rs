@@ -304,6 +304,21 @@ fn is_krun_runtime(runtime: &str) -> bool {
     Path::new(runtime).file_name() == Some(std::ffi::OsStr::new("krun"))
 }
 
+/// Half the host's physical memory, in MiB, or `None` when it can't be
+/// probed (the launch then falls back to the runtime's own default).
+#[cfg(feature = "container-wrap")]
+fn half_host_memory_mib() -> Option<u64> {
+    // SAFETY: `sysconf` has no preconditions; it returns -1 for names the
+    // platform doesn't support, handled below.
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) };
+    if pages <= 0 || page_size <= 0 {
+        return None;
+    }
+    let bytes = (pages as u64).checked_mul(page_size as u64)?;
+    Some(bytes / 2 / (1024 * 1024))
+}
+
 /// Assemble the `run ...` args (engine excluded; it is the `program`). The env's
 /// project dir is bind-mounted at the *same* path it has on the host, cwd set
 /// there, `ENWIRO_ENV` injected; `-it` when the caller's stdin is a TTY, `-i`
@@ -335,6 +350,23 @@ fn build_container_argv(
     // stays north-star). `None` uses the engine's own default runtime.
     if let Some(runtime) = oci_runtime {
         argv.push(format!("--runtime={runtime}"));
+    }
+    // Size the krun microVM's guest RAM to half the host's: libkrun defaults
+    // to 1 GiB with no swap while still advertising every host CPU, so a
+    // parallel build OOM-kills inside the guest. The generous fixed ceiling
+    // is cheap -- libkrun faults guest memory in lazily and returns freed
+    // pages to the host (virtio-balloon free-page reporting; verified
+    // hands-on: a 16 GiB guest idles at ~0.4 GiB host RSS and drops back
+    // within seconds of the guest freeing 6 GiB), so host usage tracks the
+    // guest's *actual* footprint, almost like a native process. Half the
+    // host keeps the host safe if a guest genuinely peaks. Deliberately a
+    // fixed policy, not a config field, while one number serves everyone.
+    // Krun-only: a plain container shares host RAM natively, and `-m` there
+    // would *add* a cap that doesn't exist today.
+    if oci_runtime.is_some_and(is_krun_runtime)
+        && let Some(mib) = half_host_memory_mib()
+    {
+        argv.push(format!("--memory={mib}m"));
     }
     argv.push(if interactive { "-it" } else { "-i" }.to_string());
     argv.extend(bind_mount_args(environment_path));
@@ -890,6 +922,37 @@ mod tests {
             argv.contains(&"--runtime=/usr/bin/krun".to_string()),
             "{argv:?}"
         );
+    }
+
+    // libkrun's default guest RAM is 1 GiB with no swap, so without an
+    // explicit size a parallel build OOM-kills inside the microVM. Cheap to
+    // set generously: guest memory is faulted in lazily and returned on free
+    // (free-page reporting), so the ceiling doesn't reserve host RAM.
+    #[test]
+    fn container_argv_sizes_krun_guest_memory_to_half_the_host() {
+        let env = ContainerEnv {
+            oci_runtime: Some("/usr/bin/krun"),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+        let expected = format!("--memory={}m", half_host_memory_mib().unwrap());
+        assert!(argv.contains(&expected), "{argv:?}");
+    }
+
+    // A plain container shares host RAM natively; `-m` there would *add* a
+    // cap that doesn't exist today, so the flag stays krun-only.
+    #[test]
+    fn container_argv_sets_no_memory_limit_for_non_krun_launches() {
+        for env in [
+            test_env(false),
+            ContainerEnv {
+                oci_runtime: Some("/usr/bin/crun"),
+                ..test_env(false)
+            },
+        ] {
+            let argv = build_container_argv(&env, "bash", &[], true);
+            assert!(!argv.iter().any(|a| a.starts_with("--memory=")), "{argv:?}");
+        }
     }
 
     #[test]
