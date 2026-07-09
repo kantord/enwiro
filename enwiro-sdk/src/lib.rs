@@ -15,15 +15,18 @@ pub mod external_paths;
 pub mod fs;
 pub mod garnish;
 pub mod gear;
+#[cfg(feature = "git")]
+pub mod git;
 pub mod listen;
 pub mod logging;
 pub mod plugin;
 pub mod process;
+pub mod recipe_pattern;
 pub mod rpc;
 pub mod status;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;
 
-pub use cookbook::{CookbookMetadata, CookbookPayload, Recipe};
+pub use cookbook::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 pub use logging::init_logging;

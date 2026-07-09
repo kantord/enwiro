@@ -2,24 +2,22 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cookbook::Recipe;
+use crate::cookbook::{Recipe, RecipeItem};
 use crate::status::Status;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum RecipeUpdate {
-    Recipes {
-        data: Vec<Recipe>,
-    },
+    /// The cookbook's full current recipe listing: concrete recipes plus any
+    /// pattern claims. Old cookbooks that emit plain `Recipe`s parse fine
+    /// (every concrete recipe is a valid `RecipeItem`).
+    Recipes { data: Vec<RecipeItem> },
     /// A cookbook reporting the auto-detected status of one recipe (#302).
     /// `status` is the canonical [`Status`] schema; the daemon maps the
     /// recipe to its env and writes meta.json (guarded by
     /// [`crate::status::is_cookbook_settable`]).
     #[serde(rename = "status_changed")]
-    StatusChanged {
-        recipe: String,
-        status: Status,
-    },
+    StatusChanged { recipe: String, status: Status },
 }
 
 impl RecipeUpdate {
@@ -41,7 +39,9 @@ where
     F: FnMut() -> Vec<Recipe>,
 {
     serve_updates(interval, move || {
-        vec![RecipeUpdate::Recipes { data: build() }]
+        vec![RecipeUpdate::Recipes {
+            data: build().into_iter().map(RecipeItem::from).collect(),
+        }]
     })
 }
 
@@ -75,7 +75,26 @@ mod tests {
     #[test]
     fn recipes_roundtrip_through_json() {
         let update = RecipeUpdate::Recipes {
-            data: vec![Recipe::new("foo"), Recipe::with_description("bar", "desc")],
+            data: vec![
+                Recipe::new("foo").into(),
+                Recipe::with_description("bar", "desc").into(),
+            ],
+        };
+        let line = update.to_jsonl();
+        let parsed: RecipeUpdate = serde_json::from_str(&line).unwrap();
+        assert_eq!(update, parsed);
+    }
+
+    #[test]
+    fn pattern_items_roundtrip_through_json() {
+        let update = RecipeUpdate::Recipes {
+            data: vec![
+                Recipe::new("my-project").into(),
+                RecipeItem::Pattern(crate::cookbook::PatternRecipe {
+                    pattern: "my-project@(?P<branch>.+)".to_string(),
+                    description: Some("Create new branch '{branch}' in my-project".to_string()),
+                }),
+            ],
         };
         let line = update.to_jsonl();
         let parsed: RecipeUpdate = serde_json::from_str(&line).unwrap();

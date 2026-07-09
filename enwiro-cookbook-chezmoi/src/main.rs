@@ -85,7 +85,7 @@ fn main() -> anyhow::Result<()> {
                 use enwiro_sdk::status::Status;
                 vec![
                     RecipeUpdate::Recipes {
-                        data: vec![Recipe::new(RECIPE_NAME)],
+                        data: vec![Recipe::new(RECIPE_NAME).into()],
                     },
                     RecipeUpdate::StatusChanged {
                         recipe: RECIPE_NAME.to_string(),

@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Context;
 use clap::Parser;
-use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
+use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 use git2::Repository;
 use serde_derive::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -36,23 +36,83 @@ fn worktree_base_dir(config: &ConfigurationValues) -> anyhow::Result<PathBuf> {
 
 fn resolve_recipe_path(config: &ConfigurationValues, recipe_name: &str) -> anyhow::Result<PathBuf> {
     let recipes = build_repository_hashmap(config)?;
-    let recipe = recipes
-        .get(recipe_name)
-        .with_context(|| format!("Could not find recipe {}", recipe_name))?;
-    match recipe {
-        RecipeInfo::ExistingRepo { repo, .. } => {
+    match recipes.get(recipe_name) {
+        Some(RecipeInfo::ExistingRepo { repo, .. }) => {
             let workdir = repo
                 .workdir()
                 .context("Could not get working directory of repo")?;
             Ok(workdir.to_path_buf())
         }
-        RecipeInfo::Branch {
+        Some(RecipeInfo::Branch {
             repo_path,
             branch_name,
             is_remote,
             ..
-        } => resolve_branch_worktree(config, repo_path, branch_name, *is_remote),
+        }) => resolve_branch_worktree(config, repo_path, branch_name, *is_remote),
+        None => cook_new_branch(config, &recipes, recipe_name),
     }
+}
+
+/// Pattern-routed cook (#246): `repo@branch` names discovery didn't list -
+/// usually because the branch doesn't exist yet, but also the stale-cache
+/// race where it appeared after discovery ran.
+fn cook_new_branch(
+    config: &ConfigurationValues,
+    recipes: &HashMap<String, RecipeInfo>,
+    recipe_name: &str,
+) -> anyhow::Result<PathBuf> {
+    let (repo_name, branch_name) = recipe_name
+        .split_once('@')
+        .with_context(|| format!("Could not find recipe {}", recipe_name))?;
+    let Some(RecipeInfo::ExistingRepo { repo, .. }) = recipes.get(repo_name) else {
+        anyhow::bail!(
+            "Could not find recipe {} (no repository named '{}')",
+            recipe_name,
+            repo_name
+        );
+    };
+    // Canonicalize: `workdir()` carries a trailing separator, and the
+    // worktree layout hashes the path string, so it must match the
+    // canonicalized form branch recipes use.
+    let repo_path = repo
+        .workdir()
+        .context("Could not get working directory of repo")?
+        .canonicalize()
+        .context("Could not canonicalize repo path")?;
+    ensure_local_branch(repo, branch_name)?;
+    resolve_branch_worktree(config, &repo_path, branch_name, false)
+}
+
+fn ensure_local_branch(repo: &Repository, branch_name: &str) -> anyhow::Result<()> {
+    if repo
+        .find_branch(branch_name, git2::BranchType::Local)
+        .is_ok()
+    {
+        tracing::debug!(branch = %branch_name, "Reusing existing branch");
+        return Ok(());
+    }
+    let fork_point = fork_point_commit(repo)?;
+    repo.branch(branch_name, &fork_point, false)
+        .with_context(|| format!("Could not create branch {}", branch_name))?;
+    tracing::debug!(branch = %branch_name, "Created new branch");
+    Ok(())
+}
+
+/// No `git fetch` first (unlike the github cookbook's issue-branch path):
+/// this cookbook never touches the network, so the fork point is the local
+/// view of the remote default branch - or plain HEAD for remote-less repos.
+fn fork_point_commit(repo: &Repository) -> anyhow::Result<git2::Commit<'_>> {
+    if let Some(default_branch) = enwiro_sdk::git::remote_default_branch(repo)
+        && let Ok(reference) =
+            repo.find_reference(&format!("refs/remotes/origin/{}", default_branch))
+        && let Ok(commit) = reference.peel_to_commit()
+    {
+        return Ok(commit);
+    }
+    repo.head()
+        .context("Could not resolve repo HEAD")?
+        .peel_to_commit()
+        .context("Could not resolve HEAD to a commit")
 }
 
 /// The short branch name (remote prefix stripped) and the worktree path a
@@ -458,23 +518,8 @@ fn build_sorted_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<(&String, u3
         .collect()
 }
 
-fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
-    let repos = build_repository_hashmap(config)?;
-    tracing::debug!(count = repos.len(), "Listing recipes");
-
-    for (key, sort_order) in build_sorted_recipes(&repos) {
-        let mut recipe = Recipe::new(key);
-        recipe.sort_order = sort_order;
-        println!("{}", recipe.to_jsonl());
-    }
-    Ok(())
-}
-
-fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
-    let Ok(repos) = build_repository_hashmap(config) else {
-        return Vec::new();
-    };
-    build_sorted_recipes(&repos)
+fn sorted_concrete_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<Recipe> {
+    build_sorted_recipes(repos)
         .into_iter()
         .map(|(key, sort_order)| {
             let mut recipe = Recipe::new(key);
@@ -482,6 +527,49 @@ fn collect_recipes(config: &ConfigurationValues) -> Vec<Recipe> {
             recipe
         })
         .collect()
+}
+
+fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
+    let repos = build_repository_hashmap(config)?;
+    tracing::debug!(count = repos.len(), "Listing recipes");
+
+    for recipe in sorted_concrete_recipes(&repos) {
+        println!("{}", recipe.to_jsonl());
+    }
+    Ok(())
+}
+
+/// Emitted unanchored; the daemon anchors them (see `enwiro_sdk::recipe_pattern`).
+fn branch_pattern_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<RecipeItem> {
+    let mut repo_names: Vec<&String> = repos.keys().filter(|n| is_base_repo_recipe(n)).collect();
+    repo_names.sort();
+    repo_names
+        .into_iter()
+        .map(|repo_name| {
+            RecipeItem::Pattern(PatternRecipe {
+                pattern: format!(
+                    "{}@(?P<branch>.+)",
+                    enwiro_sdk::recipe_pattern::escape(repo_name)
+                ),
+                description: Some(format!(
+                    "Create new branch '{{branch}}' in {}",
+                    enwiro_sdk::recipe_pattern::escape_template(repo_name)
+                )),
+            })
+        })
+        .collect()
+}
+
+fn collect_recipe_items(config: &ConfigurationValues) -> Vec<RecipeItem> {
+    let Ok(repos) = build_repository_hashmap(config) else {
+        return Vec::new();
+    };
+    let mut items: Vec<RecipeItem> = sorted_concrete_recipes(&repos)
+        .into_iter()
+        .map(RecipeItem::Concrete)
+        .collect();
+    items.extend(branch_pattern_recipes(&repos));
+    items
 }
 
 /// Auto-detected status for git recipes (#302): a base repo is a standing
@@ -1127,6 +1215,165 @@ mod tests {
     }
 
     #[test]
+    fn test_cook_nonexistent_branch_creates_branch_and_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = create_repo_with_commit(&repo_path);
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        let wt_dir = tmp.path().join("worktrees");
+        let config = config_with_worktree_dir(
+            tmp.path().join("*").to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+        );
+
+        // The branch is not listed anywhere - this is the pattern-routed path.
+        let result = resolve_recipe_path(&config, "my-project@brand-new-branch").unwrap();
+
+        assert!(result.exists(), "Worktree path should exist on disk");
+        let wt_repo = Repository::open(&result).unwrap();
+        assert!(wt_repo.is_worktree());
+        let branch = repo
+            .find_branch("brand-new-branch", git2::BranchType::Local)
+            .expect("branch should have been created");
+        // Local-only repo (no remote): fork point is local HEAD.
+        assert_eq!(
+            branch.get().peel_to_commit().unwrap().id(),
+            head_commit,
+            "new branch should fork from local HEAD when there is no remote"
+        );
+    }
+
+    #[test]
+    fn test_cook_nonexistent_branch_forks_from_origin_default() {
+        let tmp = TempDir::new().unwrap();
+
+        // Remote with one commit; clone it (sets origin/HEAD).
+        let remote_path = tmp.path().join("remote-repo");
+        fs::create_dir(&remote_path).unwrap();
+        let remote_repo = create_repo_with_commit(&remote_path);
+        let origin_tip = remote_repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        let local_path = tmp.path().join("local-repo");
+        let local_repo = Repository::clone(remote_path.to_str().unwrap(), &local_path).unwrap();
+
+        // Move the local HEAD ahead so it differs from the origin default tip.
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let tree_id = local_repo.index().unwrap().write_tree().unwrap();
+        let tree = local_repo.find_tree(tree_id).unwrap();
+        let parent = local_repo.head().unwrap().peel_to_commit().unwrap();
+        let local_tip = local_repo
+            .commit(Some("HEAD"), &sig, &sig, "local-only", &tree, &[&parent])
+            .unwrap();
+        assert_ne!(local_tip, origin_tip);
+
+        let wt_dir = tmp.path().join("worktrees");
+        let config =
+            config_with_worktree_dir(local_path.to_str().unwrap(), wt_dir.to_str().unwrap());
+
+        resolve_recipe_path(&config, "local-repo@fresh-branch").unwrap();
+
+        let branch = local_repo
+            .find_branch("fresh-branch", git2::BranchType::Local)
+            .unwrap();
+        assert_eq!(
+            branch.get().peel_to_commit().unwrap().id(),
+            origin_tip,
+            "new branch should fork from the origin default branch, not local HEAD"
+        );
+    }
+
+    #[test]
+    fn test_cook_nonexistent_branch_with_slash() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        create_repo_with_commit(&repo_path);
+
+        let wt_dir = tmp.path().join("worktrees");
+        let config = config_with_worktree_dir(
+            tmp.path().join("*").to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+        );
+
+        let result = resolve_recipe_path(&config, "my-project@feat/new-thing").unwrap();
+        assert!(result.exists());
+    }
+
+    #[test]
+    fn test_cook_unknown_repo_fails() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        create_repo_with_commit(&repo_path);
+
+        let wt_dir = tmp.path().join("worktrees");
+        let config = config_with_worktree_dir(
+            tmp.path().join("*").to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+        );
+
+        let err = resolve_recipe_path(&config, "my-porject@branch").unwrap_err();
+        assert!(err.to_string().contains("Could not find recipe"), "{err}");
+    }
+
+    #[test]
+    fn test_ensure_local_branch_reuses_existing_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = create_repo_with_commit(&repo_path);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let existing_tip = head.id();
+        repo.branch("feature-x", &head, false).unwrap();
+
+        // Stale-cache race: the branch appeared between discovery and cook.
+        ensure_local_branch(&repo, "feature-x").unwrap();
+
+        let branch = repo
+            .find_branch("feature-x", git2::BranchType::Local)
+            .unwrap();
+        assert_eq!(branch.get().peel_to_commit().unwrap().id(), existing_tip);
+    }
+
+    #[test]
+    fn test_collect_recipe_items_includes_branch_pattern_per_repo() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        create_repo_with_commit(&repo_path);
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+        let items = collect_recipe_items(&config);
+
+        let patterns: Vec<&PatternRecipe> = items
+            .iter()
+            .filter_map(|item| match item {
+                RecipeItem::Pattern(p) => Some(p),
+                RecipeItem::Concrete(_) => None,
+            })
+            .collect();
+        assert_eq!(patterns.len(), 1, "one pattern claim per base repo");
+        assert_eq!(
+            patterns[0].pattern,
+            format!(
+                "{}@(?P<branch>.+)",
+                enwiro_sdk::recipe_pattern::escape("my-project")
+            )
+        );
+        assert_eq!(
+            patterns[0].description.as_deref(),
+            Some("Create new branch '{branch}' in my-project")
+        );
+        enwiro_sdk::recipe_pattern::validate(
+            &patterns[0].pattern,
+            patterns[0].description.as_deref(),
+        )
+        .expect("emitted pattern must pass daemon validation");
+    }
+
+    #[test]
     fn test_default_worktree_dir_is_absolute() {
         // default_worktree_dir must return an absolute path (never
         // fall back to a relative "." path).  On a normal system
@@ -1479,7 +1726,7 @@ fn main() -> anyhow::Result<()> {
                 .context("Could not deserialize cookbook-git configuration")?;
             enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, || {
                 let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
-                    data: collect_recipes(&config),
+                    data: collect_recipe_items(&config),
                 }];
                 updates.extend(collect_status_events(&config));
                 updates

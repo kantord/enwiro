@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
+use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 use serde_derive::{Deserialize, Serialize};
 
 const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -425,6 +425,49 @@ fn list_recipes() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One claim per configured repo covering every `repo#<number>` name.
+/// The searches behind `collect_recipes` are scoped (assigned issues, open
+/// PRs), but `cook` probes the forge for what a number is - so any issue or
+/// PR is cookable, not just the listed ones. Emitted unanchored; the daemon
+/// anchors them (see `enwiro_sdk::recipe_pattern`).
+fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
+    let mut short_names: Vec<String> = repos
+        .iter()
+        .map(|r| extract_short_repo_name(r.repo.clone()))
+        .collect();
+    short_names.sort();
+    short_names.dedup();
+    short_names
+        .into_iter()
+        .map(|short_name| {
+            RecipeItem::Pattern(PatternRecipe {
+                // [0-9]{1,19}, not \d+: the regex crate's \d is Unicode and
+                // unbounded, which would claim names whose number
+                // parse_recipe_name's u64 parse then rejects.
+                pattern: format!(
+                    "{}#(?P<number>[0-9]{{1,19}})",
+                    enwiro_sdk::recipe_pattern::escape(&short_name)
+                ),
+                description: Some(format!(
+                    "Work on PR or issue #{{number}} in {}",
+                    enwiro_sdk::recipe_pattern::escape_template(&short_name)
+                )),
+            })
+        })
+        .collect()
+}
+
+fn collect_recipe_items() -> Vec<RecipeItem> {
+    let mut items: Vec<RecipeItem> = collect_recipes()
+        .into_iter()
+        .map(RecipeItem::Concrete)
+        .collect();
+    if let Ok(repos) = discover_github_repos() {
+        items.extend(item_pattern_recipes(&repos));
+    }
+    items
+}
+
 /// Auto-detected `done` events for the PR/issue envs this cookbook has
 /// actually cooked (#302). We only check items that *could* need closing --
 /// the cookbook's own worktrees -- never a broad forge search (GitHub's
@@ -629,36 +672,17 @@ fn cook_pr(
     print_worktree_path(&wt_path)
 }
 
-// NOTE: deliberately NOT shared with `detect::default_branch_name`. That one
-// is local-preferred (for comparing a checked-out branch); this one resolves
-// the *remote* default (origin/HEAD -> remote origin/main|master) and errors
-// when there's no remote default, which is what issue-branch creation needs.
+/// Unlike the git cookbook, issue-branch creation has no local-HEAD
+/// fallback: these repos are GitHub clones by definition, so a missing
+/// remote default is a config problem worth an actionable error.
 fn get_default_branch(repo: &git2::Repository) -> anyhow::Result<String> {
-    // Try origin/HEAD symbolic ref
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
-        && let Ok(resolved) = reference.resolve()
-        && let Ok(name) = resolved.shorthand()
-    {
-        return Ok(name.strip_prefix("origin/").unwrap_or(name).to_string());
-    }
-
-    // origin/HEAD not set - try common default branch names
-    tracing::warn!("origin/HEAD is not set, probing for default branch");
-    for candidate in ["main", "master"] {
-        if repo
-            .find_reference(&format!("refs/remotes/origin/{}", candidate))
-            .is_ok()
-        {
-            tracing::debug!(branch = candidate, "Using fallback default branch");
-            return Ok(candidate.to_string());
-        }
-    }
-
-    anyhow::bail!(
-        "Could not determine default branch: origin/HEAD is not set and \
-         neither origin/main nor origin/master exist. \
-         Try running: git remote set-head origin --auto"
-    )
+    enwiro_sdk::git::remote_default_branch(repo).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine default branch: origin/HEAD is not set and \
+             neither origin/main nor origin/master exist. \
+             Try running: git remote set-head origin --auto"
+        )
+    })
 }
 
 /// Create a worktree for an issue. Assumes no existing worktree was found
@@ -928,6 +952,69 @@ mod tests {
         let (repo, number) = parse_recipe_name("enwiro#42").unwrap();
         assert_eq!(repo, "enwiro");
         assert_eq!(number, 42);
+    }
+
+    #[test]
+    fn test_item_pattern_recipes_claim_any_number_per_repo() {
+        let repos = vec![
+            RepoConfig {
+                repo: "kantord/enwiro".to_string(),
+                local_path: PathBuf::from("/tmp/enwiro"),
+            },
+            RepoConfig {
+                repo: "vercel/next.js".to_string(),
+                local_path: PathBuf::from("/tmp/next.js"),
+            },
+        ];
+
+        let items = item_pattern_recipes(&repos);
+
+        let patterns: Vec<&PatternRecipe> = items
+            .iter()
+            .map(|item| match item {
+                RecipeItem::Pattern(p) => p,
+                RecipeItem::Concrete(_) => panic!("expected only pattern items"),
+            })
+            .collect();
+        assert_eq!(patterns.len(), 2);
+
+        for pattern in &patterns {
+            enwiro_sdk::recipe_pattern::validate(&pattern.pattern, pattern.description.as_deref())
+                .expect("emitted pattern must pass daemon validation");
+        }
+
+        // Short repo name, any number - and nothing else. `next.js` must be
+        // escaped: the dot may not match arbitrary characters.
+        let anchored = enwiro_sdk::recipe_pattern::anchor(&patterns[1].pattern);
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#123").is_some());
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next-js#123").is_none());
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#abc").is_none());
+        // Only ASCII digits that fit in u64: the claim must not cover names
+        // parse_recipe_name later rejects.
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#٤٢").is_none());
+        assert!(
+            enwiro_sdk::recipe_pattern::match_name(
+                &anchored,
+                None,
+                "next.js#99999999999999999999999"
+            )
+            .is_none()
+        );
+        assert!(
+            enwiro_sdk::recipe_pattern::match_name(&anchored, None, "other/next.js#5").is_none()
+        );
+
+        let enwiro_anchored = enwiro_sdk::recipe_pattern::anchor(&patterns[0].pattern);
+        let matched = enwiro_sdk::recipe_pattern::match_name(
+            &enwiro_anchored,
+            patterns[0].description.as_deref(),
+            "enwiro#997",
+        )
+        .unwrap();
+        assert_eq!(
+            matched.description.as_deref(),
+            Some("Work on PR or issue #997 in enwiro")
+        );
     }
 
     #[test]
@@ -1766,7 +1853,7 @@ fn main() -> anyhow::Result<()> {
                 std::collections::HashSet::new();
             enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, move || {
                 let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
-                    data: collect_recipes(),
+                    data: collect_recipe_items(),
                 }];
                 updates.extend(collect_status_events(&config, &mut done_cache));
                 updates

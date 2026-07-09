@@ -279,7 +279,9 @@ fn main() -> Result<()> {
                         status: Status::Evergreen,
                     })
                     .collect();
-                updates.push(RecipeUpdate::Recipes { data: recipes });
+                updates.push(RecipeUpdate::Recipes {
+                    data: recipes.into_iter().map(Into::into).collect(),
+                });
                 updates
             });
         }

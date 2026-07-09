@@ -25,8 +25,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use enwiro_sdk::client::{CachedRecipe, CookbookClient, CookbookTrait};
-use enwiro_sdk::cookbook::{CookbookPayload, Recipe};
+use enwiro_sdk::client::{CachedPatternRecipe, CachedRecipe, CookbookClient, CookbookTrait};
+use enwiro_sdk::cookbook::{CookbookPayload, RecipeItem};
 use enwiro_sdk::listen::RecipeUpdate;
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
 use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamItem, StreamKind};
@@ -35,7 +35,7 @@ use optative_process_pool::{ProcessIdentity, ProcessPool, ProcessSource, StreamI
 /// cache content is rebuilt from this map on every change.
 struct CookbookEntry {
     priority: u32,
-    recipes: Vec<Recipe>,
+    recipes: Vec<RecipeItem>,
 }
 
 /// Caller-provided startup configuration for `run`. Distinct from
@@ -201,22 +201,27 @@ struct SortableCachedRecipe {
 }
 
 /// Serialize a per-cookbook recipe state map into the cache file's
-/// JSON-lines format, sorted globally by (sort_order, cookbook priority, name).
+/// JSON-lines format: concrete recipes sorted globally by (sort_order,
+/// cookbook priority, name), then pattern claims sorted by (cookbook
+/// priority, pattern). Patterns are validated and anchored here
+/// (`enwiro_sdk::recipe_pattern`), invalid ones dropped - consumers never see a
+/// pattern that doesn't compile or whose template keys don't resolve.
 pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> String {
     let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
+    let mut all_patterns: Vec<(u32, CachedPatternRecipe)> = Vec::new();
     for (cookbook_name, entry) in state {
-        for recipe in &entry.recipes {
-            all_recipes.push(SortableCachedRecipe {
-                cached: CachedRecipe {
-                    cookbook: cookbook_name.clone(),
-                    name: recipe.name.clone(),
-                    description: recipe.description.clone(),
-                    sort_order: recipe.sort_order,
-                    equivalent_to: recipe.equivalent_to.clone(),
-                    scores: None,
-                },
-                priority: entry.priority,
-            });
+        for item in &entry.recipes {
+            match item {
+                RecipeItem::Concrete(recipe) => all_recipes.push(SortableCachedRecipe {
+                    cached: cached_concrete_entry(cookbook_name, recipe),
+                    priority: entry.priority,
+                }),
+                RecipeItem::Pattern(pattern) => {
+                    if let Some(cached) = cached_pattern_entry(cookbook_name, pattern) {
+                        all_patterns.push((entry.priority, cached));
+                    }
+                }
+            }
         }
     }
 
@@ -227,6 +232,7 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
             .then_with(|| a.priority.cmp(&b.priority))
             .then_with(|| a.cached.name.cmp(&b.cached.name))
     });
+    all_patterns.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.pattern.cmp(&b.1.pattern)));
 
     let mut output = String::new();
     for item in all_recipes {
@@ -235,7 +241,54 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
             output.push('\n');
         }
     }
+    for (_, pattern) in all_patterns {
+        if let Ok(json) = serde_json::to_string(&pattern) {
+            output.push_str(&json);
+            output.push('\n');
+        }
+    }
     output
+}
+
+fn cached_concrete_entry(cookbook: &str, recipe: &enwiro_sdk::Recipe) -> CachedRecipe {
+    CachedRecipe {
+        cookbook: cookbook.to_string(),
+        name: recipe.name.clone(),
+        description: recipe
+            .description
+            .as_deref()
+            .map(enwiro_sdk::recipe_pattern::truncate_description),
+        sort_order: recipe.sort_order,
+        equivalent_to: recipe.equivalent_to.clone(),
+        scores: None,
+    }
+}
+
+/// Validate and anchor one cookbook-emitted pattern claim. `None` (with a
+/// warning) drops the entry before any consumer sees it. The description
+/// TEMPLATE is stored exactly as validated - truncating it could cut
+/// through a `{key}` and store an unparseable template; length-capping is
+/// the renderer's job (`match_name` truncates the rendered output).
+fn cached_pattern_entry(
+    cookbook: &str,
+    pattern: &enwiro_sdk::PatternRecipe,
+) -> Option<CachedPatternRecipe> {
+    if let Err(e) =
+        enwiro_sdk::recipe_pattern::validate(&pattern.pattern, pattern.description.as_deref())
+    {
+        tracing::warn!(
+            cookbook = %cookbook,
+            pattern = %pattern.pattern,
+            error = %e,
+            "Dropping invalid pattern recipe"
+        );
+        return None;
+    }
+    Some(CachedPatternRecipe {
+        cookbook: cookbook.to_string(),
+        pattern: enwiro_sdk::recipe_pattern::anchor(&pattern.pattern),
+        description: pattern.description.clone(),
+    })
 }
 
 /// Parse a JSONL workspace switch event line.
@@ -594,6 +647,7 @@ fn apply_auto_status(
 mod tests {
     use super::*;
     use enwiro_sdk::client::CachedRecipe;
+    use enwiro_sdk::cookbook::Recipe;
 
     fn parse_cached_lines(output: &str) -> Vec<CachedRecipe> {
         output
@@ -604,7 +658,10 @@ mod tests {
     }
 
     fn entry(priority: u32, recipes: Vec<Recipe>) -> CookbookEntry {
-        CookbookEntry { priority, recipes }
+        CookbookEntry {
+            priority,
+            recipes: recipes.into_iter().map(RecipeItem::from).collect(),
+        }
     }
 
     fn recipe_with_desc(name: &str, description: Option<&str>) -> Recipe {
@@ -612,6 +669,130 @@ mod tests {
             Some(d) => Recipe::with_description(name, d),
             None => Recipe::new(name),
         }
+    }
+
+    fn pattern_entry(priority: u32, pattern: &str, description: Option<&str>) -> CookbookEntry {
+        CookbookEntry {
+            priority,
+            recipes: vec![RecipeItem::Pattern(enwiro_sdk::cookbook::PatternRecipe {
+                pattern: pattern.to_string(),
+                description: description.map(str::to_string),
+            })],
+        }
+    }
+
+    fn parse_pattern_lines(output: &str) -> Vec<CachedPatternRecipe> {
+        output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    }
+
+    #[test]
+    fn build_cache_content_emits_anchored_pattern_lines_after_concrete_ones() {
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            CookbookEntry {
+                priority: 10,
+                recipes: vec![
+                    Recipe::new("my-project").into(),
+                    RecipeItem::Pattern(enwiro_sdk::cookbook::PatternRecipe {
+                        pattern: "my-project@(?P<branch>.+)".to_string(),
+                        description: Some("Create new branch '{branch}'".to_string()),
+                    }),
+                ],
+            },
+        );
+
+        let output = build_cache_content(&state);
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Concrete first - old consumers read a prefix of the file they
+        // fully understand.
+        let concrete: CachedRecipe = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(concrete.name, "my-project");
+        let pattern: CachedPatternRecipe = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(pattern.pattern, "^(?:my-project@(?P<branch>.+))$");
+        assert_eq!(pattern.cookbook, "git");
+    }
+
+    #[test]
+    fn build_cache_content_drops_pattern_with_invalid_regex() {
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), pattern_entry(10, "broken(", None));
+
+        let output = build_cache_content(&state);
+        assert!(output.is_empty(), "got: {output}");
+    }
+
+    #[test]
+    fn build_cache_content_drops_pattern_with_unknown_template_key() {
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            pattern_entry(10, "repo@(?P<branch>.+)", Some("branch {typo}")),
+        );
+
+        let output = build_cache_content(&state);
+        assert!(output.is_empty(), "got: {output}");
+    }
+
+    #[test]
+    fn build_cache_content_sorts_patterns_by_cookbook_priority() {
+        let mut state = HashMap::new();
+        state.insert("low".to_string(), pattern_entry(30, "b@(.+)", None));
+        state.insert("high".to_string(), pattern_entry(10, "a@(.+)", None));
+
+        let patterns = parse_pattern_lines(&build_cache_content(&state));
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0].cookbook, "high");
+        assert_eq!(patterns[1].cookbook, "low");
+    }
+
+    #[test]
+    fn build_cache_content_stores_long_pattern_templates_intact() {
+        // A template cut at the cap could split a `{key}` into an
+        // unparseable template; what was validated must be what is stored.
+        let template = format!(
+            "{}{{branch}} suffix past the cap",
+            "d".repeat(enwiro_sdk::recipe_pattern::MAX_DESCRIPTION_CHARS)
+        );
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            pattern_entry(10, "p@(?P<branch>.+)", Some(&template)),
+        );
+
+        let patterns = parse_pattern_lines(&build_cache_content(&state));
+        assert_eq!(patterns[0].description.as_deref(), Some(template.as_str()));
+        // ... and the stored entry still renders at match time.
+        let matched = enwiro_sdk::recipe_pattern::match_name(
+            &patterns[0].pattern,
+            patterns[0].description.as_deref(),
+            "p@new-idea",
+        )
+        .unwrap();
+        assert!(matched.description.is_some());
+    }
+
+    #[test]
+    fn build_cache_content_truncates_long_descriptions() {
+        let long: String = "d".repeat(500);
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            entry(10, vec![recipe_with_desc("repo", Some(&long))]),
+        );
+
+        let entries = parse_cached_lines(&build_cache_content(&state));
+        let description = entries[0].description.as_deref().unwrap();
+        assert_eq!(
+            description.chars().count(),
+            enwiro_sdk::recipe_pattern::MAX_DESCRIPTION_CHARS
+        );
+        assert!(description.ends_with('…'));
     }
 
     #[test]
