@@ -66,11 +66,15 @@ pub fn resolve_launch(
         {
             let image = container_image_tag(&params.env_name);
             if image_exists(engine, &image) {
+                let git_identity = host_git_identity(&params.env_path);
                 let env = ContainerEnv {
                     image: &image,
                     environment_path: &params.env_path,
                     environment_name: &params.env_name,
                     inject_proxy_shim: claude_oauth_token().is_some(),
+                    git_identity: git_identity
+                        .as_ref()
+                        .map(|(name, email)| (name.as_str(), email.as_str())),
                     workspaces_directory,
                     oci_runtime: container_runtime,
                 };
@@ -101,11 +105,15 @@ pub fn resolve_launch(
             // `claude` run *inside* the container (directly or from a shell) routes
             // through the host proxy. Container-scoped, not command-scoped: the
             // shim only affects `claude`, so wiring it for every launch is safe.
+            let git_identity = host_git_identity(&params.env_path);
             let env = ContainerEnv {
                 image: &image,
                 environment_path: &params.env_path,
                 environment_name: &params.env_name,
                 inject_proxy_shim: claude_oauth_token().is_some(),
+                git_identity: git_identity
+                    .as_ref()
+                    .map(|(name, email)| (name.as_str(), email.as_str())),
                 workspaces_directory,
                 oci_runtime: container_runtime,
             };
@@ -177,6 +185,31 @@ fn sanitize_image_tag_component(name: &str) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
+/// The host's effective git identity `(user.name, user.email)` for the
+/// environment (issue #725). Resolved with `git -C <env_path> config --get`
+/// rather than `--global` so conditional includes (`includeIf "gitdir:..."`)
+/// and worktree config yield exactly the identity the user would commit with
+/// on the host for this repo. `None` unless both halves resolve non-empty.
+///
+/// Shares `find_container_engine`'s daemon-`PATH` caveat below: a stripped
+/// `systemd --user` PATH without `git` just skips seeding.
+#[cfg(feature = "container-wrap")]
+fn host_git_identity(environment_path: &str) -> Option<(String, String)> {
+    let get = |key: &str| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(["-C", environment_path, "config", "--get", key])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8(output.stdout).ok()?;
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    };
+    Some((get("user.name")?, get("user.email")?))
+}
+
 /// `Some(CONTAINER_ENGINE)` if podman is on PATH, else `None`.
 ///
 /// NOTE: this resolves against the *daemon's* `PATH`, not the calling user's. A
@@ -204,6 +237,10 @@ struct ContainerEnv<'a> {
     environment_path: &'a str,
     environment_name: &'a str,
     inject_proxy_shim: bool,
+    /// The host's effective git `(user.name, user.email)` for this env, or
+    /// `None` when it couldn't be resolved (no seeding then; the container
+    /// behaves as if the host had no identity configured either).
+    git_identity: Option<(&'a str, &'a str)>,
     workspaces_directory: &'a Path,
     /// `--runtime` override for a microVM-backed engine (e.g. `krun`, issue
     /// #540); `None` uses the engine's own default.
@@ -283,6 +320,7 @@ fn build_container_argv(
         environment_path,
         environment_name,
         inject_proxy_shim,
+        git_identity,
         workspaces_directory,
         oci_runtime,
     } = *env;
@@ -353,6 +391,19 @@ fn build_container_argv(
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
     argv.push(format!("ENWIRO_ENV={environment_name}"));
+    // Host git identity (issue #725): the host's ~/.gitconfig is not mounted,
+    // so a fresh container has no user.name/user.email and every `git commit`
+    // fails with "Author identity unknown". Delivered as plain env (non-secret)
+    // for the launch prelude to seed *global* git config from -- global scope,
+    // not GIT_AUTHOR_*/GIT_COMMITTER_* vars, because those would take highest
+    // precedence and silently override a deliberate per-repo identity in the
+    // bind-mounted .git/config.
+    if let Some((name, email)) = git_identity {
+        argv.push("-e".to_string());
+        argv.push(format!("ENWIRO_GIT_USER_NAME={name}"));
+        argv.push("-e".to_string());
+        argv.push(format!("ENWIRO_GIT_USER_EMAIL={email}"));
+    }
     // Run as the host user's uid/gid, with `--userns=keep-id` mapping that uid to
     // itself inside the container's user namespace. This fixes git's "dubious
     // ownership" error on the bind-mounted project, stops the container from
@@ -491,6 +542,13 @@ fn claude_shim_script(capability: &str) -> String {
 ///    Claude's config is `$CLAUDE_CONFIG_DIR/.claude.json` when set, else
 ///    `$HOME/.claude.json` (home root, not a `.claude/` subdir). An image that
 ///    ships its own `.claude.json` is left untouched.
+/// 3. **Git identity seed** (issue #725). When the daemon passed the host's
+///    identity (`ENWIRO_GIT_USER_NAME`/`_EMAIL`) and git can't already resolve
+///    a `user.email` from any config the image ships (system, global, or the
+///    bind-mounted repo's own -- the workdir is the repo), write it to global
+///    config so `git commit` works out of the box. Seeding goes through
+///    `git config --global` rather than `printf`ing a file so git does the
+///    value escaping, and global scope keeps repo-local config authoritative.
 ///
 /// Everything written here is non-secret and lives in the container's ephemeral
 /// filesystem (gone on `--rm`).
@@ -503,6 +561,9 @@ const CONTAINER_PRELUDE_SCRIPT: &str = concat!(
     r#"if [ -n "$CLAUDE_CONFIG_DIR" ]; then f="$CLAUDE_CONFIG_DIR/.claude.json"; else f="$HOME/.claude.json"; fi; "#,
     r#"[ -f "$f" ] || { mkdir -p "$(dirname "$f")" && "#,
     r#"printf '{"hasCompletedOnboarding":true,"theme":"dark-ansi","projects":{"%s":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' "$(pwd)" > "$f"; }; "#,
+    r#"if [ -n "$ENWIRO_GIT_USER_NAME" ] && [ -n "$ENWIRO_GIT_USER_EMAIL" ] && command -v git >/dev/null 2>&1 "#,
+    r#"&& ! git config --get user.email >/dev/null 2>&1; then "#,
+    r#"git config --global user.name "$ENWIRO_GIT_USER_NAME" && git config --global user.email "$ENWIRO_GIT_USER_EMAIL"; fi; "#,
     r#"exec "$@""#,
 );
 
@@ -581,6 +642,7 @@ mod tests {
             environment_path: "/p",
             environment_name: "x",
             inject_proxy_shim,
+            git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
             oci_runtime: None,
         }
@@ -647,6 +709,7 @@ mod tests {
             environment_path: env_path.path().to_str().unwrap(),
             environment_name: "x",
             inject_proxy_shim: false,
+            git_identity: None,
             workspaces_directory: workspaces_dir.path(),
             oci_runtime: None,
         };
@@ -722,6 +785,7 @@ mod tests {
             environment_path: "/home/u/.enwiro_envs/my-proj/my-proj",
             environment_name: "my-proj",
             inject_proxy_shim: false,
+            git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
             oci_runtime: None,
         };
@@ -857,6 +921,98 @@ mod tests {
         assert!(script.trim_end().ends_with(r#"exec "$@""#), "{script}");
     }
 
+    // Host git identity (issue #725): the host's ~/.gitconfig is not mounted,
+    // so without seeding every `git commit` in a fresh container fails with
+    // "Author identity unknown". The daemon passes the identity as env...
+    #[test]
+    fn container_argv_passes_git_identity_env_when_known() {
+        let env = ContainerEnv {
+            git_identity: Some(("Jane Dev", "jane@dev.example")),
+            ..test_env(false)
+        };
+        let argv = build_container_argv(&env, "bash", &[], true);
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "ENWIRO_GIT_USER_NAME=Jane Dev"),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-e" && w[1] == "ENWIRO_GIT_USER_EMAIL=jane@dev.example"),
+            "{argv:?}"
+        );
+    }
+
+    #[test]
+    fn container_argv_omits_git_identity_env_when_unknown() {
+        let argv = build_container_argv(&test_env(false), "bash", &[], true);
+        assert!(
+            !argv
+                .windows(2)
+                .any(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_GIT_USER")),
+            "{argv:?}"
+        );
+    }
+
+    // ...and the prelude seeds *global* config from it, but only when git can't
+    // already resolve an identity from config the image (or the mounted repo)
+    // ships -- so a deliberate image/repo identity always wins over the host's.
+    #[test]
+    fn prelude_seeds_git_identity_only_when_unresolvable() {
+        assert!(
+            CONTAINER_PRELUDE_SCRIPT.contains("! git config --get user.email"),
+            "{CONTAINER_PRELUDE_SCRIPT}"
+        );
+        // Written via `git config --global` (git escapes the values), never a
+        // raw printf of shell-interpolated bytes into the file.
+        assert!(
+            CONTAINER_PRELUDE_SCRIPT
+                .contains(r#"git config --global user.name "$ENWIRO_GIT_USER_NAME""#),
+            "{CONTAINER_PRELUDE_SCRIPT}"
+        );
+        assert!(
+            CONTAINER_PRELUDE_SCRIPT
+                .contains(r#"git config --global user.email "$ENWIRO_GIT_USER_EMAIL""#),
+            "{CONTAINER_PRELUDE_SCRIPT}"
+        );
+        // Skipped entirely on an image without git rather than failing the launch.
+        assert!(
+            CONTAINER_PRELUDE_SCRIPT.contains("command -v git"),
+            "{CONTAINER_PRELUDE_SCRIPT}"
+        );
+    }
+
+    // Resolved via `git -C <env_path> config --get` (not `--global`) so the
+    // answer is the *effective* identity for that repo -- conditional includes
+    // and repo-local overrides included. A local config makes this test
+    // deterministic regardless of the machine's own global identity.
+    #[test]
+    fn host_git_identity_resolves_effective_identity_for_the_repo() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init"]);
+        git(&["config", "user.name", "Jane Dev"]);
+        git(&["config", "user.email", "jane@dev.example"]);
+        assert_eq!(
+            host_git_identity(repo.path().to_str().unwrap()),
+            Some(("Jane Dev".to_string(), "jane@dev.example".to_string()))
+        );
+    }
+
+    #[test]
+    fn host_git_identity_is_none_when_git_cannot_run_there() {
+        assert_eq!(host_git_identity("/nonexistent-enwiro-env-path"), None);
+    }
+
     #[test]
     fn container_argv_uses_dash_i_when_not_a_tty() {
         let argv = build_container_argv(&test_env(false), "echo", &[], false);
@@ -965,6 +1121,7 @@ mod tests {
             environment_path: colon_path,
             environment_name: "x",
             inject_proxy_shim: false,
+            git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
             oci_runtime: None,
         };
@@ -999,6 +1156,7 @@ mod tests {
             environment_path: "/p",
             environment_name: "my-proj",
             inject_proxy_shim: false,
+            git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
             oci_runtime: None,
         };
