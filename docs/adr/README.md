@@ -10,6 +10,7 @@ decision, and the trade-offs.
 | ------------------------------------------ | -------------------------------------- | -------- |
 | [0001](0001-project-level-config.md)       | Project-level config via `.enwiro.toml` | Accepted |
 | [0002](0002-daemon-ipc-architecture.md)    | Daemon IPC architecture                | Proposed |
+| [0003](0003-pattern-recipes.md)            | Pattern recipes for cooking unlisted names | Accepted |
 
 ## Status values
 

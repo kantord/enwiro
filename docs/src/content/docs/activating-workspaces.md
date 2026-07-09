@@ -41,6 +41,14 @@ enw ls
 recipes you could still cook. (Both `enw ls` and `enw activate`
 need the daemon running.)
 
+## Names that aren't listed
+
+Some names work without appearing in `enw ls`: `myrepo@some-new-branch`
+creates that branch in a fresh worktree, and `myrepo#123` opens any issue or
+PR by number, assigned to you or not. A notification tells you what is being
+created - watch it, since a typo'd name creates a branch with exactly that
+name.
+
 ## Different ways to work on the same thing
 
 Several cookbooks can describe the *same* underlying unit of work or context differently, for example the same

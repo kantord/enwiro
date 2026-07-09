@@ -202,6 +202,31 @@ something changes, then go back to sleep. Each line is one of two kinds:
 statuses are the user's - they set those by hand with `enw mark`, and a cookbook
 must never send them. If you're not sure an environment is done, send nothing.
 
+#### Pattern recipes
+
+A `recipes` update may also contain *pattern* items: regex claims over names
+your cookbook can cook on demand without listing them. This is how the git
+cookbook lets `my-project@some-new-branch` create the branch on the fly:
+
+```json
+{"pattern":"my-project@(?P<branch>.+)",
+ "description":"Create new branch '{branch}' in my-project"}
+```
+
+- `pattern` replaces `name`: Rust `regex` syntax, emitted **unanchored** -
+  enwiro anchors it to the whole recipe name.
+- `description` is a template: `{group}` placeholders are filled from the
+  capture groups and shown to the user on every pattern-routed cook.
+- Escape literal text you interpolate: regex metacharacters in `pattern`,
+  and `{` `}` `\` (as `\{` `\}` `\\`) in `description`. Rust:
+  `enwiro_sdk::recipe_pattern::{escape, escape_template}`. Invalid entries
+  are dropped with a daemon warning.
+- Claim only what `cook` can handle - it will be called with any matching
+  name. Exact recipes win over patterns; among patterns, cookbook priority
+  decides.
+- UIs never show pattern items (users type a matching name), and they only
+  work on the `listen` stream, not `list-recipes`.
+
 #### A note for Rust cookbooks
 
 If you write your cookbook in Rust, you don't have to implement this loop or the
