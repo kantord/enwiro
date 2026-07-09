@@ -163,7 +163,7 @@ impl<W: Write> CommandContext<W> {
         }
         for entry in &entries {
             if let CachedEntry::Pattern(pattern) = entry
-                && let Some(rendered) = enwiro_sdk::pattern::match_rendering(
+                && let Some(matched) = enwiro_sdk::recipe_pattern::match_name(
                     &pattern.pattern,
                     pattern.description.as_deref(),
                     recipe_name,
@@ -171,7 +171,7 @@ impl<W: Write> CommandContext<W> {
             {
                 return Some(ResolvedRecipe {
                     cookbook: pattern.cookbook.clone(),
-                    description: rendered,
+                    description: matched.description,
                     via_pattern: true,
                 });
             }
@@ -683,7 +683,7 @@ mod tests {
     fn pattern_cache_line(cookbook: &str, pattern: &str, description: Option<&str>) -> String {
         serde_json::to_string(&enwiro_sdk::client::CachedPatternRecipe {
             cookbook: cookbook.to_string(),
-            pattern: enwiro_sdk::pattern::anchor(pattern),
+            pattern: enwiro_sdk::recipe_pattern::anchor(pattern),
             description: description.map(str::to_string),
         })
         .unwrap()

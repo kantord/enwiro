@@ -149,7 +149,7 @@ impl Recipe {
 /// A pattern recipe: a regex claim over recipe names the cookbook can cook
 /// on demand even though they are not listed concretely — e.g. the git
 /// cookbook claiming `repo@<any-branch>` so a not-yet-existing branch can be
-/// cooked (#246). See [`crate::pattern`] for the pattern/template contract:
+/// cooked (#246). See [`crate::recipe_pattern`] for the pattern/template contract:
 /// Rust `regex` syntax, emitted unanchored, `{group}` description template
 /// rendered from the pattern's named capture groups.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

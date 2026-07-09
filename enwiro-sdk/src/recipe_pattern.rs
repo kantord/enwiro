@@ -62,35 +62,39 @@ pub fn validate(pattern: &str, description: Option<&str>) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Match `name` against an already-anchored cached pattern. Outer `None`
-/// means no match (an uncompilable pattern also counts as a non-match —
-/// cache entries were validated at build time, so that only happens with a
-/// hand-edited cache). On match, the inner value is the rendered, truncated
-/// description, or `None` when the entry has no template.
-pub fn match_rendering(
+/// A recipe name claimed by a pattern entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternMatch {
+    /// The entry's description template rendered with the name's capture
+    /// groups, truncated. `None` when the entry has no template.
+    pub description: Option<String>,
+}
+
+/// Match `name` against an already-anchored cached pattern. `None` means no
+/// match — an uncompilable pattern also counts as a non-match, since cache
+/// entries were validated at build time and can only be broken by hand.
+pub fn match_name(
     anchored_pattern: &str,
     template: Option<&str>,
     name: &str,
-) -> Option<Option<String>> {
+) -> Option<PatternMatch> {
     let compiled = regex::Regex::new(anchored_pattern).ok()?;
     let captures = compiled.captures(name)?;
-    let Some(template) = template else {
-        return Some(None);
-    };
-    let Ok(parsed) = leon::Template::parse(template) else {
-        return Some(None);
-    };
-    let values: HashMap<String, String> = compiled
-        .capture_names()
-        .flatten()
-        .filter_map(|group| {
-            captures
-                .name(group)
-                .map(|m| (group.to_string(), m.as_str().to_string()))
-        })
-        .collect();
-    let rendered = parsed.render(&values).ok();
-    Some(rendered.map(|text| truncate_description(&text)))
+    let description = template.and_then(|template| {
+        let parsed = leon::Template::parse(template).ok()?;
+        let values: HashMap<String, String> = compiled
+            .capture_names()
+            .flatten()
+            .filter_map(|group| {
+                captures
+                    .name(group)
+                    .map(|m| (group.to_string(), m.as_str().to_string()))
+            })
+            .collect();
+        let rendered = parsed.render(&values).ok()?;
+        Some(truncate_description(&rendered))
+    });
+    Some(PatternMatch { description })
 }
 
 #[cfg(test)]
@@ -143,51 +147,53 @@ mod tests {
     }
 
     #[test]
-    fn match_rendering_renders_captures() {
+    fn match_name_renders_captures() {
         let anchored = anchor("my-project@(?P<branch>.+)");
-        let rendered = match_rendering(
+        let matched = match_name(
             &anchored,
             Some("Create new branch '{branch}' in my-project"),
             "my-project@feat/login",
-        );
+        )
+        .unwrap();
         assert_eq!(
-            rendered,
-            Some(Some(
-                "Create new branch 'feat/login' in my-project".to_string()
-            ))
+            matched.description.as_deref(),
+            Some("Create new branch 'feat/login' in my-project")
         );
     }
 
     #[test]
-    fn match_rendering_is_anchored() {
+    fn match_name_is_anchored() {
         let anchored = anchor("my-project@(?P<branch>.+)");
-        assert_eq!(match_rendering(&anchored, None, "other-my-project@x"), None);
+        assert_eq!(match_name(&anchored, None, "other-my-project@x"), None);
     }
 
     #[test]
-    fn match_rendering_without_template_signals_plain_match() {
+    fn match_name_without_template_matches_with_no_description() {
         let anchored = anchor("my-project@(.+)");
-        assert_eq!(match_rendering(&anchored, None, "my-project@x"), Some(None));
+        let matched = match_name(&anchored, None, "my-project@x").unwrap();
+        assert_eq!(matched.description, None);
     }
 
     #[test]
-    fn match_rendering_truncates_long_result() {
+    fn match_name_truncates_long_result() {
         let anchored = anchor("p@(?P<branch>.+)");
         let long_branch: String = "b".repeat(MAX_DESCRIPTION_CHARS * 2);
-        let rendered = match_rendering(
+        let matched = match_name(
             &anchored,
             Some("New branch {branch}"),
             &format!("p@{}", long_branch),
         )
-        .unwrap()
         .unwrap();
-        assert_eq!(rendered.chars().count(), MAX_DESCRIPTION_CHARS);
+        assert_eq!(
+            matched.description.unwrap().chars().count(),
+            MAX_DESCRIPTION_CHARS
+        );
     }
 
     #[test]
     fn escaped_literals_do_not_act_as_regex() {
         let anchored = anchor(&format!("{}@(.+)", escape("a.b")));
-        assert!(match_rendering(&anchored, None, "axb@branch").is_none());
-        assert!(match_rendering(&anchored, None, "a.b@branch").is_some());
+        assert!(match_name(&anchored, None, "axb@branch").is_none());
+        assert!(match_name(&anchored, None, "a.b@branch").is_some());
     }
 }

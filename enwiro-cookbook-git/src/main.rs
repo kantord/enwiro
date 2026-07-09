@@ -518,19 +518,28 @@ fn build_sorted_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<(&String, u3
         .collect()
 }
 
+fn sorted_concrete_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<Recipe> {
+    build_sorted_recipes(repos)
+        .into_iter()
+        .map(|(key, sort_order)| {
+            let mut recipe = Recipe::new(key);
+            recipe.sort_order = sort_order;
+            recipe
+        })
+        .collect()
+}
+
 fn list_recipes(config: &ConfigurationValues) -> anyhow::Result<()> {
     let repos = build_repository_hashmap(config)?;
     tracing::debug!(count = repos.len(), "Listing recipes");
 
-    for (key, sort_order) in build_sorted_recipes(&repos) {
-        let mut recipe = Recipe::new(key);
-        recipe.sort_order = sort_order;
+    for recipe in sorted_concrete_recipes(&repos) {
         println!("{}", recipe.to_jsonl());
     }
     Ok(())
 }
 
-/// Emitted unanchored; the daemon anchors them (see `enwiro_sdk::pattern`).
+/// Emitted unanchored; the daemon anchors them (see `enwiro_sdk::recipe_pattern`).
 fn branch_pattern_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<RecipeItem> {
     let mut repo_names: Vec<&String> = repos.keys().filter(|n| is_base_repo_recipe(n)).collect();
     repo_names.sort();
@@ -538,7 +547,10 @@ fn branch_pattern_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<RecipeItem
         .into_iter()
         .map(|repo_name| {
             RecipeItem::Pattern(PatternRecipe {
-                pattern: format!("{}@(?P<branch>.+)", enwiro_sdk::pattern::escape(repo_name)),
+                pattern: format!(
+                    "{}@(?P<branch>.+)",
+                    enwiro_sdk::recipe_pattern::escape(repo_name)
+                ),
                 description: Some(format!("Create new branch '{{branch}}' in {}", repo_name)),
             })
         })
@@ -549,13 +561,9 @@ fn collect_recipe_items(config: &ConfigurationValues) -> Vec<RecipeItem> {
     let Ok(repos) = build_repository_hashmap(config) else {
         return Vec::new();
     };
-    let mut items: Vec<RecipeItem> = build_sorted_recipes(&repos)
+    let mut items: Vec<RecipeItem> = sorted_concrete_recipes(&repos)
         .into_iter()
-        .map(|(key, sort_order)| {
-            let mut recipe = Recipe::new(key);
-            recipe.sort_order = sort_order;
-            RecipeItem::Concrete(recipe)
-        })
+        .map(RecipeItem::Concrete)
         .collect();
     items.extend(branch_pattern_recipes(&repos));
     items
@@ -1348,15 +1356,18 @@ mod tests {
             patterns[0].pattern,
             format!(
                 "{}@(?P<branch>.+)",
-                enwiro_sdk::pattern::escape("my-project")
+                enwiro_sdk::recipe_pattern::escape("my-project")
             )
         );
         assert_eq!(
             patterns[0].description.as_deref(),
             Some("Create new branch '{branch}' in my-project")
         );
-        enwiro_sdk::pattern::validate(&patterns[0].pattern, patterns[0].description.as_deref())
-            .expect("emitted pattern must pass daemon validation");
+        enwiro_sdk::recipe_pattern::validate(
+            &patterns[0].pattern,
+            patterns[0].description.as_deref(),
+        )
+        .expect("emitted pattern must pass daemon validation");
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
-use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
+use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 use serde_derive::{Deserialize, Serialize};
 
 const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -423,6 +423,43 @@ fn list_recipes() -> anyhow::Result<()> {
         println!("{}", recipe.to_jsonl());
     }
     Ok(())
+}
+
+/// One claim per configured repo covering every `repo#<number>` name.
+/// The searches behind `collect_recipes` are scoped (assigned issues, open
+/// PRs), but `cook` probes the forge for what a number is — so any issue or
+/// PR is cookable, not just the listed ones. Emitted unanchored; the daemon
+/// anchors them (see `enwiro_sdk::recipe_pattern`).
+fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
+    let mut short_names: Vec<String> = repos
+        .iter()
+        .map(|r| extract_short_repo_name(r.repo.clone()))
+        .collect();
+    short_names.sort();
+    short_names.dedup();
+    short_names
+        .into_iter()
+        .map(|short_name| {
+            RecipeItem::Pattern(PatternRecipe {
+                pattern: format!(
+                    "{}#(?P<number>\\d+)",
+                    enwiro_sdk::recipe_pattern::escape(&short_name)
+                ),
+                description: Some(format!("Work on PR or issue #{{number}} in {}", short_name)),
+            })
+        })
+        .collect()
+}
+
+fn collect_recipe_items() -> Vec<RecipeItem> {
+    let mut items: Vec<RecipeItem> = collect_recipes()
+        .into_iter()
+        .map(RecipeItem::Concrete)
+        .collect();
+    if let Ok(repos) = discover_github_repos() {
+        items.extend(item_pattern_recipes(&repos));
+    }
+    items
 }
 
 /// Auto-detected `done` events for the PR/issue envs this cookbook has
@@ -909,6 +946,58 @@ mod tests {
         let (repo, number) = parse_recipe_name("enwiro#42").unwrap();
         assert_eq!(repo, "enwiro");
         assert_eq!(number, 42);
+    }
+
+    #[test]
+    fn test_item_pattern_recipes_claim_any_number_per_repo() {
+        let repos = vec![
+            RepoConfig {
+                repo: "kantord/enwiro".to_string(),
+                local_path: PathBuf::from("/tmp/enwiro"),
+            },
+            RepoConfig {
+                repo: "vercel/next.js".to_string(),
+                local_path: PathBuf::from("/tmp/next.js"),
+            },
+        ];
+
+        let items = item_pattern_recipes(&repos);
+
+        let patterns: Vec<&PatternRecipe> = items
+            .iter()
+            .map(|item| match item {
+                RecipeItem::Pattern(p) => p,
+                RecipeItem::Concrete(_) => panic!("expected only pattern items"),
+            })
+            .collect();
+        assert_eq!(patterns.len(), 2);
+
+        for pattern in &patterns {
+            enwiro_sdk::recipe_pattern::validate(&pattern.pattern, pattern.description.as_deref())
+                .expect("emitted pattern must pass daemon validation");
+        }
+
+        // Short repo name, any number — and nothing else. `next.js` must be
+        // escaped: the dot may not match arbitrary characters.
+        let anchored = enwiro_sdk::recipe_pattern::anchor(&patterns[1].pattern);
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#123").is_some());
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next-js#123").is_none());
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "next.js#abc").is_none());
+        assert!(
+            enwiro_sdk::recipe_pattern::match_name(&anchored, None, "other/next.js#5").is_none()
+        );
+
+        let enwiro_anchored = enwiro_sdk::recipe_pattern::anchor(&patterns[0].pattern);
+        let matched = enwiro_sdk::recipe_pattern::match_name(
+            &enwiro_anchored,
+            patterns[0].description.as_deref(),
+            "enwiro#997",
+        )
+        .unwrap();
+        assert_eq!(
+            matched.description.as_deref(),
+            Some("Work on PR or issue #997 in enwiro")
+        );
     }
 
     #[test]
@@ -1747,7 +1836,7 @@ fn main() -> anyhow::Result<()> {
                 std::collections::HashSet::new();
             enwiro_sdk::listen::serve_updates(LISTEN_POLL_INTERVAL, move || {
                 let mut updates = vec![enwiro_sdk::listen::RecipeUpdate::Recipes {
-                    data: collect_recipes().into_iter().map(Into::into).collect(),
+                    data: collect_recipe_items(),
                 }];
                 updates.extend(collect_status_events(&config, &mut done_cache));
                 updates

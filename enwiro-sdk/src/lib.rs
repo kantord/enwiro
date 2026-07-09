@@ -19,9 +19,9 @@ pub mod gear;
 pub mod git;
 pub mod listen;
 pub mod logging;
-pub mod pattern;
 pub mod plugin;
 pub mod process;
+pub mod recipe_pattern;
 pub mod rpc;
 pub mod status;
 

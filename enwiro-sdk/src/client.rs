@@ -32,7 +32,7 @@ pub struct CachedRecipe {
 
 /// Cache-file counterpart of [`crate::cookbook::PatternRecipe`]: a pattern
 /// claim with its owning cookbook. The pattern is stored anchored and the
-/// description template pre-validated (see [`crate::pattern`]). Pattern
+/// description template pre-validated (see [`crate::recipe_pattern`]). Pattern
 /// lines have no `name`, so cache consumers that predate patterns skip them
 /// as unparseable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -200,7 +200,7 @@ struct SortableCachedRecipe {
 /// JSON-lines format: concrete recipes sorted globally by (sort_order,
 /// cookbook priority, name), then pattern claims sorted by (cookbook
 /// priority, pattern). Patterns are validated and anchored here
-/// (`enwiro_sdk::pattern`), invalid ones dropped — consumers never see a
+/// (`enwiro_sdk::recipe_pattern`), invalid ones dropped — consumers never see a
 /// pattern that doesn't compile or whose template keys don't resolve.
 pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> String {
     let mut all_recipes: Vec<SortableCachedRecipe> = Vec::new();
@@ -209,43 +209,13 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
         for item in &entry.recipes {
             match item {
                 RecipeItem::Concrete(recipe) => all_recipes.push(SortableCachedRecipe {
-                    cached: CachedRecipe {
-                        cookbook: cookbook_name.clone(),
-                        name: recipe.name.clone(),
-                        description: recipe
-                            .description
-                            .as_deref()
-                            .map(enwiro_sdk::pattern::truncate_description),
-                        sort_order: recipe.sort_order,
-                        equivalent_to: recipe.equivalent_to.clone(),
-                        scores: None,
-                    },
+                    cached: cached_concrete_entry(cookbook_name, recipe),
                     priority: entry.priority,
                 }),
                 RecipeItem::Pattern(pattern) => {
-                    if let Err(e) = enwiro_sdk::pattern::validate(
-                        &pattern.pattern,
-                        pattern.description.as_deref(),
-                    ) {
-                        tracing::warn!(
-                            cookbook = %cookbook_name,
-                            pattern = %pattern.pattern,
-                            error = %e,
-                            "Dropping invalid pattern recipe"
-                        );
-                        continue;
+                    if let Some(cached) = cached_pattern_entry(cookbook_name, pattern) {
+                        all_patterns.push((entry.priority, cached));
                     }
-                    all_patterns.push((
-                        entry.priority,
-                        CachedPatternRecipe {
-                            cookbook: cookbook_name.clone(),
-                            pattern: enwiro_sdk::pattern::anchor(&pattern.pattern),
-                            description: pattern
-                                .description
-                                .as_deref()
-                                .map(enwiro_sdk::pattern::truncate_description),
-                        },
-                    ));
                 }
             }
         }
@@ -274,6 +244,47 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
         }
     }
     output
+}
+
+fn cached_concrete_entry(cookbook: &str, recipe: &enwiro_sdk::Recipe) -> CachedRecipe {
+    CachedRecipe {
+        cookbook: cookbook.to_string(),
+        name: recipe.name.clone(),
+        description: recipe
+            .description
+            .as_deref()
+            .map(enwiro_sdk::recipe_pattern::truncate_description),
+        sort_order: recipe.sort_order,
+        equivalent_to: recipe.equivalent_to.clone(),
+        scores: None,
+    }
+}
+
+/// Validate, anchor, and truncate one cookbook-emitted pattern claim.
+/// `None` (with a warning) drops the entry before any consumer sees it.
+fn cached_pattern_entry(
+    cookbook: &str,
+    pattern: &enwiro_sdk::PatternRecipe,
+) -> Option<CachedPatternRecipe> {
+    if let Err(e) =
+        enwiro_sdk::recipe_pattern::validate(&pattern.pattern, pattern.description.as_deref())
+    {
+        tracing::warn!(
+            cookbook = %cookbook,
+            pattern = %pattern.pattern,
+            error = %e,
+            "Dropping invalid pattern recipe"
+        );
+        return None;
+    }
+    Some(CachedPatternRecipe {
+        cookbook: cookbook.to_string(),
+        pattern: enwiro_sdk::recipe_pattern::anchor(&pattern.pattern),
+        description: pattern
+            .description
+            .as_deref()
+            .map(enwiro_sdk::recipe_pattern::truncate_description),
+    })
 }
 
 /// Parse a JSONL workspace switch event line.
@@ -723,7 +734,7 @@ mod tests {
         let description = entries[0].description.as_deref().unwrap();
         assert_eq!(
             description.chars().count(),
-            enwiro_sdk::pattern::MAX_DESCRIPTION_CHARS
+            enwiro_sdk::recipe_pattern::MAX_DESCRIPTION_CHARS
         );
         assert!(description.ends_with('…'));
     }
