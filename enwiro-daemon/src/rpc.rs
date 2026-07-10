@@ -117,18 +117,28 @@ impl EnwiroRpcServer for DaemonRpc {
         let payload = enwiro_sdk::CookbookPayload::new(params.payload.clone());
 
         // tokio::process gives us async pipes + kill_on_drop: if the
-        // handler returns early (client disconnect, task cancellation),
-        // the cookbook child is killed automatically rather than leaked.
-        // Bounded reads on stdout / stderr cap daemon memory against a
-        // cookbook that dumps a gigabyte of build output.
-        let output = run_cookbook_subprocess(
+        // handler returns early (client disconnect, task cancellation,
+        // best-effort timeout), the cookbook child is killed automatically
+        // rather than leaked. Bounded reads on stdout / stderr cap daemon
+        // memory against a cookbook that dumps a gigabyte of build output.
+        let subprocess = run_cookbook_subprocess(
             &plugin.executable,
             &params.op,
             &params.args,
             &chain_env_value,
             &payload,
-        )
-        .await
+        );
+        let output = match best_effort_op_timeout(&params.op) {
+            Some(timeout) => tokio::time::timeout(timeout, subprocess)
+                .await
+                .map_err(|_| {
+                    app_err(format!(
+                        "cookbook '{}' op '{}' did not exit within {timeout:?} (killed)",
+                        params.cookbook, params.op
+                    ))
+                })?,
+            None => subprocess.await,
+        }
         .map_err(|e| {
             ErrorObjectOwned::owned::<()>(
                 ErrorCode::InternalError.code(),
@@ -304,6 +314,15 @@ impl EnwiroRpcServer for DaemonRpc {
 
         Ok(EnvListResult { envs })
     }
+}
+
+/// Wall-clock cap for best-effort ops invoked over RPC; the caller
+/// (`RpcCookbookClient`) treats every failure as "nothing declared".
+/// Mirrors `BEST_EFFORT_SUBCOMMAND_TIMEOUT` on the direct-subprocess
+/// path in `enwiro_sdk::client`. `cook` deliberately has no cap: cloning
+/// a large repo can take minutes.
+fn best_effort_op_timeout(op: &str) -> Option<std::time::Duration> {
+    matches!(op, "gear" | "external-paths").then(|| std::time::Duration::from_secs(10))
 }
 
 /// Output of a single cookbook subprocess invocation; carries enough
@@ -502,4 +521,22 @@ async fn handle_conn(stream: UnixStream, methods: Methods) -> anyhow::Result<()>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn best_effort_ops_get_a_timeout() {
+        assert!(best_effort_op_timeout("gear").is_some());
+        assert!(best_effort_op_timeout("external-paths").is_some());
+    }
+
+    #[test]
+    fn cook_and_unknown_ops_are_uncapped() {
+        assert!(best_effort_op_timeout("cook").is_none());
+        assert!(best_effort_op_timeout("list-recipes").is_none());
+        assert!(best_effort_op_timeout("future-op").is_none());
+    }
 }

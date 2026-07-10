@@ -2,11 +2,19 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use crate::cookbook::{CookbookMetadata, CookbookPayload, Recipe};
 use crate::plugin::Plugin;
 
 const DEFAULT_PRIORITY: u32 = 50;
+
+/// Wall-clock cap for the optional best-effort subcommands (`gear`,
+/// `external-paths`). They are metadata-shaped reads whose callers treat
+/// every failure as "nothing declared", so a hanging plugin must degrade
+/// to that instead of stalling the caller forever. `cook` and
+/// `list-recipes` are exempt: cooking may legitimately take minutes.
+pub const BEST_EFFORT_SUBCOMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct EnvScores {
@@ -234,6 +242,24 @@ impl CookbookClient {
     /// Centralizes the stdin pipe so every subcommand carries the same
     /// payload.
     fn spawn_with_payload(&self, args: &[&str]) -> anyhow::Result<Output> {
+        let child = self.spawn_child_with_payload(args)?;
+        child.wait_with_output().context("Cookbook process failed")
+    }
+
+    /// Like [`Self::spawn_with_payload`], but kills the cookbook and
+    /// errors if it doesn't exit within `timeout`. Used for the
+    /// best-effort subcommands, whose callers turn the error into
+    /// "nothing declared".
+    fn spawn_with_payload_timeout(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+    ) -> anyhow::Result<Output> {
+        let child = self.spawn_child_with_payload(args)?;
+        wait_with_output_timeout(child, timeout)
+    }
+
+    fn spawn_child_with_payload(&self, args: &[&str]) -> anyhow::Result<std::process::Child> {
         let mut child = Command::new(&self.plugin.executable)
             .args(args)
             .stdin(Stdio::piped())
@@ -249,8 +275,67 @@ impl CookbookClient {
                 .write_all(&bytes)
                 .context("Failed to write cookbook payload to stdin")?;
         }
-        child.wait_with_output().context("Cookbook process failed")
+        Ok(child)
     }
+}
+
+/// Poll cadence while waiting for a time-bounded subprocess to exit.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// `wait_with_output` with a deadline: drains stdout/stderr on reader
+/// threads (so output larger than the pipe buffer can't deadlock the
+/// child - same hazard as in [`crate::metadata`]), kills the child and
+/// errors if it hasn't exited when `timeout` elapses.
+fn wait_with_output_timeout(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> anyhow::Result<Output> {
+    use std::io::Read;
+
+    fn drain(
+        pipe: Option<impl Read + Send + 'static>,
+    ) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                pipe.read_to_end(&mut buf)?;
+            }
+            Ok(buf)
+        })
+    }
+
+    let stdout_reader = drain(child.stdout.take());
+    let stderr_reader = drain(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("Cookbook subcommand did not exit within {timeout:?}");
+            }
+            Ok(None) => std::thread::sleep(WAIT_POLL_INTERVAL),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e).context("Failed to wait for cookbook subcommand");
+            }
+        }
+    };
+
+    let join = |reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+        reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("Cookbook output reader thread panicked"))?
+            .context("Failed to read cookbook output")
+    };
+    Ok(Output {
+        status,
+        stdout: join(stdout_reader)?,
+        stderr: join(stderr_reader)?,
+    })
 }
 
 /// Resolve a cookbook's config with the project-layer walker rooted at
@@ -499,7 +584,7 @@ impl CookbookTrait for CookbookClient {
     /// contract.
     fn gear(&self, recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
         Ok(best_effort_json_via_subprocess(
-            self.spawn_with_payload(&["gear", recipe]),
+            self.spawn_with_payload_timeout(&["gear", recipe], BEST_EFFORT_SUBCOMMAND_TIMEOUT),
             self.plugin.name.as_str(),
             recipe,
             "gear",
@@ -511,7 +596,10 @@ impl CookbookTrait for CookbookClient {
     /// failure contract.
     fn external_paths(&self, recipe: &str) -> anyhow::Result<Vec<String>> {
         Ok(best_effort_json_via_subprocess(
-            self.spawn_with_payload(&["external-paths", recipe]),
+            self.spawn_with_payload_timeout(
+                &["external-paths", recipe],
+                BEST_EFFORT_SUBCOMMAND_TIMEOUT,
+            ),
             self.plugin.name.as_str(),
             recipe,
             "external-paths",
@@ -697,5 +785,62 @@ echo "$payload"
             "non-allowlisted key must be dropped before reaching the cookbook; got {:?}",
             payload.config
         );
+    }
+
+    mod wait_with_output_timeout {
+        use super::super::wait_with_output_timeout;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        /// Bounds scripts that exit on their own; generous because a
+        /// loaded test machine can be slow to spawn a shell.
+        const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+        const TEST_SHORT_TIMEOUT: Duration = Duration::from_millis(300);
+
+        fn spawn_script(dir: &std::path::Path, body: &str) -> std::process::Child {
+            let path = dir.join("fixture.sh");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            Command::new(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        }
+
+        #[test]
+        fn returns_output_of_a_prompt_child() {
+            let dir = tempfile::tempdir().unwrap();
+            let child = spawn_script(dir.path(), "echo out; echo err >&2");
+            let output = wait_with_output_timeout(child, TEST_TIMEOUT).unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "out\n");
+            assert_eq!(String::from_utf8_lossy(&output.stderr), "err\n");
+        }
+
+        #[test]
+        fn kills_a_child_that_never_exits() {
+            let dir = tempfile::tempdir().unwrap();
+            let child = spawn_script(dir.path(), "sleep 60");
+            let started = Instant::now();
+            let err = wait_with_output_timeout(child, TEST_SHORT_TIMEOUT).unwrap_err();
+            assert!(err.to_string().contains("did not exit"), "{err}");
+            assert!(started.elapsed() < Duration::from_secs(30));
+        }
+
+        /// Output larger than the OS pipe buffer must not deadlock the
+        /// wait: the child blocks on write until someone reads.
+        #[test]
+        fn drains_output_larger_than_the_pipe_buffer() {
+            let dir = tempfile::tempdir().unwrap();
+            let child = spawn_script(dir.path(), "head -c 200000 /dev/zero | tr '\\0' 'x'");
+            let started = Instant::now();
+            let output = wait_with_output_timeout(child, TEST_TIMEOUT).unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout.len(), 200000);
+            assert!(started.elapsed() < TEST_TIMEOUT);
+        }
     }
 }
