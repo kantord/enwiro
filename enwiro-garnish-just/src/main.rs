@@ -24,31 +24,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Exit 0 iff `just` recognizes a justfile under `project_dir`.
-    AppliesTo { project_dir: PathBuf },
-    /// Emit `GearFileData` JSON describing every non-private recipe.
+    /// Emit `GearFileData` JSON describing every non-private recipe, or
+    /// nothing when `just` recognizes no justfile under `project_dir`.
     Gear { project_dir: PathBuf },
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Cmd::AppliesTo { project_dir } => {
-            if applies_to(&project_dir) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
+        Cmd::Gear { project_dir } => {
+            if !applies_to(&project_dir) {
+                return ExitCode::SUCCESS;
+            }
+            match build_gear(&project_dir) {
+                Ok(data) => {
+                    serde_json::to_writer(std::io::stdout(), &data).unwrap();
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e:#}");
+                    ExitCode::FAILURE
+                }
             }
         }
-        Cmd::Gear { project_dir } => match build_gear(&project_dir) {
-            Ok(data) => {
-                serde_json::to_writer(std::io::stdout(), &data).unwrap();
-                ExitCode::SUCCESS
-            }
-            Err(e) => {
-                eprintln!("{e:#}");
-                ExitCode::FAILURE
-            }
-        },
     }
 }
 

@@ -52,10 +52,6 @@ impl PluginName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
-    pub fn gear_filename(&self) -> String {
-        format!("cookbook-{}.json", self.0)
-    }
 }
 
 impl fmt::Display for PluginName {
@@ -253,12 +249,6 @@ mod tests {
             let long = "a".repeat(243);
             assert!(PluginName::new(long).is_err());
         }
-
-        #[test]
-        fn gear_filename_produces_expected_format() {
-            let pn = PluginName::new("git").unwrap();
-            assert_eq!(pn.gear_filename(), "cookbook-git.json");
-        }
     }
 
     mod plugin_name_props {
@@ -290,14 +280,6 @@ mod tests {
                     PluginName::new(&name).is_err(),
                     "expected rejection for {:?}", name
                 );
-            }
-
-            #[test]
-            fn valid_names_produce_sanitized_gear_filenames(name in "[a-zA-Z0-9_-]{1,50}") {
-                let pn = PluginName::new(&name).unwrap();
-                let filename = pn.gear_filename();
-                let sanitized = sanitize_filename::sanitize(&filename);
-                prop_assert_eq!(&filename, &sanitized);
             }
 
             #[test]
