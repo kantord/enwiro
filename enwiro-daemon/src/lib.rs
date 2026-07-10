@@ -419,11 +419,7 @@ fn adapter_listen_source(plugin: &enwiro_sdk::plugin::Plugin) -> Option<ProcessS
             AdapterCapability::Listen => listen_source(
                 plugin.executable.clone(),
                 "adapter".to_string(),
-                vec![
-                    "listen".to_string(),
-                    "--debounce-secs".to_string(),
-                    "5".to_string(),
-                ],
+                vec!["listen".to_string()],
                 None,
             ),
         })
@@ -1031,14 +1027,7 @@ mod tests {
         );
         let source = adapter_listen_source(&adapter).expect("listen source");
         assert_eq!(source.identity.key, "adapter");
-        assert_eq!(
-            source.args,
-            vec![
-                "listen".to_string(),
-                "--debounce-secs".to_string(),
-                "5".to_string()
-            ]
-        );
+        assert_eq!(source.args, vec!["listen".to_string()]);
     }
 
     #[test]

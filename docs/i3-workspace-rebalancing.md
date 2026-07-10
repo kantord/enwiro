@@ -89,8 +89,9 @@ Triggered passively on every workspace-switch event.
 
 - Applies `STABILITY_THRESHOLD = 0.05`: small disc-gain swaps are suppressed,
   preventing churn during normal workspace switching.
-- Rate-limited by a debounce window (default 5 min); at most one rebalance per
-  window.
+- Rate-limited by a debounce window (default 5 seconds, configurable via
+  `rebalance_debounce_secs` in `adapter-i3wm.toml`); at most one rebalance
+  per window.
 - Runs a single `find_best_move` call per window — does not loop to convergence.
   Any remaining imbalance is resolved in the next window.
 

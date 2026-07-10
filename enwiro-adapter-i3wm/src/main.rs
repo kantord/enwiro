@@ -13,18 +13,19 @@ use enwiro_sdk::adapter::{
 use enwiro_sdk::cli::AdapterCore;
 use enwiro_sdk::process::ProcessSpec;
 
-#[derive(clap::Args)]
-pub struct ListenArgs {
-    #[arg(long, default_value_t = 300)]
-    pub debounce_secs: u64,
-}
-
 #[derive(Parser)]
 enum EnwiroAdapterI3WmCLI {
     #[command(flatten)]
     Core(AdapterCore),
-    Listen(ListenArgs),
+    Listen,
 }
+
+/// Minimum seconds between automatic rebalances triggered by workspace
+/// events; overridable via `rebalance_debounce_secs` in the adapter
+/// config. 5 preserves the cadence the daemon used to impose through a
+/// (since removed) `--debounce-secs 5` argv override - the old standalone
+/// default of 300 never ran in practice.
+const DEFAULT_REBALANCE_DEBOUNCE_SECS: u64 = 5;
 
 /// Best-effort parse; activate falls back to defaults so a malformed
 /// payload doesn't block the workspace switch.
@@ -100,16 +101,32 @@ fn default_web_open_command() -> Vec<String> {
 #[serde(default)]
 struct AdapterConfig {
     web_open_command: Option<Vec<String>>,
+    rebalance_debounce_secs: Option<u64>,
+}
+
+/// Parse the adapter config file, falling back to defaults when it is
+/// missing or malformed.
+fn load_adapter_config(config_path: &std::path::Path) -> AdapterConfig {
+    std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|s| toml::from_str::<AdapterConfig>(&s).ok())
+        .unwrap_or_default()
 }
 
 /// Falls back to `default_web_open_command` when the file is missing,
 /// malformed, or has no `web_open_command` field.
 fn load_web_open_command(config_path: &std::path::Path) -> Vec<String> {
-    std::fs::read_to_string(config_path)
-        .ok()
-        .and_then(|s| toml::from_str::<AdapterConfig>(&s).ok())
-        .and_then(|c| c.web_open_command)
+    load_adapter_config(config_path)
+        .web_open_command
         .unwrap_or_else(default_web_open_command)
+}
+
+fn load_rebalance_debounce(config_path: Option<&std::path::Path>) -> std::time::Duration {
+    let secs = config_path
+        .map(load_adapter_config)
+        .and_then(|c| c.rebalance_debounce_secs)
+        .unwrap_or(DEFAULT_REBALANCE_DEBOUNCE_SECS);
+    std::time::Duration::from_secs(secs)
 }
 
 /// Resolve the adapter's config path (`~/.config/enwiro/adapter-i3wm.toml`
@@ -619,12 +636,12 @@ async fn main() -> anyhow::Result<()> {
             tracing::debug!(env = %payload.env_name, command = %payload.command, "Spawning command in new terminal");
             spawn_run_in_terminal(&payload)?;
         }
-        EnwiroAdapterI3WmCLI::Listen(listen_args) => {
+        EnwiroAdapterI3WmCLI::Listen => {
             use rebalance::derive::derive;
             use rebalance::optimize::{STABILITY_THRESHOLD, optimize_single_step};
             use rebalance::types::Slot;
 
-            let debounce = std::time::Duration::from_secs(listen_args.debounce_secs);
+            let debounce = load_rebalance_debounce(adapter_config_path().as_deref());
             let mut last_rebalance: Option<std::time::Instant> = None;
             let mut i3 = I3::connect().await?;
             i3.subscribe([Subscribe::Workspace]).await?;
@@ -838,10 +855,28 @@ mod tests {
     }
 
     /// Test 6: The CLI enum has a `Listen` variant that can be constructed.
-    /// This test will fail to compile until the variant and `ListenArgs` exist.
     #[test]
     fn test_cli_has_listen_variant() {
-        let _ = EnwiroAdapterI3WmCLI::Listen(ListenArgs { debounce_secs: 300 });
+        let _ = EnwiroAdapterI3WmCLI::Listen;
+    }
+
+    #[test]
+    fn rebalance_debounce_defaults_without_config() {
+        assert_eq!(
+            load_rebalance_debounce(None),
+            std::time::Duration::from_secs(DEFAULT_REBALANCE_DEBOUNCE_SECS)
+        );
+    }
+
+    #[test]
+    fn rebalance_debounce_reads_adapter_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter-i3wm.toml");
+        std::fs::write(&path, "rebalance_debounce_secs = 120\n").unwrap();
+        assert_eq!(
+            load_rebalance_debounce(Some(&path)),
+            std::time::Duration::from_secs(120)
+        );
     }
 
     // ── should_rebalance tests ────────────────────────────────────────────────

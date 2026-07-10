@@ -20,12 +20,8 @@ use crate::metadata::{Capability, DeclaredCapabilities};
 /// kind's base contract and are never declared here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterCapability {
-    /// The daemon spawns and supervises the adapter's `listen` subcommand,
-    /// which emits workspace-switch events on stdout. Declaring this
-    /// commits the adapter to accepting a `--debounce-secs <seconds>` flag
-    /// on `listen`: the daemon always passes it, and an adapter that
-    /// rejects the flag would exit on a usage error and be crash-looped by
-    /// the process pool.
+    /// The daemon spawns and supervises the adapter's `listen` subcommand
+    /// (no arguments), which emits workspace-switch events on stdout.
     Listen,
 }
 

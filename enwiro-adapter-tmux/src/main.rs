@@ -10,14 +10,12 @@ use std::os::unix::process::CommandExt;
 enum EnwiroAdapterTmuxCli {
     #[command(flatten)]
     Core(AdapterCore),
-    Listen(ListenArgs),
+    Listen,
 }
 
-#[derive(clap::Args)]
-pub struct ListenArgs {
-    #[arg(long, default_value = "5")]
-    pub debounce_secs: u64,
-}
+/// How often `listen` polls tmux for the current session. tmux has no
+/// event push, so this bounds switch-detection latency.
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 fn validate_session_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() {
@@ -136,8 +134,8 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
-        EnwiroAdapterTmuxCli::Listen(listen_args) => {
-            listen(listen_args.debounce_secs)?;
+        EnwiroAdapterTmuxCli::Listen => {
+            listen(SESSION_POLL_INTERVAL)?;
         }
         EnwiroAdapterTmuxCli::Core(AdapterCore::Activate(activate_args)) => {
             let name = &activate_args.name;
@@ -181,8 +179,7 @@ fn unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
-fn listen(debounce_secs: u64) -> anyhow::Result<()> {
-    let interval = Duration::from_secs(debounce_secs);
+fn listen(interval: Duration) -> anyhow::Result<()> {
     let mut last_session: Option<String> = None;
 
     loop {
