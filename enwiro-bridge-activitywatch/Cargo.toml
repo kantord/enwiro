@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-bridge-activitywatch"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "ActivityWatch bridge for enwiro: reports the active enwiro env as aw-server heartbeats"
 license = "GPL-3.0-or-later"
