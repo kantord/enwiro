@@ -331,6 +331,28 @@ fn listen_source(
     }
 }
 
+/// Run `probe` against every plugin concurrently, one thread each, and
+/// return the results in input order. Each metadata probe can block for
+/// its full timeout on a broken plugin, so probing serially would make
+/// worst-case daemon startup degrade linearly with the number of
+/// installed plugins; concurrently it is bounded by the slowest single
+/// probe.
+fn probe_concurrently<T: Send>(
+    plugins: Vec<enwiro_sdk::plugin::Plugin>,
+    probe: impl Fn(enwiro_sdk::plugin::Plugin) -> T + Sync,
+) -> Vec<T> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = plugins
+            .into_iter()
+            .map(|plugin| scope.spawn(|| probe(plugin)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("metadata probe thread panicked"))
+            .collect()
+    })
+}
+
 /// Process sources for bridges that declare the `listen` capability in
 /// their `metadata` output. Bridges that don't (probe failure, timeout,
 /// no recognized capability) are left alone. The match is exhaustive on
@@ -339,9 +361,12 @@ fn listen_source(
 fn bridge_listen_sources(
     bridges: impl IntoIterator<Item = enwiro_sdk::plugin::Plugin>,
 ) -> Vec<ProcessSource> {
-    let mut sources = Vec::new();
-    for plugin in bridges {
+    let probed = probe_concurrently(bridges.into_iter().collect(), |plugin| {
         let metadata = enwiro_sdk::bridge::fetch_bridge_metadata(&plugin.executable);
+        (plugin, metadata)
+    });
+    let mut sources = Vec::new();
+    for (plugin, metadata) in probed {
         let recognized: Vec<BridgeCapability> = metadata.capabilities.recognized().collect();
         if recognized.is_empty() {
             tracing::debug!(bridge = %plugin.name, "Bridge declares no recognized capabilities, leaving it alone");
@@ -371,11 +396,19 @@ fn cookbook_sources(
     cookbooks: impl IntoIterator<Item = enwiro_sdk::plugin::Plugin>,
     recipe_state: &mut HashMap<String, CookbookEntry>,
 ) -> Vec<ProcessSource> {
-    let mut sources = Vec::new();
-    for plugin in cookbooks {
+    // Client construction runs the metadata probe subprocess; parallelize
+    // it, then do the (cheap, shared-state) registration serially.
+    let clients = probe_concurrently(cookbooks.into_iter().collect(), |plugin| {
         let name = plugin.name.to_string();
         let executable = plugin.executable.clone();
-        let client = CookbookClient::new_user_level_only(plugin);
+        (
+            name,
+            executable,
+            CookbookClient::new_user_level_only(plugin),
+        )
+    });
+    let mut sources = Vec::new();
+    for (name, executable, client) in clients {
         recipe_state.insert(
             name.clone(),
             CookbookEntry {

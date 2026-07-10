@@ -36,6 +36,13 @@ not valid metadata JSON, or does not exit within a few seconds, the daemon
 leaves the bridge alone. A bridge like `enwiro-bridge-rofi`, which is invoked
 by rofi and needs no background process, simply prints `{}`.
 
+Because this is a probe, the daemon **invokes your binary with `metadata`
+at startup whether or not you implement it**. Your binary should therefore
+exit non-zero promptly on any unrecognized subcommand, rather than falling
+back to its normal behavior. A bridge with a non-argv-dispatched mode
+(like rofi's script protocol) should answer `metadata` before its normal
+dispatch, exactly as `enwiro-bridge-rofi` does.
+
 ## The `listen` Capability
 
 Declaring `listen` tells the daemon this bridge wants to run as a
