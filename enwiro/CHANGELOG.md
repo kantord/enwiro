@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.58](https://github.com/kantord/enwiro/compare/enwiro-v0.3.57...enwiro-v0.3.58) - 2026-07-10
+
+### Added
+
+- allow cooking recipes that cannot be listed ([#719](https://github.com/kantord/enwiro/pull/719))
+
 ## [0.3.57](https://github.com/kantord/enwiro/compare/enwiro-v0.3.56...enwiro-v0.3.57) - 2026-07-08
 
 ### Fixed

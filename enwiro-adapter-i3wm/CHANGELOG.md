@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.38](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.37...enwiro-adapter-i3wm-v0.1.38) - 2026-07-10
+
+### Other
+
+- updated the following local packages: enwiro-sdk
+
 ## [0.1.37](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.36...enwiro-adapter-i3wm-v0.1.37) - 2026-07-08
 
 ### Other

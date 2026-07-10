@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.20](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.19...enwiro-daemon-v0.0.20) - 2026-07-10
+
+### Added
+
+- allow microvms to use up to half of system ram ([#730](https://github.com/kantord/enwiro/pull/730))
+- seed git identity in containers ([#727](https://github.com/kantord/enwiro/pull/727))
+- allow cooking recipes that cannot be listed ([#719](https://github.com/kantord/enwiro/pull/719))
+
 ## [0.0.19](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.18...enwiro-daemon-v0.0.19) - 2026-07-08
 
 ### Fixed
