@@ -151,6 +151,14 @@ Print a JSON object to stdout describing your cookbook. This subcommand is
 recognize the command, or doesn't answer within a few seconds), enwiro uses
 sensible defaults.
 
+Because this is a probe, enwiro **will invoke your binary with `metadata`
+whether or not you implement it** (and may do the same with other
+subcommands you don't implement, like `gear`). Your binary should therefore
+exit non-zero promptly on any unrecognized subcommand, rather than falling
+back to its normal behavior. Standard argument parsers (clap, argparse, a
+shell `case` with a `*)` arm) already behave this way, so most cookbooks
+need no extra work to satisfy this.
+
 ```json
 {"defaultPriority": 40, "capabilities": [{"name": "listen"}]}
 ```

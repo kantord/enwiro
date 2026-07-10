@@ -155,6 +155,13 @@ non-zero exit, no answer within a few seconds) as "no capabilities" - but
 without it, the daemon will not spawn your [`listen`](#listen) subcommand
 and switch events stay off.
 
+Because this is a probe, the daemon **invokes your binary with `metadata`
+at startup whether or not you implement it**. Your binary should therefore
+exit non-zero promptly on any unrecognized subcommand, rather than falling
+back to its normal behavior. Standard argument parsers (clap, argparse, a
+shell `case` with a `*)` arm) already behave this way, so most adapters
+need no extra work to satisfy this.
+
 ### `listen`
 
 ```
