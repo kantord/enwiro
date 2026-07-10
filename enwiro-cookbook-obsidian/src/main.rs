@@ -177,19 +177,10 @@ fn gear_from_json<W: std::io::Write>(
 
 #[derive(Parser)]
 enum EnwiroCookbookObsidian {
-    ListRecipes(ListRecipesArgs),
-    Cook(CookArgs),
+    #[command(flatten)]
+    Core(enwiro_sdk::cli::CookbookCore),
     Gear(GearArgs),
-    Metadata,
     Listen,
-}
-
-#[derive(clap::Args)]
-pub struct ListRecipesArgs {}
-
-#[derive(clap::Args)]
-pub struct CookArgs {
-    recipe_name: String,
 }
 
 #[derive(clap::Args)]
@@ -247,14 +238,18 @@ fn main() -> Result<()> {
 
     let args = EnwiroCookbookObsidian::parse();
 
+    use enwiro_sdk::cli::CookbookCore;
     match args {
-        EnwiroCookbookObsidian::ListRecipes(_) => cmd_list_recipes()?,
-        EnwiroCookbookObsidian::Cook(a) => cmd_cook(&a.recipe_name)?,
+        EnwiroCookbookObsidian::Core(CookbookCore::ListRecipes(_)) => cmd_list_recipes()?,
+        EnwiroCookbookObsidian::Core(CookbookCore::Cook(a)) => cmd_cook(&a.recipe_name)?,
         EnwiroCookbookObsidian::Gear(a) => cmd_gear(&a.recipe_name)?,
-        EnwiroCookbookObsidian::Metadata => {
+        EnwiroCookbookObsidian::Core(CookbookCore::Metadata) => {
             println!(
                 "{}",
                 CookbookMetadata {
+                    capabilities: enwiro_sdk::metadata::DeclaredCapabilities::declare([
+                        enwiro_sdk::cookbook::CookbookCapability::Listen,
+                    ]),
                     default_priority: Some(DEFAULT_PRIORITY),
                     project_overridable: vec![],
                 }

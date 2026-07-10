@@ -11,7 +11,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
-enwiro-sdk.workspace = true
+enwiro-sdk = { workspace = true, features = ["cli"] }
 i3ipc-types = "0.16.0"
 optative = "0.1.1"
 serde = { version = "1", features = ["derive"] }

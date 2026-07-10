@@ -13,6 +13,60 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::gear::Gear;
+use crate::metadata::{Capability, DeclaredCapabilities};
+
+/// The capabilities an adapter is allowed to declare. Required subcommands
+/// (`get-active-workspace-id`, `activate`, `run`, `metadata`) are the
+/// kind's base contract and are never declared here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdapterCapability {
+    /// The daemon spawns and supervises the adapter's `listen` subcommand
+    /// (no arguments), which emits workspace-switch events on stdout.
+    Listen,
+}
+
+impl Capability for AdapterCapability {
+    const ALL: &'static [Self] = &[AdapterCapability::Listen];
+
+    fn wire_name(self) -> &'static str {
+        match self {
+            AdapterCapability::Listen => "listen",
+        }
+    }
+}
+
+/// Stdout of the adapter's `metadata` subcommand - the shared
+/// plugin-metadata convention (see [`crate::metadata`]). Adapters that
+/// predate the convention probe to the default (no capabilities) and are
+/// simply left alone by the daemon.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AdapterMetadata {
+    #[serde(skip_serializing_if = "DeclaredCapabilities::is_empty")]
+    pub capabilities: DeclaredCapabilities,
+}
+
+impl AdapterMetadata {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("AdapterMetadata is always serializable")
+    }
+
+    pub fn with_capabilities(capabilities: impl IntoIterator<Item = AdapterCapability>) -> Self {
+        Self {
+            capabilities: DeclaredCapabilities::declare(capabilities),
+        }
+    }
+
+    pub fn has(&self, capability: AdapterCapability) -> bool {
+        self.capabilities.has(capability)
+    }
+}
+
+/// Run `<adapter> metadata` and parse its stdout. Best-effort: any failure
+/// yields the default metadata (no capabilities).
+pub fn fetch_adapter_metadata(executable: &str) -> AdapterMetadata {
+    crate::metadata::fetch_metadata(executable)
+}
 
 /// Wire format version. Bumped when `ActivatePayload` shape changes in a
 /// backward-incompatible way; adapters can match on `payload.version` to
@@ -100,5 +154,28 @@ impl RunPayload {
             .read_to_string(&mut buf)
             .context("Could not read run payload from stdin")?;
         serde_json::from_str(&buf).context("Could not parse run payload as JSON")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_roundtrips_and_answers_has() {
+        let metadata = AdapterMetadata::with_capabilities([AdapterCapability::Listen]);
+        assert_eq!(
+            metadata.to_json(),
+            r#"{"capabilities":[{"name":"listen"}]}"#
+        );
+        let parsed: AdapterMetadata = serde_json::from_str(&metadata.to_json()).unwrap();
+        assert!(parsed.has(AdapterCapability::Listen));
+    }
+
+    #[test]
+    fn default_metadata_serializes_to_empty_object_and_declares_nothing() {
+        let metadata = AdapterMetadata::default();
+        assert_eq!(metadata.to_json(), "{}");
+        assert!(!metadata.has(AdapterCapability::Listen));
     }
 }

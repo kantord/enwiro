@@ -196,6 +196,13 @@ impl CookbookClient {
         &self.config
     }
 
+    /// The cookbook's probed metadata. Used by the daemon to gate
+    /// capability-specific behavior (e.g. spawning `listen`) on what the
+    /// cookbook actually declares.
+    pub fn metadata(&self) -> &CookbookMetadata {
+        &self.metadata
+    }
+
     #[cfg(test)]
     fn with_metadata(plugin: Plugin, metadata: CookbookMetadata) -> Self {
         Self::with_metadata_and_config(
@@ -219,25 +226,7 @@ impl CookbookClient {
     }
 
     pub(crate) fn fetch_metadata(executable: &str) -> CookbookMetadata {
-        let result = (|| -> anyhow::Result<CookbookMetadata> {
-            let output = Command::new(executable)
-                .arg("metadata")
-                .output()
-                .context("Failed to run cookbook metadata command")?;
-            if !output.status.success() {
-                bail!("Cookbook does not support metadata subcommand");
-            }
-            let stdout = String::from_utf8(output.stdout)
-                .context("Cookbook metadata produced invalid UTF-8")?;
-            CookbookMetadata::from_json(&stdout)
-        })();
-        match result {
-            Ok(meta) => meta,
-            Err(e) => {
-                tracing::debug!(error = %e, "Could not fetch cookbook metadata, using defaults");
-                CookbookMetadata::default()
-            }
-        }
+        crate::metadata::fetch_metadata(executable)
     }
 
     /// Spawn the cookbook with the given subcommand args, write the
@@ -550,7 +539,7 @@ mod tests {
             mock_plugin("git"),
             CookbookMetadata {
                 default_priority: Some(10),
-                project_overridable: vec![],
+                ..Default::default()
             },
         );
         assert_eq!(client.priority(), 10);
@@ -684,6 +673,7 @@ echo "$payload"
         let metadata = CookbookMetadata {
             default_priority: Some(99),
             project_overridable: vec!["repo_globs".to_string()],
+            ..Default::default()
         };
         let plugin = Plugin {
             name: crate::plugin::PluginName::new("fake").unwrap(),

@@ -36,7 +36,9 @@ adapter = "sway"
 
 ## Subcommands
 
-Your adapter binary must handle four subcommands passed as the first argument.
+Your adapter binary must handle three required subcommands passed as the
+first argument (`get-active-workspace-id`, `activate`, `run`), plus the
+optional `metadata` and `listen` pair for daemon-driven switch events.
 
 ### `get-active-workspace-id`
 
@@ -133,15 +135,36 @@ a new tmux window (tmux), or any other mechanism appropriate for the platform.
 Exit with code 0 on success. On failure, exit non-zero and write an error
 message to stderr.
 
+### `metadata`
+
+```
+enwiro-adapter-yourname metadata
+```
+
+Print a JSON object to stdout declaring the adapter's optional capabilities -
+the same plugin-metadata convention cookbooks and bridges follow:
+
+```json
+{"capabilities": [{"name": "listen"}]}
+```
+
+Each entry is an object with a `name` (so future capabilities can carry
+parameters); names the host doesn't recognize are ignored. The subcommand is
+optional in the sense that the daemon treats any failure (unknown command,
+non-zero exit, no answer within a few seconds) as "no capabilities" - but
+without it, the daemon will not spawn your [`listen`](#listen) subcommand
+and switch events stay off.
+
 ### `listen`
 
 ```
 enwiro-adapter-yourname listen
 ```
 
-Start a long-running process that emits workspace-switch events to stdout as
-JSON lines (one JSON object per line). The daemon reads these events to track
-which environment is currently active.
+**Declare the `listen` capability in your [`metadata`](#metadata) output, or
+the daemon will not spawn this.** Start a long-running process that emits
+workspace-switch events to stdout as JSON lines (one JSON object per line).
+The daemon reads these events to track which environment is currently active.
 
 Each event must have this shape:
 
@@ -159,9 +182,11 @@ The adapter should emit an event whenever the user switches workspaces or
 sessions. How you detect switches depends on your platform: i3/sway provide
 IPC event subscriptions, tmux requires polling.
 
-The `listen` subcommand may accept a `--debounce-secs` flag to control how
-often events are emitted. This is optional but recommended for adapters that
-poll.
+The daemon spawns `listen` with no arguments. Rate limiting is the
+adapter's own business: emit events promptly (within a few seconds of a
+switch, so activity tracking stays accurate), and if any internal cadence
+is worth tuning, read it from your adapter's own config file rather than
+argv (see `rebalance_debounce_secs` in the i3wm adapter for an example).
 
 The daemon terminates the listen process when it shuts down.
 
@@ -248,6 +273,10 @@ case "${1:-}" in
         cd "$env_path"
         ENWIRO_ENV="$env_name" exec "$command" $args
         ;;
+    metadata)
+        # Declare optional capabilities so the daemon spawns `listen`
+        echo '{"capabilities":[{"name":"listen"}]}'
+        ;;
     listen)
         # Emit workspace switch events as JSON lines
         # In practice, subscribe to your WM's event stream
@@ -292,9 +321,12 @@ When a user runs `enw run <command>`:
 
 When the enwiro daemon starts:
 
-1. It spawns the adapter's `listen` subcommand as a long-running child process.
-2. It reads workspace-switch events from the adapter's stdout.
-3. These events are used for activity tracking.
+1. It probes the configured adapter with `metadata`.
+2. If the adapter declares the `listen` capability, the daemon spawns its
+   `listen` subcommand as a long-running child process; otherwise the adapter
+   is left alone and switch events are disabled.
+3. It reads workspace-switch events from the adapter's stdout. These events
+   are used for activity tracking.
 
 ## Tips
 

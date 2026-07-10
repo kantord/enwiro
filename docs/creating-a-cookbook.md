@@ -147,14 +147,20 @@ enwiro-cookbook-yourname metadata
 ```
 
 Print a JSON object to stdout describing your cookbook. This subcommand is
-**optional** - if your binary doesn't support it (exits non-zero or doesn't
-recognize the command), enwiro uses sensible defaults.
-
-Currently the only field is `defaultPriority`:
+**optional** - if your binary doesn't support it (exits non-zero, doesn't
+recognize the command, or doesn't answer within a few seconds), enwiro uses
+sensible defaults.
 
 ```json
-{"defaultPriority": 40}
+{"defaultPriority": 40, "capabilities": [{"name": "listen"}]}
 ```
+
+**Capabilities** declare the optional subcommands your cookbook implements,
+so the daemon never invokes an ability your binary doesn't have. Each entry
+is an object with a `name` (so future capabilities can carry parameters);
+names the host doesn't recognize are ignored. The only cookbook capability
+today is `listen`: the daemon spawns and supervises your
+[`listen`](#listen) subcommand **only if you declare it here**.
 
 **Priority** controls the order your cookbook's recipes appear relative to other
 cookbooks. Lower numbers appear first. If omitted, the default priority is 50.
@@ -180,8 +186,11 @@ fields for forward compatibility.
 enwiro-cookbook-yourname listen
 ```
 
-**Optional.** A long-running subcommand: instead of exiting, your binary stays
-running and the daemon reads newline-delimited JSON from its stdout. Use it to
+**Optional.** Declare it via the `listen` capability in your
+[`metadata`](#metadata) output, or the daemon will leave your cookbook
+alone and never spawn it. A long-running subcommand: instead of exiting,
+your binary stays running and the daemon reads newline-delimited JSON from
+its stdout. Use it to
 keep enwiro up to date when things change in the background - a repo gets a new
 branch, a pull request is merged, and so on. Print an update line whenever
 something changes, then go back to sleep. Each line is one of two kinds:
@@ -381,8 +390,9 @@ when it applies, but subprocess delegation is the option that always works.
   worktree, or do other setup work - the user expects to wait.
 - **Idempotent cooking.** If `cook` is called for a recipe that was already
   cooked, just return the existing path. Don't fail or recreate.
-- **Don't worry about metadata.** If you skip the `metadata` subcommand
-  entirely, your cookbook will still work - it just gets the default priority of
-  50.
+- **Metadata is optional until you need `listen`.** If you skip the
+  `metadata` subcommand entirely, your cookbook still works - it just gets
+  the default priority of 50 and declares no capabilities, so the daemon
+  won't spawn a `listen` subprocess for it.
 - **Recipe names are identifiers.** Users type them (e.g., `enw activate
   my-project`), so keep them short and filesystem-friendly. Avoid spaces.

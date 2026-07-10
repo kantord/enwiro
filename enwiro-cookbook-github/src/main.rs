@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
+use enwiro_sdk::cli::{CookArgs, CookbookCore};
+use enwiro_sdk::cookbook::CookbookCapability;
+use enwiro_sdk::metadata::DeclaredCapabilities;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 use serde_derive::{Deserialize, Serialize};
 
@@ -47,20 +50,11 @@ pub struct GithubItem {
 
 #[derive(Parser)]
 enum EnwiroCookbookGithub {
-    ListRecipes(ListRecipesArgs),
-    Cook(CookArgs),
+    #[command(flatten)]
+    Core(CookbookCore),
     Gear(GearArgs),
     ExternalPaths(ExternalPathsArgs),
-    Metadata,
     Listen,
-}
-
-#[derive(clap::Args)]
-pub struct ListRecipesArgs {}
-
-#[derive(clap::Args)]
-pub struct CookArgs {
-    recipe_name: String,
 }
 
 #[derive(clap::Args)]
@@ -1818,10 +1812,10 @@ fn main() -> anyhow::Result<()> {
     let args = EnwiroCookbookGithub::parse();
 
     match args {
-        EnwiroCookbookGithub::ListRecipes(_) => {
+        EnwiroCookbookGithub::Core(CookbookCore::ListRecipes(_)) => {
             list_recipes()?;
         }
-        EnwiroCookbookGithub::Cook(args) => {
+        EnwiroCookbookGithub::Core(CookbookCore::Cook(args)) => {
             let config = read_config()?;
             cook(&config, args)?;
         }
@@ -1832,10 +1826,11 @@ fn main() -> anyhow::Result<()> {
         EnwiroCookbookGithub::ExternalPaths(args) => {
             external_paths(args)?;
         }
-        EnwiroCookbookGithub::Metadata => {
+        EnwiroCookbookGithub::Core(CookbookCore::Metadata) => {
             println!(
                 "{}",
                 CookbookMetadata {
+                    capabilities: DeclaredCapabilities::declare([CookbookCapability::Listen]),
                     default_priority: Some(30),
                     project_overridable: vec![],
                 }

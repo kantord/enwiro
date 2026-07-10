@@ -3,6 +3,9 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::Parser;
+use enwiro_sdk::cli::{CookArgs, CookbookCore};
+use enwiro_sdk::cookbook::CookbookCapability;
+use enwiro_sdk::metadata::DeclaredCapabilities;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, Recipe};
 
 const RECIPE_NAME: &str = "chezmoi";
@@ -10,18 +13,9 @@ const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Parser)]
 enum EnwiroCookbookChezmoi {
-    ListRecipes(ListRecipesArgs),
-    Cook(CookArgs),
-    Metadata,
+    #[command(flatten)]
+    Core(CookbookCore),
     Listen,
-}
-
-#[derive(clap::Args)]
-pub struct ListRecipesArgs {}
-
-#[derive(clap::Args)]
-pub struct CookArgs {
-    recipe_name: String,
 }
 
 fn list_recipes() {
@@ -59,16 +53,17 @@ fn main() -> anyhow::Result<()> {
     let args = EnwiroCookbookChezmoi::parse();
 
     match args {
-        EnwiroCookbookChezmoi::ListRecipes(_) => {
+        EnwiroCookbookChezmoi::Core(CookbookCore::ListRecipes(_)) => {
             list_recipes();
         }
-        EnwiroCookbookChezmoi::Cook(args) => {
+        EnwiroCookbookChezmoi::Core(CookbookCore::Cook(args)) => {
             cook(args)?;
         }
-        EnwiroCookbookChezmoi::Metadata => {
+        EnwiroCookbookChezmoi::Core(CookbookCore::Metadata) => {
             println!(
                 "{}",
                 CookbookMetadata {
+                    capabilities: DeclaredCapabilities::declare([CookbookCapability::Listen]),
                     default_priority: Some(20),
                     project_overridable: vec![],
                 }

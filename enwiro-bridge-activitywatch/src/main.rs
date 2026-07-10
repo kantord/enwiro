@@ -198,7 +198,7 @@ async fn main() -> Result<()> {
     match args.get(1).map(String::as_str) {
         Some("metadata") => {
             let metadata = enwiro_sdk::bridge::BridgeMetadata::with_capabilities([
-                enwiro_sdk::bridge::LISTEN_CAPABILITY,
+                enwiro_sdk::bridge::BridgeCapability::Listen,
             ]);
             println!("{}", metadata.to_json());
             Ok(())

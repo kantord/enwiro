@@ -25,24 +25,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Exits 0 when the project at `project_dir` is a git repo with at
-    /// least one submodule configured. Any other case (not a git repo,
-    /// bare repo, no submodules) exits 1.
-    AppliesTo { project_dir: PathBuf },
-    /// Emit `GearFileData` JSON describing the init-submodules gear.
+    /// Emit `GearFileData` JSON describing the init-submodules gear, or
+    /// nothing unless the project at `project_dir` is a git repo with at
+    /// least one submodule configured.
     Gear { project_dir: PathBuf },
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Cmd::AppliesTo { project_dir } => {
-            if applies_to(&project_dir) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
+        Cmd::Gear { project_dir } => {
+            if !applies_to(&project_dir) {
+                return ExitCode::SUCCESS;
             }
-        }
-        Cmd::Gear { project_dir: _ } => {
             serde_json::to_writer(std::io::stdout(), &build_gear()).unwrap();
             ExitCode::SUCCESS
         }

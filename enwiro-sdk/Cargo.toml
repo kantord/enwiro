@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+clap = { version = "4.5.4", features = ["derive"], optional = true }
 config = { version = "0.15", default-features = false, features = ["toml"] }
 dirs = "6"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
@@ -33,6 +34,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [features]
 test-helpers = []
+# Clap building blocks for Rust plugin binaries: per-kind core subcommand
+# enums that make a kind's required surface a compile-time guarantee.
+# Optional so non-plugin consumers (daemon, GUI) don't link clap via the SDK.
+cli = ["dep:clap"]
 # Shared git2-based helpers for cookbooks that operate on local repos.
 # Optional so plugins that don't need libgit2 don't link it.
 git = ["dep:git2"]

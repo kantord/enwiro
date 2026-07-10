@@ -36,6 +36,16 @@ web_open_command = ["firefox", "--new-window", "{url}"]
 The `{url}` placeholder is replaced with the actual URL. The first element is
 the browser command; remaining elements are arguments.
 
+### Rebalance rate limit
+
+Automatic [workspace rebalancing](#workspace-rebalancing) runs at most once
+per debounce window (default: 5 seconds). To change it, set
+`rebalance_debounce_secs` in the same `adapter-i3wm.toml`:
+
+```toml
+rebalance_debounce_secs = 120
+```
+
 ## Features
 
 ### Workspace activation
@@ -52,7 +62,8 @@ environment's slot score. This keeps frequently used environments on
 lower-numbered (more accessible) workspaces. The rebalancing algorithm
 minimizes the number of workspace moves, so your keyboard shortcuts stay stable
 as much as possible. Rebalancing runs on workspace switch events, rate-limited
-by a configurable debounce interval.
+by a configurable debounce interval (`rebalance_debounce_secs`, see
+[Configuration](#rebalance-rate-limit)).
 
 ### Running commands
 

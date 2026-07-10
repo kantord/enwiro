@@ -118,26 +118,6 @@ fn garnish_name_uses_plugin_name() {
 }
 
 #[test]
-fn garnish_applies_to_true_when_binary_exits_zero() {
-    let (_dir, bin) = install_fixture(
-        "enwiro-garnish-just",
-        &json!({ "applies-to": { "exit": 0 } }),
-    );
-    let client = GarnishClient::new(garnish_plugin("just", &bin));
-    assert!(client.applies_to(Path::new("/tmp")));
-}
-
-#[test]
-fn garnish_applies_to_false_when_binary_exits_nonzero() {
-    let (_dir, bin) = install_fixture(
-        "enwiro-garnish-just",
-        &json!({ "applies-to": { "exit": 1 } }),
-    );
-    let client = GarnishClient::new(garnish_plugin("just", &bin));
-    assert!(!client.applies_to(Path::new("/tmp")));
-}
-
-#[test]
 fn garnish_gear_parses_stdout_as_gearfiledata() {
     let body = r#"{"version":1,"gear":{"just":{"description":"x"}}}"#;
     let (_dir, bin) = install_fixture(
