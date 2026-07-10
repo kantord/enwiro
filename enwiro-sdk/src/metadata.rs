@@ -31,12 +31,20 @@ use serde::{Deserialize, Serialize};
 /// the enum's variants are the full set of capabilities plugins of that kind
 /// are allowed to declare.
 pub trait Capability: Copy + 'static {
+    /// Every variant of the implementing enum. Powers the provided
+    /// [`Self::from_wire_name`], so the wire name of each capability is
+    /// written exactly once (in [`Self::wire_name`]) and the reverse
+    /// mapping cannot drift.
+    const ALL: &'static [Self];
+
     /// The capability's name on the wire, e.g. `"listen"`.
     fn wire_name(self) -> &'static str;
 
     /// Reverse of [`Self::wire_name`]. `None` for names this kind does not
     /// recognize - callers drop those for forward compatibility.
-    fn from_wire_name(name: &str) -> Option<Self>;
+    fn from_wire_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|c| c.wire_name() == name)
+    }
 }
 
 /// One declared capability as it appears on the wire. An object rather than
@@ -86,8 +94,10 @@ impl DeclaredCapabilities {
 /// gives up and treats it as declaring nothing.
 pub const METADATA_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Poll cadence while waiting for the probed plugin to exit.
-const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Poll cadence while waiting for the probed plugin to exit. Small because
+/// the interval is pure added latency on every probe (the CLI probes each
+/// cookbook per invocation); a try_wait every 5ms is still negligible CPU.
+const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// How many times to retry a spawn that fails with ETXTBSY, and how long
 /// to wait between attempts. A process forked concurrently (e.g. by another
@@ -143,6 +153,17 @@ fn probe_metadata<T: DeserializeOwned>(executable: &str, timeout: Duration) -> a
     let mut child = spawn_probe(executable)
         .map_err(|e| anyhow::anyhow!("Failed to spawn plugin metadata command: {e}"))?;
 
+    // Drain stdout on a separate thread while waiting for exit: a child
+    // whose output exceeds the OS pipe buffer blocks on write and would
+    // otherwise never exit, turning every chatty plugin into a guaranteed
+    // timeout + kill.
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let reader = std::thread::spawn(move || {
+        let mut stdout = String::new();
+        let read_result = stdout_pipe.read_to_string(&mut stdout);
+        read_result.map(|_| stdout)
+    });
+
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -161,17 +182,15 @@ fn probe_metadata<T: DeserializeOwned>(executable: &str, timeout: Duration) -> a
         }
     };
 
+    // The child has exited (its stdout is at EOF), so the join is prompt.
+    let stdout = reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("Plugin metadata reader thread panicked"))?
+        .map_err(|e| anyhow::anyhow!("Plugin metadata produced unreadable output: {e}"))?;
+
     if !status.success() {
         anyhow::bail!("Plugin metadata command exited with {status}");
     }
-
-    let mut stdout = String::new();
-    child
-        .stdout
-        .take()
-        .expect("stdout was piped")
-        .read_to_string(&mut stdout)
-        .map_err(|e| anyhow::anyhow!("Plugin metadata produced unreadable output: {e}"))?;
 
     serde_json::from_str(&stdout)
         .map_err(|e| anyhow::anyhow!("Failed to parse plugin metadata: {e}"))
@@ -189,16 +208,11 @@ mod tests {
     }
 
     impl Capability for TestCapability {
+        const ALL: &'static [Self] = &[TestCapability::Listen];
+
         fn wire_name(self) -> &'static str {
             match self {
                 TestCapability::Listen => "listen",
-            }
-        }
-
-        fn from_wire_name(name: &str) -> Option<Self> {
-            match name {
-                "listen" => Some(TestCapability::Listen),
-                _ => None,
             }
         }
     }
@@ -301,5 +315,29 @@ mod tests {
         let metadata: TestMetadata =
             fetch_metadata_with_timeout("/nonexistent/enwiro-plugin-x", TEST_PROBE_TIMEOUT);
         assert_eq!(metadata, TestMetadata::default());
+    }
+
+    /// Output larger than the OS pipe buffer (~64KiB on Linux) must not
+    /// deadlock the probe: the child blocks on write until someone reads,
+    /// so the probe has to drain stdout while waiting for exit.
+    #[test]
+    fn fetch_handles_metadata_larger_than_the_pipe_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let padding_kib = 256;
+        let exe = write_script(
+            dir.path(),
+            "plugin-chatty",
+            &format!(
+                r#"printf '{{"capabilities":[{{"name":"listen"}}],"padding":"'; head -c {} /dev/zero | tr '\0' 'x'; printf '"}}'"#,
+                padding_kib * 1024
+            ),
+        );
+        let started = Instant::now();
+        let metadata: TestMetadata = fetch_metadata_with_timeout(&exe, TEST_PROBE_TIMEOUT);
+        assert!(
+            metadata.capabilities.has(TestCapability::Listen),
+            "large output must still be parsed, not killed at the timeout"
+        );
+        assert!(started.elapsed() < TEST_PROBE_TIMEOUT);
     }
 }

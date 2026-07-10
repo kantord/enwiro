@@ -182,9 +182,11 @@ The adapter should emit an event whenever the user switches workspaces or
 sessions. How you detect switches depends on your platform: i3/sway provide
 IPC event subscriptions, tmux requires polling.
 
-The `listen` subcommand may accept a `--debounce-secs` flag to control how
-often events are emitted. This is optional but recommended for adapters that
-poll.
+An adapter that declares the `listen` capability **must accept a
+`--debounce-secs <seconds>` flag** - the daemon always passes
+`--debounce-secs 5` when spawning `listen`. Use the value to bound how often
+events are emitted (adapters that poll should sleep at least this long
+between emissions; event-driven adapters may use it as a coalescing window).
 
 The daemon terminates the listen process when it shuts down.
 

@@ -11,8 +11,6 @@
 //! (probe failure, timeout, unparseable output, no capability) means the
 //! bridge is left alone.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 
 use crate::metadata::{Capability, DeclaredCapabilities};
@@ -25,16 +23,11 @@ pub enum BridgeCapability {
 }
 
 impl Capability for BridgeCapability {
+    const ALL: &'static [Self] = &[BridgeCapability::Listen];
+
     fn wire_name(self) -> &'static str {
         match self {
             BridgeCapability::Listen => "listen",
-        }
-    }
-
-    fn from_wire_name(name: &str) -> Option<Self> {
-        match name {
-            "listen" => Some(BridgeCapability::Listen),
-            _ => None,
         }
     }
 }
@@ -72,10 +65,6 @@ impl BridgeMetadata {
 /// ignores the convention must simply be left alone.
 pub fn fetch_bridge_metadata(executable: &str) -> BridgeMetadata {
     crate::metadata::fetch_metadata(executable)
-}
-
-pub fn fetch_bridge_metadata_with_timeout(executable: &str, timeout: Duration) -> BridgeMetadata {
-    crate::metadata::fetch_metadata_with_timeout(executable, timeout)
 }
 
 #[cfg(test)]

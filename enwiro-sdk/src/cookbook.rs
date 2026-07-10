@@ -20,16 +20,11 @@ pub enum CookbookCapability {
 }
 
 impl Capability for CookbookCapability {
+    const ALL: &'static [Self] = &[CookbookCapability::Listen];
+
     fn wire_name(self) -> &'static str {
         match self {
             CookbookCapability::Listen => "listen",
-        }
-    }
-
-    fn from_wire_name(name: &str) -> Option<Self> {
-        match name {
-            "listen" => Some(CookbookCapability::Listen),
-            _ => None,
         }
     }
 }

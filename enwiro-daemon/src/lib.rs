@@ -314,11 +314,26 @@ const TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// never collide with a cookbook of the same name in the stream dispatch.
 const BRIDGE_KEY_PREFIX: &str = "bridge:";
 
+/// The shared shape of every supervised `listen` subprocess; only the
+/// binary, pool key, argv, and stdin payload differ per plugin kind.
+fn listen_source(
+    bin: String,
+    key: String,
+    args: Vec<String>,
+    props: Option<serde_json::Value>,
+) -> ProcessSource {
+    ProcessSource {
+        identity: ProcessIdentity { bin, key },
+        args,
+        env: Default::default(),
+        current_dir: None,
+        props,
+    }
+}
+
 /// Process sources for bridges that declare the `listen` capability in
 /// their `metadata` output. Bridges that don't (probe failure, timeout,
-/// no capability) are left alone.
-///
-/// Like every capability dispatch in this file, the match is exhaustive on
+/// no recognized capability) are left alone. The match is exhaustive on
 /// the kind's capability enum: a capability added to the SDK won't compile
 /// here until the daemon decides how to handle it.
 fn bridge_listen_sources(
@@ -327,23 +342,20 @@ fn bridge_listen_sources(
     let mut sources = Vec::new();
     for plugin in bridges {
         let metadata = enwiro_sdk::bridge::fetch_bridge_metadata(&plugin.executable);
-        if metadata.capabilities.is_empty() {
-            tracing::debug!(bridge = %plugin.name, "Bridge declares no capabilities, leaving it alone");
+        let recognized: Vec<BridgeCapability> = metadata.capabilities.recognized().collect();
+        if recognized.is_empty() {
+            tracing::debug!(bridge = %plugin.name, "Bridge declares no recognized capabilities, leaving it alone");
         }
-        for capability in metadata.capabilities.recognized() {
+        for capability in recognized {
             match capability {
                 BridgeCapability::Listen => {
                     tracing::info!(bridge = %plugin.name, "Bridge declares listen capability, autostarting");
-                    sources.push(ProcessSource {
-                        identity: ProcessIdentity {
-                            bin: plugin.executable.clone(),
-                            key: format!("{BRIDGE_KEY_PREFIX}{}", plugin.name),
-                        },
-                        args: vec!["listen".to_string()],
-                        env: Default::default(),
-                        current_dir: None,
-                        props: None,
-                    });
+                    sources.push(listen_source(
+                        plugin.executable.clone(),
+                        format!("{BRIDGE_KEY_PREFIX}{}", plugin.name),
+                        vec!["listen".to_string()],
+                        None,
+                    ));
                 }
             }
         }
@@ -354,9 +366,7 @@ fn bridge_listen_sources(
 /// Register every cookbook in the recipe state and return listen sources
 /// for the ones that declare the `listen` capability. A cookbook without
 /// it is still a full citizen for RPC-driven subcommands (`cook`, `gear`,
-/// ...) - the daemon just doesn't spawn anything for it, instead of the
-/// old behavior of blindly spawning `listen` and crash-looping plugins
-/// that never had the subcommand.
+/// ...) - the daemon just doesn't spawn anything for it.
 fn cookbook_sources(
     cookbooks: impl IntoIterator<Item = enwiro_sdk::plugin::Plugin>,
     recipe_state: &mut HashMap<String, CookbookEntry>,
@@ -373,24 +383,22 @@ fn cookbook_sources(
                 recipes: Vec::new(),
             },
         );
-        if client.metadata().capabilities.is_empty() {
-            tracing::debug!(cookbook = %name, "Cookbook declares no capabilities, not spawning listen");
+        let recognized: Vec<CookbookCapability> =
+            client.metadata().capabilities.recognized().collect();
+        if recognized.is_empty() {
+            tracing::debug!(cookbook = %name, "Cookbook declares no recognized capabilities, not spawning listen");
         }
-        for capability in client.metadata().capabilities.recognized() {
+        for capability in recognized {
             match capability {
                 CookbookCapability::Listen => {
                     tracing::info!(cookbook = %name, "Cookbook declares listen capability, autostarting");
                     let payload = CookbookPayload::new(client.config().clone());
-                    sources.push(ProcessSource {
-                        identity: ProcessIdentity {
-                            bin: executable.clone(),
-                            key: name.clone(),
-                        },
-                        args: vec!["listen".to_string()],
-                        env: Default::default(),
-                        current_dir: None,
-                        props: serde_json::to_value(&payload).ok(),
-                    });
+                    sources.push(listen_source(
+                        executable.clone(),
+                        name.clone(),
+                        vec!["listen".to_string()],
+                        serde_json::to_value(&payload).ok(),
+                    ));
                 }
             }
         }
@@ -404,33 +412,28 @@ fn cookbook_sources(
 /// then runs without switch events rather than crash-looping the adapter.
 fn adapter_listen_source(plugin: &enwiro_sdk::plugin::Plugin) -> Option<ProcessSource> {
     let metadata = enwiro_sdk::adapter::fetch_adapter_metadata(&plugin.executable);
-    let mut source = None;
-    for capability in metadata.capabilities.recognized() {
-        match capability {
-            AdapterCapability::Listen => {
-                tracing::info!(adapter = %plugin.name, "Spawning adapter listen subprocess");
-                source = Some(ProcessSource {
-                    identity: ProcessIdentity {
-                        bin: plugin.executable.clone(),
-                        key: "adapter".to_string(),
-                    },
-                    args: vec![
-                        "listen".to_string(),
-                        "--debounce-secs".to_string(),
-                        "5".to_string(),
-                    ],
-                    env: Default::default(),
-                    current_dir: None,
-                    props: None,
-                });
-            }
-        }
-    }
-    if source.is_none() {
-        tracing::warn!(
+    let source = metadata
+        .capabilities
+        .recognized()
+        .map(|capability| match capability {
+            AdapterCapability::Listen => listen_source(
+                plugin.executable.clone(),
+                "adapter".to_string(),
+                vec![
+                    "listen".to_string(),
+                    "--debounce-secs".to_string(),
+                    "5".to_string(),
+                ],
+                None,
+            ),
+        })
+        .next();
+    match &source {
+        Some(_) => tracing::info!(adapter = %plugin.name, "Spawning adapter listen subprocess"),
+        None => tracing::warn!(
             adapter = %plugin.name,
             "Configured adapter does not declare the listen capability; switch events disabled"
-        );
+        ),
     }
     source
 }
@@ -928,15 +931,7 @@ mod tests {
         name: &str,
         script_body: &str,
     ) -> enwiro_sdk::plugin::Plugin {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join(format!("enwiro-bridge-{name}"));
-        std::fs::write(&path, format!("#!/bin/sh\n{script_body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        enwiro_sdk::plugin::Plugin {
-            name: enwiro_sdk::plugin::PluginName::new(name).unwrap(),
-            kind: PluginKind::Bridge,
-            executable: path.to_string_lossy().to_string(),
-        }
+        fake_plugin(dir, PluginKind::Bridge, name, script_body)
     }
 
     #[test]

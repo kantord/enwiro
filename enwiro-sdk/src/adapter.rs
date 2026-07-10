@@ -21,21 +21,20 @@ use crate::metadata::{Capability, DeclaredCapabilities};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterCapability {
     /// The daemon spawns and supervises the adapter's `listen` subcommand,
-    /// which emits workspace-switch events on stdout.
+    /// which emits workspace-switch events on stdout. Declaring this
+    /// commits the adapter to accepting a `--debounce-secs <seconds>` flag
+    /// on `listen`: the daemon always passes it, and an adapter that
+    /// rejects the flag would exit on a usage error and be crash-looped by
+    /// the process pool.
     Listen,
 }
 
 impl Capability for AdapterCapability {
+    const ALL: &'static [Self] = &[AdapterCapability::Listen];
+
     fn wire_name(self) -> &'static str {
         match self {
             AdapterCapability::Listen => "listen",
-        }
-    }
-
-    fn from_wire_name(name: &str) -> Option<Self> {
-        match name {
-            "listen" => Some(AdapterCapability::Listen),
-            _ => None,
         }
     }
 }
@@ -159,5 +158,28 @@ impl RunPayload {
             .read_to_string(&mut buf)
             .context("Could not read run payload from stdin")?;
         serde_json::from_str(&buf).context("Could not parse run payload as JSON")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_roundtrips_and_answers_has() {
+        let metadata = AdapterMetadata::with_capabilities([AdapterCapability::Listen]);
+        assert_eq!(
+            metadata.to_json(),
+            r#"{"capabilities":[{"name":"listen"}]}"#
+        );
+        let parsed: AdapterMetadata = serde_json::from_str(&metadata.to_json()).unwrap();
+        assert!(parsed.has(AdapterCapability::Listen));
+    }
+
+    #[test]
+    fn default_metadata_serializes_to_empty_object_and_declares_nothing() {
+        let metadata = AdapterMetadata::default();
+        assert_eq!(metadata.to_json(), "{}");
+        assert!(!metadata.has(AdapterCapability::Listen));
     }
 }
