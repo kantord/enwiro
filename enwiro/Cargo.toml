@@ -30,6 +30,7 @@ dirs = "6"
 dialoguer = { version = "0.12", default-features = false }
 ratatui = "0.30"
 crossterm = "0.29"
+libc = "0.2.186"
 
 [dev-dependencies]
 assertables = "=10.1.0"

@@ -93,6 +93,7 @@ mod tests {
                 RecipeItem::Pattern(crate::cookbook::PatternRecipe {
                     pattern: "my-project@(?P<branch>.+)".to_string(),
                     description: Some("Create new branch '{branch}' in my-project".to_string()),
+                    url: None,
                 }),
             ],
         };

@@ -9,6 +9,7 @@ mod usage_stats;
 use anyhow::Context;
 use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
+use commands::browser::{BrowserArgs, browser};
 use commands::env_info::{EnvInfoArgs, env_info};
 use commands::kanban::{KanbanArgs, kanban};
 use commands::ls::{LsArgs, ls};
@@ -38,6 +39,11 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum EnwiroCli {
     Activate(ActivateArgs),
+    /// Hidden: the browser extension's native messaging host and its
+    /// installer, spawned by the browser / run once at setup rather than
+    /// being part of the interactive CLI surface.
+    #[command(hide = true)]
+    Browser(BrowserArgs),
     Info(EnvInfoArgs),
     Kanban(KanbanArgs),
     Ls(LsArgs),
@@ -102,6 +108,7 @@ fn main() -> anyhow::Result<()> {
 
     let result = match cli.command {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
+        EnwiroCli::Browser(args) => browser(&mut context_object, args),
         EnwiroCli::Info(args) => env_info(&mut context_object, args),
         EnwiroCli::Kanban(args) => kanban(&mut context_object, args),
         EnwiroCli::Ls(args) => {

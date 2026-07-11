@@ -941,6 +941,7 @@ dependencies = [
  "enwiro-daemon",
  "enwiro-sdk",
  "home",
+ "libc",
  "notify-rust",
  "proptest",
  "ratatui",
@@ -1186,6 +1187,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
+ "urlpattern",
 ]
 
 [[package]]
@@ -4198,6 +4201,18 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "urlpattern"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df16f50ef4cc145211879a3867ba757076b25dfee812040dcb0658bd9ae7904b"
+dependencies = [
+ "icu_properties",
+ "regex",
+ "serde",
+ "url",
 ]
 
 [[package]]

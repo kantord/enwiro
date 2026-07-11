@@ -6,6 +6,7 @@
 
 pub mod adapter;
 pub mod bridge;
+pub mod browser;
 pub mod capability;
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -27,6 +28,7 @@ pub mod process;
 pub mod recipe_pattern;
 pub mod rpc;
 pub mod status;
+pub mod url_rule;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod test_helpers;

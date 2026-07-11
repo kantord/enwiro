@@ -1,0 +1,17 @@
+{
+  "name": "enwiro-browser-extension",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Chromium extension: activate enwiro environments from the web pages they belong to",
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.1.32",
+    "typescript": "6.0.3",
+    "vite": "8.1.3",
+    "vitest": "4.0.18"
+  }
+}

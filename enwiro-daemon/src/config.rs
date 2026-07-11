@@ -12,6 +12,11 @@ pub struct ConfigurationValues {
     /// whatever the container engine defaults to. Global for now -- not
     /// per-environment/per-app policy, which stays north-star (issue #540).
     pub container_runtime: Option<String>,
+    /// Keep the browser extension's native messaging manifests installed on
+    /// daemon startup, so installing the extension is the only browser-side
+    /// setup step. Set to `false` if enwiro must not touch browser config
+    /// directories; `enw browser install` stays available either way.
+    pub browser_integration: bool,
 }
 
 impl ::std::default::Default for ConfigurationValues {
@@ -33,6 +38,7 @@ impl ::std::default::Default for ConfigurationValues {
             workspaces_directory: default_workspaces_directory.to_str().unwrap().to_string(),
             adapter,
             container_runtime: None,
+            browser_integration: true,
         }
     }
 }

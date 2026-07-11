@@ -54,6 +54,30 @@ pub struct DaemonConfig {
     /// (`config::ConfigurationValues::adapter`). `None` means no adapter
     /// was configured or auto-selected.
     pub adapter: Option<String>,
+    /// Keep the browser extension's native messaging manifests installed
+    /// (`config::ConfigurationValues::browser_integration`).
+    pub browser_integration: bool,
+}
+
+/// Idempotently (re)install the browser extension's native messaging
+/// manifests for every detected browser, so a running daemon is the only
+/// setup a browser-extension user needs (`enw browser install` remains the
+/// explicit path). Best-effort: a failure is logged, never fatal.
+fn ensure_browser_integration() {
+    let Some(enw_binary) = enwiro_sdk::browser::resolve_enw_binary() else {
+        tracing::warn!("Could not locate the enw binary; skipping browser integration setup");
+        return;
+    };
+    match enwiro_sdk::browser::install(&enw_binary) {
+        Ok(outcome) => {
+            tracing::debug!(
+                manifests = outcome.manifests.len(),
+                wrapper = %outcome.wrapper.display(),
+                "Browser integration manifests ensured"
+            );
+        }
+        Err(e) => tracing::warn!(error = %e, "Could not install browser integration manifests"),
+    }
 }
 
 /// Returns the directory for daemon runtime files (PID, cache, heartbeat).
@@ -286,10 +310,26 @@ fn cached_pattern_entry(
         );
         return None;
     }
+    // An invalid URL rule drops only the rule, not the claim: the recipe
+    // stays cookable by name even when its browser routing is broken.
+    let url = pattern.url.clone().filter(|rule| {
+        enwiro_sdk::url_rule::validate(rule)
+            .inspect_err(|e| {
+                tracing::warn!(
+                    cookbook = %cookbook,
+                    pattern = %pattern.pattern,
+                    url_pattern = %rule.pattern,
+                    error = %e,
+                    "Dropping invalid URL rule from pattern recipe"
+                );
+            })
+            .is_ok()
+    });
     Some(CachedPatternRecipe {
         cookbook: cookbook.to_string(),
         pattern: enwiro_sdk::recipe_pattern::anchor(&pattern.pattern),
         description: pattern.description.clone(),
+        url,
     })
 }
 
@@ -505,11 +545,16 @@ pub async fn run(
         workspaces_directory,
         container_runtime,
         adapter,
+        browser_integration,
     } = config;
 
     let setsid_result = unsafe { libc::setsid() };
     if setsid_result == -1 {
         tracing::warn!("setsid() failed, continuing anyway");
+    }
+
+    if browser_integration {
+        ensure_browser_integration();
     }
 
     let dir = runtime_dir()?;
@@ -770,6 +815,7 @@ mod tests {
             recipes: vec![RecipeItem::Pattern(enwiro_sdk::cookbook::PatternRecipe {
                 pattern: pattern.to_string(),
                 description: description.map(str::to_string),
+                url: None,
             })],
         }
     }
@@ -794,6 +840,7 @@ mod tests {
                     RecipeItem::Pattern(enwiro_sdk::cookbook::PatternRecipe {
                         pattern: "my-project@(?P<branch>.+)".to_string(),
                         description: Some("Create new branch '{branch}'".to_string()),
+                        url: None,
                     }),
                 ],
             },
@@ -809,6 +856,60 @@ mod tests {
         let pattern: CachedPatternRecipe = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(pattern.pattern, "^(?:my-project@(?P<branch>.+))$");
         assert_eq!(pattern.cookbook, "git");
+    }
+
+    fn pattern_entry_with_url(pattern: &str, url_pattern: &str, url_recipe: &str) -> CookbookEntry {
+        CookbookEntry {
+            priority: 10,
+            recipes: vec![RecipeItem::Pattern(enwiro_sdk::cookbook::PatternRecipe {
+                pattern: pattern.to_string(),
+                description: None,
+                url: Some(enwiro_sdk::url_rule::UrlRule {
+                    pattern: url_pattern.to_string(),
+                    recipe: url_recipe.to_string(),
+                }),
+            })],
+        }
+    }
+
+    #[test]
+    fn build_cache_content_carries_valid_url_rule_through() {
+        let mut state = HashMap::new();
+        state.insert(
+            "github".to_string(),
+            pattern_entry_with_url(
+                "enwiro#(?P<number>[0-9]+)",
+                "https://github.com/:owner/enwiro/:kind(pull|issues)/:number([0-9]+)",
+                "enwiro#{number}",
+            ),
+        );
+
+        let output = build_cache_content(&state);
+        let patterns = parse_pattern_lines(&output);
+        assert_eq!(patterns.len(), 1);
+        let url = patterns[0].url.as_ref().expect("url rule carried through");
+        assert_eq!(url.recipe, "enwiro#{number}");
+    }
+
+    #[test]
+    fn build_cache_content_drops_invalid_url_rule_but_keeps_claim() {
+        let mut state = HashMap::new();
+        state.insert(
+            "github".to_string(),
+            pattern_entry_with_url(
+                "enwiro#(?P<number>[0-9]+)",
+                "https://github.com/:owner/enwiro/pull/:number([0-9]+)",
+                "enwiro#{typo}",
+            ),
+        );
+
+        let output = build_cache_content(&state);
+        let patterns = parse_pattern_lines(&output);
+        assert_eq!(patterns.len(), 1, "claim must survive: {output}");
+        assert!(
+            patterns[0].url.is_none(),
+            "invalid url rule must be dropped"
+        );
     }
 
     #[test]

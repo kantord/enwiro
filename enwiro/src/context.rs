@@ -685,6 +685,7 @@ mod tests {
             cookbook: cookbook.to_string(),
             pattern: enwiro_sdk::recipe_pattern::anchor(pattern),
             description: description.map(str::to_string),
+            url: None,
         })
         .unwrap()
     }

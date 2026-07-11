@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "enwiro",
+  "version": "0.1.0",
+  "description": "Activate enwiro environments from the web pages they belong to",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvMcrMAIxhykpoaV49GJO2w5KgVOvRO0huU/nCoKp8urYwPVsqg4jbNROyzOviQt3ksh07SQxI+6/SrqSxiLUR0XHurBnDRf8oO1Duy35KiiW1tmCWDfEmG+yPFqgUXX14XBf+ze5t7Z987OgZtvZLA9rr3H8kYA4C68zgFdP+8756ptADSCMTy3+BF3Glk2aMXJysgHqx0wmFxRjFGhNkc0KCxaalJLmhuvC0szpNm1rKCmFrSInq3ombyU6IO5BL1whsavqPZPitu/hThfLHEXYKAuYcz9nn0VBlbrtRdGF/ziWh6I/LZJeP/2ycB1RWCWkhhrUnKo2BIiObNbW8QIDAQAB",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "enwiro"
+  },
+  "icons": {
+    "128": "icon.png"
+  },
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "tabs",
+    "notifications",
+    "webNavigation"
+  ]
+}
