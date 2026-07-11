@@ -7,61 +7,36 @@ import type { RuleEntry } from './protocol'
 interface CompiledRule {
   entry: RuleEntry
   urlPattern: URLPattern
-  nameClaim: RegExp
-}
-
-export interface RouteMatch {
-  recipe: string
-  cookbook: string
 }
 
 /**
- * Rules bucketed by literal hostname so a navigation only tests the
- * current host's rules; rules whose hostname component contains pattern
- * syntax land in a small fallback bucket tested on every navigation.
+ * First matching rule wins - the host serves rules in the daemon cache's
+ * cookbook-priority order, and a linear scan preserves it (rule count is
+ * one per configured repo; no indexing needed). Invalid rules are skipped:
+ * one bad cookbook must not break routing.
  */
 export class Router {
-  private byHost = new Map<string, CompiledRule[]>()
-  private wildcardHost: CompiledRule[] = []
+  private rules: CompiledRule[] = []
 
-  /** Invalid rules are skipped: one bad cookbook must not break routing. */
   constructor(rules: RuleEntry[]) {
     for (const entry of rules) {
-      let compiled: CompiledRule
       try {
-        compiled = {
-          entry,
-          urlPattern: new URLPattern(entry.urlPattern),
-          nameClaim: rustRegexToJs(entry.namePattern),
-        }
+        this.rules.push({ entry, urlPattern: new URLPattern(entry.urlPattern) })
       } catch {
-        continue
-      }
-      const hostname = compiled.urlPattern.hostname
-      if (isLiteralHostname(hostname)) {
-        const bucket = this.byHost.get(hostname) ?? []
-        bucket.push(compiled)
-        this.byHost.set(hostname, bucket)
-      } else {
-        this.wildcardHost.push(compiled)
+        // skipped
       }
     }
   }
 
-  /**
-   * First matching rule wins - the host serves rules in the daemon cache's
-   * cookbook-priority order. A rule whose derived name fails its own name
-   * claim is treated as a non-match rather than offering a recipe the host
-   * would reject.
-   */
-  match(url: string): RouteMatch | null {
-    const hostname = hostnameOf(url)
-    const candidates = [
-      ...(hostname ? (this.byHost.get(hostname) ?? []) : []),
-      ...this.wildcardHost,
-    ]
-    for (const rule of candidates) {
-      const result = rule.urlPattern.exec(url)
+  /** The recipe name for `url`, or null when no rule matches. */
+  match(url: string): string | null {
+    for (const rule of this.rules) {
+      let result: URLPatternResult | null
+      try {
+        result = rule.urlPattern.exec(url)
+      } catch {
+        continue
+      }
       if (!result) {
         continue
       }
@@ -69,26 +44,12 @@ export class Router {
         rule.entry.recipeTemplate,
         collectGroups(result),
       )
-      if (recipe === null || !rule.nameClaim.test(recipe)) {
-        continue
+      if (recipe !== null) {
+        return recipe
       }
-      return { recipe, cookbook: rule.entry.cookbook }
     }
     return null
   }
-}
-
-function hostnameOf(url: string): string | null {
-  try {
-    return new URL(url).hostname
-  } catch {
-    return null
-  }
-}
-
-/** A hostname with URLPattern syntax in it cannot be used as a map key. */
-function isLiteralHostname(hostname: string): boolean {
-  return hostname.length > 0 && !/[*:?+()[\]{}\\]/.test(hostname)
 }
 
 function collectGroups(result: URLPatternResult): Map<string, string> {
@@ -148,15 +109,4 @@ export function renderTemplate(
     index += 1
   }
   return rendered
-}
-
-/**
- * Compile a cache name claim as a JS RegExp. The claims use Rust `regex`
- * syntax; the dialects agree on everything cookbooks realistically emit
- * except named groups (`(?P<n>` vs `(?<n>`). `\(` escapes produced by the
- * Rust-side literal escaping keep a literal `(?P<` from ever hitting this
- * rewrite.
- */
-export function rustRegexToJs(pattern: string): RegExp {
-  return new RegExp(pattern.replaceAll('(?P<', '(?<'), 'u')
 }

@@ -1,10 +1,9 @@
 // MV3 service worker: keeps a rule copy pulled from the native host,
 // badges the toolbar action when the current page routes to a recipe, and
-// activates that recipe on click. Deliberately dumb - all validation and
-// activation logic lives host-side (see enwiro/src/commands/browser.rs),
-// because the extension ships on a store-review cadence.
+// activates that recipe on click. All validation and activation logic
+// lives host-side; see enwiro/src/commands/browser.rs for why.
 
-import type { HostResponse, RuleEntry } from './protocol'
+import type { HostRequest, HostResponse, RuleEntry } from './protocol'
 import { NATIVE_HOST_NAME, PROTOCOL_VERSION } from './protocol'
 import { Router } from './router'
 
@@ -14,12 +13,14 @@ const RULES_TTL_MS = 30 * 60 * 1000
 
 interface StoredRules {
   rules: RuleEntry[]
-  fetchedAt: number
+  fetchedAtEpochMs: number
 }
 
-let router: Router | null = null
+/** In-worker cache of the compiled router; rebuilt when the stored rules
+ * pass their TTL, not just when MV3 tears the worker down. */
+let compiled: { router: Router; fetchedAtEpochMs: number } | null = null
 
-function sendToHost(message: object): Promise<HostResponse> {
+function sendToHost(message: HostRequest): Promise<HostResponse> {
   return chrome.runtime.sendNativeMessage(
     NATIVE_HOST_NAME,
     message,
@@ -39,37 +40,53 @@ async function fetchRules(): Promise<RuleEntry[]> {
   return response.rules
 }
 
+function isFresh(fetchedAtEpochMs: number): boolean {
+  return Date.now() - fetchedAtEpochMs <= RULES_TTL_MS
+}
+
+/**
+ * The compiled router over the freshest rules available: memo while fresh,
+ * else re-pull from the host, else fall back to the stored (stale) copy. A
+ * failed pull with nothing stored yields an empty router that is NOT
+ * memoized, so the next navigation retries instead of pinning "no rules"
+ * for the worker's lifetime (e.g. browser started before the daemon).
+ */
 async function getRouter(): Promise<Router> {
-  if (router) {
-    return router
+  if (compiled && isFresh(compiled.fetchedAtEpochMs)) {
+    return compiled.router
   }
   const stored = (await chrome.storage.local.get('rules')) as {
     rules?: StoredRules
   }
   let rules = stored.rules
-  if (!rules || Date.now() - rules.fetchedAt > RULES_TTL_MS) {
+  if (!rules || !isFresh(rules.fetchedAtEpochMs)) {
     try {
-      rules = { rules: await fetchRules(), fetchedAt: Date.now() }
+      rules = { rules: await fetchRules(), fetchedAtEpochMs: Date.now() }
       await chrome.storage.local.set({ rules })
     } catch (e) {
       console.warn('enwiro: could not refresh rules from the native host', e)
-      // A stale copy still routes; only a missing one leaves us empty.
     }
   }
-  router = new Router(rules?.rules ?? [])
-  return router
+  if (!rules) {
+    return new Router([])
+  }
+  compiled = {
+    router: new Router(rules.rules),
+    fetchedAtEpochMs: rules.fetchedAtEpochMs,
+  }
+  return compiled.router
 }
 
 async function updateBadge(
   tabId: number,
   url: string | undefined,
 ): Promise<void> {
-  const match = url ? (await getRouter()).match(url) : null
-  if (match) {
+  const recipe = url ? (await getRouter()).match(url) : null
+  if (recipe) {
     await chrome.action.setBadgeText({ tabId, text: 'env' })
     await chrome.action.setTitle({
       tabId,
-      title: `Activate ${match.recipe} in enwiro`,
+      title: `Activate ${recipe} in enwiro`,
     })
   } else {
     await chrome.action.setBadgeText({ tabId, text: '' })
@@ -90,8 +107,8 @@ async function refreshTab(tabId: number): Promise<void> {
 }
 
 async function activateForTab(tab: chrome.tabs.Tab): Promise<void> {
-  const match = tab.url ? (await getRouter()).match(tab.url) : null
-  if (!match) {
+  const recipe = tab.url ? (await getRouter()).match(tab.url) : null
+  if (!recipe) {
     return
   }
   const notificationId = `enwiro-activate-${Date.now()}`
@@ -99,26 +116,21 @@ async function activateForTab(tab: chrome.tabs.Tab): Promise<void> {
     type: 'basic',
     iconUrl: 'icon.png',
     title: 'enwiro',
-    message: `Activating ${match.recipe}...`,
+    message: `Activating ${recipe}...`,
   })
   try {
-    const response = await sendToHost({
-      type: 'activate',
-      recipe: match.recipe,
-    })
-    if (response.type === 'activateResult' && response.ok) {
+    const response = await sendToHost({ type: 'activate', recipe })
+    if (response.type === 'activated') {
       // Success needs no follow-up: the workspace switch is the feedback.
       return
     }
-    const error =
-      response.type === 'activateResult'
-        ? (response.error ?? 'unknown error')
-        : response.type === 'error'
-          ? response.error
-          : 'unexpected host response'
+    const reason =
+      response.type === 'error'
+        ? response.error
+        : `unexpected host response '${response.type}'`
     await chrome.notifications.update(notificationId, {
       title: 'enwiro',
-      message: `Failed to activate ${match.recipe}: ${error}`,
+      message: `Failed to activate ${recipe}: ${reason}`,
     })
   } catch (e) {
     // The host did not even start: manifest missing or enwiro not installed.
@@ -149,13 +161,4 @@ chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
 
 chrome.action.onClicked.addListener((tab) => {
   void activateForTab(tab)
-})
-
-// Drop the cached copy so the next navigation re-pulls: extension updates
-// and browser restarts are natural refresh points.
-chrome.runtime.onInstalled.addListener(() => {
-  void chrome.storage.local.remove('rules')
-})
-chrome.runtime.onStartup.addListener(() => {
-  void chrome.storage.local.remove('rules')
 })

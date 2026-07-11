@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -435,7 +436,7 @@ fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
     let mut full_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
     full_names.sort();
     full_names.dedup();
-    let mut full_by_short: std::collections::BTreeMap<String, String> = Default::default();
+    let mut full_by_short: BTreeMap<String, String> = BTreeMap::new();
     for full_name in full_names {
         full_by_short
             .entry(extract_short_repo_name(full_name.clone()))
@@ -456,25 +457,29 @@ fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
                     "Work on PR or issue #{{number}} in {}",
                     enwiro_sdk::recipe_pattern::escape_template(&short_name)
                 )),
-                url: Some(enwiro_sdk::url_rule::UrlRule {
-                    // GitHub owner and repo names are limited to
-                    // [A-Za-z0-9_.-], none of which is URLPattern syntax,
-                    // so the full name embeds literally. The URL regex is
-                    // [0-9]+ rather than the claim's [0-9]{1,19}: an
-                    // overlong number derives a name the anchored claim
-                    // then rejects, which consumers already handle.
-                    pattern: format!(
-                        "https://github.com/{}/:kind(pull|issues)/:number([0-9]+){{/*}}?",
-                        full_name
-                    ),
-                    recipe: format!(
-                        "{}#{{number}}",
-                        enwiro_sdk::recipe_pattern::escape_template(&short_name)
-                    ),
-                }),
+                url: Some(github_url_rule(&short_name, &full_name)),
             })
         })
         .collect()
+}
+
+/// The URL rule routing a repo's PR/issue pages (including subpages such as
+/// `/pull/42/files`) to its `repo#<number>` recipe. GitHub owner and repo
+/// names are limited to `[A-Za-z0-9_.-]`, none of which is URLPattern
+/// syntax, so the full name embeds literally. The URL regex is `[0-9]+`
+/// rather than the claim's `[0-9]{1,19}`: an overlong number derives a name
+/// the anchored claim then rejects, which consumers already handle.
+fn github_url_rule(short_name: &str, full_name: &str) -> enwiro_sdk::url_rule::UrlRule {
+    enwiro_sdk::url_rule::UrlRule {
+        pattern: format!(
+            "https://github.com/{}/:kind(pull|issues)/:number([0-9]+){{/*}}?",
+            full_name
+        ),
+        recipe: format!(
+            "{}#{{number}}",
+            enwiro_sdk::recipe_pattern::escape_template(short_name)
+        ),
+    }
 }
 
 fn collect_recipe_items() -> Vec<RecipeItem> {
@@ -1038,7 +1043,10 @@ mod tests {
     }
 
     #[test]
-    fn test_item_pattern_recipes_url_rules_route_pr_and_issue_pages() {
+    fn test_item_pattern_recipes_carry_a_valid_url_rule() {
+        // URL-matching behavior for this exact rule shape is covered by the
+        // extension's router tests (the only production matcher); here we
+        // pin the emitted strings and that the daemon's gate accepts them.
         let repos = vec![RepoConfig {
             repo: "kantord/enwiro".to_string(),
             local_path: PathBuf::from("/tmp/enwiro"),
@@ -1050,31 +1058,15 @@ mod tests {
         };
         let rule = pattern.url.as_ref().expect("pattern must carry a URL rule");
         enwiro_sdk::url_rule::validate(rule).expect("emitted URL rule must pass daemon validation");
+        assert_eq!(
+            rule.pattern,
+            "https://github.com/kantord/enwiro/:kind(pull|issues)/:number([0-9]+){/*}?"
+        );
+        assert_eq!(rule.recipe, "enwiro#{number}");
 
-        let derive = |url: &str| enwiro_sdk::url_rule::derive_recipe_name(rule, url);
-        assert_eq!(
-            derive("https://github.com/kantord/enwiro/pull/42").as_deref(),
-            Some("enwiro#42")
-        );
-        assert_eq!(
-            derive("https://github.com/kantord/enwiro/issues/615").as_deref(),
-            Some("enwiro#615")
-        );
-        // Subpages and query strings still route to the same recipe.
-        assert_eq!(
-            derive("https://github.com/kantord/enwiro/pull/42/files?diff=split").as_deref(),
-            Some("enwiro#42")
-        );
-        // Other owners, other repos, and non-item pages do not match.
-        assert_eq!(derive("https://github.com/fork/enwiro/pull/42"), None);
-        assert_eq!(derive("https://github.com/kantord/other/pull/42"), None);
-        assert_eq!(derive("https://github.com/kantord/enwiro/wiki"), None);
-        assert_eq!(derive("https://github.com/kantord/enwiro/pulls"), None);
-
-        // The derived name must satisfy the pattern's own name claim.
+        // A name rendered from the template satisfies the name claim.
         let anchored = enwiro_sdk::recipe_pattern::anchor(&pattern.pattern);
-        let derived = derive("https://github.com/kantord/enwiro/pull/42").unwrap();
-        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, &derived).is_some());
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "enwiro#42").is_some());
     }
 
     #[test]

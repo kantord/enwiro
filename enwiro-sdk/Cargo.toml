@@ -32,7 +32,6 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 urlpattern = "0.6.0"
-url = "2.5.8"
 
 [features]
 test-helpers = []

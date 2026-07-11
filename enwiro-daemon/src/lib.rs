@@ -310,27 +310,33 @@ fn cached_pattern_entry(
         );
         return None;
     }
-    // An invalid URL rule drops only the rule, not the claim: the recipe
-    // stays cookable by name even when its browser routing is broken.
-    let url = pattern.url.clone().filter(|rule| {
-        enwiro_sdk::url_rule::validate(rule)
-            .inspect_err(|e| {
-                tracing::warn!(
-                    cookbook = %cookbook,
-                    pattern = %pattern.pattern,
-                    url_pattern = %rule.pattern,
-                    error = %e,
-                    "Dropping invalid URL rule from pattern recipe"
-                );
-            })
-            .is_ok()
-    });
     Some(CachedPatternRecipe {
         cookbook: cookbook.to_string(),
         pattern: enwiro_sdk::recipe_pattern::anchor(&pattern.pattern),
         description: pattern.description.clone(),
-        url,
+        url: validated_url_rule(cookbook, pattern),
     })
+}
+
+/// The pattern's URL rule if it passes validation. An invalid rule drops
+/// only the rule (with a warning), not the claim: the recipe stays cookable
+/// by name even when its browser routing is broken.
+fn validated_url_rule(
+    cookbook: &str,
+    pattern: &enwiro_sdk::PatternRecipe,
+) -> Option<enwiro_sdk::url_rule::UrlRule> {
+    let rule = pattern.url.clone()?;
+    if let Err(e) = enwiro_sdk::url_rule::validate(&rule) {
+        tracing::warn!(
+            cookbook = %cookbook,
+            pattern = %pattern.pattern,
+            url_pattern = %rule.pattern,
+            error = %e,
+            "Dropping invalid URL rule from pattern recipe"
+        );
+        return None;
+    }
+    Some(rule)
 }
 
 /// Parse a JSONL workspace switch event line.

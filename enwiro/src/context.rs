@@ -134,21 +134,30 @@ impl<W: Write> CommandContext<W> {
         self.find_recipe_in_cache(recipe_name).is_some()
     }
 
+    /// Every parseable entry of the daemon's recipe cache, in its
+    /// priority-sorted file order. Errors when the cache file is missing -
+    /// callers that treat that as "no match" use `.ok()`.
+    pub fn read_cached_entries(&self) -> anyhow::Result<Vec<CachedEntry>> {
+        let cache = match &self.cache_dir {
+            Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
+            None => enwiro_daemon::DaemonCache::open()?,
+        };
+        let cached = cache
+            .read_recipes()?
+            .context("No recipe cache found - is enwiro-daemon running?")?;
+        Ok(cached
+            .lines()
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| serde_json::from_str::<CachedEntry>(line).ok())
+            .collect())
+    }
+
     /// Exact matches shadow pattern claims, so the exact pass scans the
     /// whole cache before any pattern is tried. The cache is priority-sorted,
     /// so the first pattern match wins - the same arbitration duplicate
     /// concrete names already get.
     fn find_recipe_in_cache(&self, recipe_name: &str) -> Option<ResolvedRecipe> {
-        let cache = match &self.cache_dir {
-            Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
-            None => enwiro_daemon::DaemonCache::open().ok()?,
-        };
-        let cached = cache.read_recipes().ok()??;
-        let entries: Vec<CachedEntry> = cached
-            .lines()
-            .filter(|line| !line.is_empty())
-            .filter_map(|line| serde_json::from_str::<CachedEntry>(line).ok())
-            .collect();
+        let entries = self.read_cached_entries().ok()?;
 
         for entry in &entries {
             if let CachedEntry::Concrete(concrete) = entry

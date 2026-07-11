@@ -185,11 +185,8 @@ pub struct PatternRecipe {
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Optional URL-to-recipe mapping: a URLPattern over web page URLs whose
-    /// named groups render the recipe name to activate (see
-    /// [`crate::url_rule`]). Lets a client-side router (the browser
-    /// extension) resolve "the page I am on" to a claimed recipe name
-    /// without the recipe ever being listed concretely.
+    /// Optional URL-to-recipe mapping for the browser extension's router;
+    /// see [`crate::url_rule`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<crate::url_rule::UrlRule>,
 }

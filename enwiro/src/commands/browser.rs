@@ -49,27 +49,15 @@ enum Request {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum Response {
-    Rules {
-        version: u32,
-        rules: Vec<RuleEntry>,
-    },
-    ActivateResult {
-        ok: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    Error {
-        error: String,
-    },
+    Rules { version: u32, rules: Vec<RuleEntry> },
+    Activated,
+    Error { error: String },
 }
 
-/// One routable rule: the URL rule plus the anchored name claim the
-/// extension re-checks derived names against before showing a badge.
+/// One routable rule of the extension's URL router.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuleEntry {
-    cookbook: String,
-    name_pattern: String,
     url_pattern: String,
     recipe_template: String,
 }
@@ -77,23 +65,23 @@ struct RuleEntry {
 pub fn browser<W: Write>(context: &mut CommandContext<W>, args: BrowserArgs) -> anyhow::Result<()> {
     match args.command {
         BrowserCommand::Host => host(context),
-        BrowserCommand::Install => install(context),
+        BrowserCommand::Install => install(&mut context.writer),
     }
 }
 
-fn install<W: Write>(context: &mut CommandContext<W>) -> anyhow::Result<()> {
+fn install(writer: &mut impl Write) -> anyhow::Result<()> {
     let enw_binary =
         browser::resolve_enw_binary().context("Could not locate the enw binary to point at")?;
     let outcome = browser::install(&enw_binary)?;
     if outcome.manifests.is_empty() {
         writeln!(
-            context.writer,
+            writer,
             "No Chromium-family browser config directory found; nothing installed."
         )?;
         return Ok(());
     }
     for manifest in &outcome.manifests {
-        writeln!(context.writer, "Installed {}", manifest.display())?;
+        writeln!(writer, "Installed {}", manifest.display())?;
     }
     Ok(())
 }
@@ -127,8 +115,11 @@ fn steal_stdio_channel() -> anyhow::Result<(std::fs::File, std::fs::File)> {
         let input = libc::dup(libc::STDIN_FILENO);
         let output = libc::dup(libc::STDOUT_FILENO);
         anyhow::ensure!(input >= 0 && output >= 0, "Could not duplicate stdio");
-        libc::fcntl(input, libc::F_SETFD, libc::FD_CLOEXEC);
-        libc::fcntl(output, libc::F_SETFD, libc::FD_CLOEXEC);
+        anyhow::ensure!(
+            libc::fcntl(input, libc::F_SETFD, libc::FD_CLOEXEC) >= 0
+                && libc::fcntl(output, libc::F_SETFD, libc::FD_CLOEXEC) >= 0,
+            "Could not mark the messaging channel close-on-exec"
+        );
         anyhow::ensure!(
             libc::dup2(devnull.as_raw_fd(), libc::STDIN_FILENO) >= 0
                 && libc::dup2(devnull.as_raw_fd(), libc::STDOUT_FILENO) >= 0,
@@ -162,13 +153,9 @@ fn handle_message<W: Write>(context: &mut CommandContext<W>, payload: &[u8]) -> 
             },
         },
         Request::Activate { recipe } => match handle_activate(context, &recipe) {
-            Ok(()) => Response::ActivateResult {
-                ok: true,
-                error: None,
-            },
-            Err(error) => Response::ActivateResult {
-                ok: false,
-                error: Some(error),
+            Ok(()) => Response::Activated,
+            Err(e) => Response::Error {
+                error: format!("{e:#}"),
             },
         },
     }
@@ -178,20 +165,11 @@ fn handle_message<W: Write>(context: &mut CommandContext<W>, payload: &[u8]) -> 
 /// priority-sorted at build time, so the extension can use first-match-wins
 /// ordering as-is.
 fn collect_rules<W: Write>(context: &CommandContext<W>) -> anyhow::Result<Vec<RuleEntry>> {
-    let cache = match &context.cache_dir {
-        Some(dir) => enwiro_daemon::DaemonCache::with_runtime_dir(dir.clone()),
-        None => enwiro_daemon::DaemonCache::open()?,
-    };
-    let content = cache
-        .read_recipes()?
-        .context("No recipe cache found - is enwiro-daemon running?")?;
-    let rules = content
-        .lines()
-        .filter_map(|line| serde_json::from_str::<CachedEntry>(line).ok())
+    let rules = context
+        .read_cached_entries()?
+        .into_iter()
         .filter_map(|entry| match entry {
             CachedEntry::Pattern(pattern) => pattern.url.map(|url| RuleEntry {
-                cookbook: pattern.cookbook,
-                name_pattern: pattern.pattern,
                 url_pattern: url.pattern,
                 recipe_template: url.recipe,
             }),
@@ -205,16 +183,15 @@ fn collect_rules<W: Write>(context: &CommandContext<W>) -> anyhow::Result<Vec<Ru
 /// (or the environment already exists): `activate` switches workspaces
 /// before cooking, so an unvalidated name would materialize an empty
 /// workspace for whatever a buggy client sends.
-fn handle_activate<W: Write>(context: &mut CommandContext<W>, recipe: &str) -> Result<(), String> {
+fn handle_activate<W: Write>(context: &mut CommandContext<W>, recipe: &str) -> anyhow::Result<()> {
     let exists = context
         .get_all_environments()
         .map(|envs| envs.values().any(|env| env.name == recipe))
         .unwrap_or(false);
-    if !exists && !context.find_recipe_in_cache_by_name(recipe) {
-        return Err(format!(
-            "'{recipe}' is neither a cached recipe nor an existing environment"
-        ));
-    }
+    anyhow::ensure!(
+        exists || context.find_recipe_in_cache_by_name(recipe),
+        "'{recipe}' is neither a cached recipe nor an existing environment"
+    );
     activate(
         context,
         ActivateArgs {
@@ -222,7 +199,6 @@ fn handle_activate<W: Write>(context: &mut CommandContext<W>, recipe: &str) -> R
             no_hooks: false,
         },
     )
-    .map_err(|e| format!("{e:#}"))
 }
 
 #[cfg(test)]
@@ -286,9 +262,7 @@ mod tests {
         };
         assert_eq!(version, PROTOCOL_VERSION);
         assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0].cookbook, "github");
         assert_eq!(rules[0].recipe_template, "enwiro#{number}");
-        assert!(rules[0].name_pattern.starts_with("^(?:"));
     }
 
     #[test]
@@ -304,11 +278,10 @@ mod tests {
         context.write_cache_lines(&[plain_pattern_cache_line("git", "repo@(?P<branch>.+)")]);
 
         let response = handle_message(&mut context, br#"{"type":"activate","recipe":"garbage"}"#);
-        let Response::ActivateResult { ok, error } = response else {
-            panic!("expected an activate result");
+        let Response::Error { error } = response else {
+            panic!("expected an error, got {response:?}");
         };
-        assert!(!ok);
-        assert!(error.unwrap().contains("garbage"));
+        assert!(error.contains("garbage"));
         assert!(adapter.borrow().is_empty(), "workspace must not switch");
     }
 
@@ -318,10 +291,7 @@ mod tests {
         context.write_cache_entry("fake_cookbook", "my-recipe");
 
         let response = handle_message(&mut context, br#"{"type":"activate","recipe":"my-recipe"}"#);
-        let Response::ActivateResult { ok, .. } = response else {
-            panic!("expected an activate result");
-        };
-        assert!(ok);
+        assert!(matches!(response, Response::Activated), "{response:?}");
         assert_eq!(adapter.borrow().as_slice(), ["my-recipe"]);
     }
 
@@ -334,11 +304,9 @@ mod tests {
 
     #[test]
     fn responses_use_camel_case_tags() {
-        let encoded = serde_json::to_string(&Response::ActivateResult {
-            ok: true,
-            error: None,
-        })
-        .unwrap();
-        assert_eq!(encoded, r#"{"type":"activateResult","ok":true}"#);
+        assert_eq!(
+            serde_json::to_string(&Response::Activated).unwrap(),
+            r#"{"type":"activated"}"#
+        );
     }
 }

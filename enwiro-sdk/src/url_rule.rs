@@ -12,11 +12,11 @@
 //! and derivation both live here, in trusted core: cookbooks never compile
 //! URL patterns or render templates themselves.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use urlpattern::{UrlPattern, UrlPatternInit, UrlPatternMatchInput};
+use urlpattern::{UrlPattern, UrlPatternInit};
 
 /// A URL-to-recipe mapping on a pattern recipe.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,9 +35,9 @@ pub struct UrlRule {
 
 fn parse_pattern(pattern: &str) -> anyhow::Result<UrlPattern> {
     let init = UrlPatternInit::parse_constructor_string::<regex::Regex>(pattern, None)
-        .with_context(|| format!("invalid URL pattern '{}'", pattern))?;
+        .with_context(|| format!("could not parse URL pattern string '{}'", pattern))?;
     <UrlPattern>::parse(init, Default::default())
-        .with_context(|| format!("invalid URL pattern '{}'", pattern))
+        .with_context(|| format!("could not compile URL pattern '{}'", pattern))
 }
 
 fn group_names(pattern: &UrlPattern) -> impl Iterator<Item = &str> {
@@ -63,7 +63,7 @@ pub fn validate(rule: &UrlRule) -> anyhow::Result<()> {
     let pattern = parse_pattern(&rule.pattern)?;
     let template = leon::Template::parse(&rule.recipe)
         .with_context(|| format!("invalid recipe template '{}'", rule.recipe))?;
-    let groups: std::collections::HashSet<&str> = group_names(&pattern).collect();
+    let groups: HashSet<&str> = group_names(&pattern).collect();
     for key in template.keys() {
         anyhow::ensure!(
             groups.contains(*key),
@@ -73,31 +73,6 @@ pub fn validate(rule: &UrlRule) -> anyhow::Result<()> {
         );
     }
     Ok(())
-}
-
-/// Derive the recipe name for `url`, or `None` when the URL does not match
-/// the rule. An unparseable rule also counts as a non-match: rules were
-/// validated at cache-build time and can only be broken by hand.
-pub fn derive_recipe_name(rule: &UrlRule, url: &str) -> Option<String> {
-    let pattern = parse_pattern(&rule.pattern).ok()?;
-    let url = url::Url::parse(url).ok()?;
-    let result = pattern.exec(UrlPatternMatchInput::Url(url)).ok()??;
-    let values: HashMap<String, String> = [
-        result.protocol,
-        result.username,
-        result.password,
-        result.hostname,
-        result.port,
-        result.pathname,
-        result.search,
-        result.hash,
-    ]
-    .into_iter()
-    .flat_map(|component| component.groups)
-    .filter_map(|(key, value)| value.map(|value| (key, value)))
-    .collect();
-    let template = leon::Template::parse(&rule.recipe).ok()?;
-    template.render(&values).ok()
 }
 
 #[cfg(test)]
@@ -143,50 +118,5 @@ mod tests {
             recipe: "{unclosed".to_string(),
         };
         assert!(validate(&rule).is_err());
-    }
-
-    #[test]
-    fn derives_name_from_pr_url() {
-        let name = derive_recipe_name(&github_rule(), "https://github.com/kantord/enwiro/pull/42");
-        assert_eq!(name.as_deref(), Some("enwiro#42"));
-    }
-
-    #[test]
-    fn derives_name_from_issue_url() {
-        let name = derive_recipe_name(
-            &github_rule(),
-            "https://github.com/kantord/enwiro/issues/615",
-        );
-        assert_eq!(name.as_deref(), Some("enwiro#615"));
-    }
-
-    #[test]
-    fn query_string_and_fragment_do_not_prevent_match() {
-        let name = derive_recipe_name(
-            &github_rule(),
-            "https://github.com/kantord/enwiro/pull/42?diff=split#discussion_r1",
-        );
-        assert_eq!(name.as_deref(), Some("enwiro#42"));
-    }
-
-    #[test]
-    fn unrelated_url_does_not_match() {
-        assert_eq!(
-            derive_recipe_name(&github_rule(), "https://github.com/kantord/enwiro/wiki"),
-            None
-        );
-        assert_eq!(
-            derive_recipe_name(&github_rule(), "https://example.com/kantord/enwiro/pull/42"),
-            None
-        );
-        assert_eq!(derive_recipe_name(&github_rule(), "not a url"), None);
-    }
-
-    #[test]
-    fn non_numeric_number_segment_does_not_match() {
-        assert_eq!(
-            derive_recipe_name(&github_rule(), "https://github.com/kantord/enwiro/pull/abc"),
-            None
-        );
     }
 }
