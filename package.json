@@ -11,6 +11,6 @@
     "format": "biome check --write"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.2"
+    "@biomejs/biome": "2.5.3"
   }
 }
