@@ -185,6 +185,10 @@ pub struct PatternRecipe {
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional URL-to-recipe mapping for the browser extension's router;
+    /// see [`crate::url_rule`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<crate::url_rule::UrlRule>,
 }
 
 /// One item in a cookbook's recipe listing: a concrete recipe or a pattern

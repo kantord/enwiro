@@ -12,6 +12,7 @@ async fn main() -> anyhow::Result<()> {
             workspaces_directory: PathBuf::from(config.workspaces_directory),
             container_runtime: config.container_runtime,
             adapter: config.adapter,
+            browser_integration: config.browser_integration,
         },
         enwiro_daemon::meta::record_switch_per_env,
     )

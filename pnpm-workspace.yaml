@@ -1,5 +1,11 @@
 packages:
   - 'enwiro-gui/web'
+  - 'enwiro-browser-extension'
+
+# esbuild (via vitest) ships its binary through optionalDependencies; its
+# install script only sanity-checks the download and stays blocked.
+allowBuilds:
+  esbuild: false
 
 # Supply-chain hardening:
 # - minimumReleaseAge: refuse to install a package version published less

@@ -549,6 +549,7 @@ fn branch_pattern_recipes(repos: &HashMap<String, RecipeInfo>) -> Vec<RecipeItem
                     "Create new branch '{{branch}}' in {}",
                     enwiro_sdk::recipe_pattern::escape_template(repo_name)
                 )),
+                url: None,
             })
         })
         .collect()

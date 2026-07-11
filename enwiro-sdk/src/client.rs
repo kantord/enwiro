@@ -49,6 +49,11 @@ pub struct CachedPatternRecipe {
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// See [`crate::cookbook::PatternRecipe::url`]: carried through the
+    /// daemon cache (validated at cache-build time) so the browser
+    /// extension's router can be served straight from the cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<crate::url_rule::UrlRule>,
 }
 
 /// One line of the daemon recipe cache. Untagged: pattern lines carry

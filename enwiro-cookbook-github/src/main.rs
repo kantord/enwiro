@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -424,16 +425,26 @@ fn list_recipes() -> anyhow::Result<()> {
 /// PRs), but `cook` probes the forge for what a number is - so any issue or
 /// PR is cookable, not just the listed ones. Emitted unanchored; the daemon
 /// anchors them (see `enwiro_sdk::recipe_pattern`).
+///
+/// Each claim also carries a URL rule mapping the repo's PR/issue pages
+/// (including subpages such as `/pull/42/files`) to the claimed name, so the
+/// browser extension can activate straight from a GitHub page. Claims are
+/// deduplicated by short name to match `cook`'s resolution; when two
+/// configured repos share a short name, the URL rule points at the
+/// lexicographically first full name.
 fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
-    let mut short_names: Vec<String> = repos
-        .iter()
-        .map(|r| extract_short_repo_name(r.repo.clone()))
-        .collect();
-    short_names.sort();
-    short_names.dedup();
-    short_names
+    let mut full_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
+    full_names.sort();
+    full_names.dedup();
+    let mut full_by_short: BTreeMap<String, String> = BTreeMap::new();
+    for full_name in full_names {
+        full_by_short
+            .entry(extract_short_repo_name(full_name.clone()))
+            .or_insert(full_name);
+    }
+    full_by_short
         .into_iter()
-        .map(|short_name| {
+        .map(|(short_name, full_name)| {
             RecipeItem::Pattern(PatternRecipe {
                 // [0-9]{1,19}, not \d+: the regex crate's \d is Unicode and
                 // unbounded, which would claim names whose number
@@ -446,9 +457,29 @@ fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
                     "Work on PR or issue #{{number}} in {}",
                     enwiro_sdk::recipe_pattern::escape_template(&short_name)
                 )),
+                url: Some(github_url_rule(&short_name, &full_name)),
             })
         })
         .collect()
+}
+
+/// The URL rule routing a repo's PR/issue pages (including subpages such as
+/// `/pull/42/files`) to its `repo#<number>` recipe. GitHub owner and repo
+/// names are limited to `[A-Za-z0-9_.-]`, none of which is URLPattern
+/// syntax, so the full name embeds literally. The URL regex is `[0-9]+`
+/// rather than the claim's `[0-9]{1,19}`: an overlong number derives a name
+/// the anchored claim then rejects, which consumers already handle.
+fn github_url_rule(short_name: &str, full_name: &str) -> enwiro_sdk::url_rule::UrlRule {
+    enwiro_sdk::url_rule::UrlRule {
+        pattern: format!(
+            "https://github.com/{}/:kind(pull|issues)/:number([0-9]+){{/*}}?",
+            full_name
+        ),
+        recipe: format!(
+            "{}#{{number}}",
+            enwiro_sdk::recipe_pattern::escape_template(short_name)
+        ),
+    }
 }
 
 fn collect_recipe_items() -> Vec<RecipeItem> {
@@ -1009,6 +1040,55 @@ mod tests {
             matched.description.as_deref(),
             Some("Work on PR or issue #997 in enwiro")
         );
+    }
+
+    #[test]
+    fn test_item_pattern_recipes_carry_a_valid_url_rule() {
+        // URL-matching behavior for this exact rule shape is covered by the
+        // extension's router tests (the only production matcher); here we
+        // pin the emitted strings and that the daemon's gate accepts them.
+        let repos = vec![RepoConfig {
+            repo: "kantord/enwiro".to_string(),
+            local_path: PathBuf::from("/tmp/enwiro"),
+        }];
+
+        let items = item_pattern_recipes(&repos);
+        let RecipeItem::Pattern(pattern) = &items[0] else {
+            panic!("expected a pattern item");
+        };
+        let rule = pattern.url.as_ref().expect("pattern must carry a URL rule");
+        enwiro_sdk::url_rule::validate(rule).expect("emitted URL rule must pass daemon validation");
+        assert_eq!(
+            rule.pattern,
+            "https://github.com/kantord/enwiro/:kind(pull|issues)/:number([0-9]+){/*}?"
+        );
+        assert_eq!(rule.recipe, "enwiro#{number}");
+
+        // A name rendered from the template satisfies the name claim.
+        let anchored = enwiro_sdk::recipe_pattern::anchor(&pattern.pattern);
+        assert!(enwiro_sdk::recipe_pattern::match_name(&anchored, None, "enwiro#42").is_some());
+    }
+
+    #[test]
+    fn test_item_pattern_recipes_share_short_name_single_claim() {
+        let repos = vec![
+            RepoConfig {
+                repo: "kantord/tool".to_string(),
+                local_path: PathBuf::from("/tmp/tool"),
+            },
+            RepoConfig {
+                repo: "acme/tool".to_string(),
+                local_path: PathBuf::from("/tmp/tool2"),
+            },
+        ];
+
+        let items = item_pattern_recipes(&repos);
+        assert_eq!(items.len(), 1, "claims stay deduplicated by short name");
+        let RecipeItem::Pattern(pattern) = &items[0] else {
+            panic!("expected a pattern item");
+        };
+        let rule = pattern.url.as_ref().unwrap();
+        assert!(rule.pattern.contains("github.com/acme/tool"));
     }
 
     #[test]
