@@ -153,7 +153,13 @@ impl<W: Write> CommandContext<W> {
         // parts are not wasted - cooking is idempotent, so a retry (or
         // cooking a part standalone) reuses them.
         let mut cooked_parts: Vec<CookedRecipe> = Vec::new();
-        for part in parts {
+        for (index, part) in parts.iter().enumerate() {
+            // Notifications share one id per env, so each part's message
+            // replaces the previous one - a progress ticker, not a pile.
+            self.notifier.notify_info(
+                env_name,
+                &format!("Cooking {} ({}/{})", part, index + 1, parts.len()),
+            );
             let cooked = self
                 .resolve_and_cook(env_name, part)
                 .with_context(|| format!("Could not cook part '{}' of '{}'", part, expression))?;
@@ -1005,6 +1011,44 @@ mod tests {
         assert_eq!(meta.cookbook.as_deref(), Some("composed"));
         assert_eq!(meta.recipe.as_deref(), Some("foo+bar"));
         assert_eq!(meta.main_folder.as_deref(), Some("foo+bar"));
+    }
+
+    #[rstest]
+    fn test_cook_composed_environment_notifies_per_part_progress(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, notifications) = context_object;
+
+        let foo_target = temp_dir.path().join("foo-target");
+        let bar_target = temp_dir.path().join("bar-target");
+        fs::create_dir(&foo_target).unwrap();
+        fs::create_dir(&bar_target).unwrap();
+
+        context_object.write_cache_entries(&[("git", "foo", None), ("git", "bar", None)]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["foo", "bar"],
+            vec![
+                ("foo", foo_target.to_str().unwrap()),
+                ("bar", bar_target.to_str().unwrap()),
+            ],
+        ))];
+
+        context_object
+            .cook_environment("foo+bar", "foo+bar", &CookConfig::default())
+            .unwrap();
+
+        // A slow part (e.g. a GitHub cook) must not leave the user staring
+        // at silence: each part announces itself before cooking starts.
+        let logged = notifications.borrow();
+        assert!(
+            logged.iter().any(|n| n.contains("Cooking foo (1/2)")),
+            "notifications: {logged:?}"
+        );
+        assert!(
+            logged.iter().any(|n| n.contains("Cooking bar (2/2)")),
+            "notifications: {logged:?}"
+        );
     }
 
     #[rstest]
