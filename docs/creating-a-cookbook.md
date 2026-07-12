@@ -52,13 +52,40 @@ and `sort_order`:
   It declares other recipe/environment names that would cook the *same*
   environment as this recipe. enwiro uses it to hide redundant recipes once one
   has been cooked. See **Equivalent recipes** below.
-- Recipe names must not contain newlines or null bytes.
+- Recipe names must stick to the recipe-name alphabet: letters and digits
+  (any script), plus `@` `#` `/` `.` `_` `-`. See **Recipe names** below.
 - Unknown fields are ignored, so you can add extra fields for your own use.
 - Exit with code 0 on success.
 
 **Ordering within your cookbook:** a good default is to list the most relevant
 or most recently used items first. How that ranking is then combined with other
 cookbooks' recipes is what `sort_order` controls - see below.
+
+#### Recipe names
+
+Recipe names share one global namespace with a fixed alphabet: letters and
+digits (any script), plus the six special characters `@` `#` `/` `.` `_` `-`.
+The daemon drops any recipe whose name steps outside it (with a warning in
+its log), and a pattern claim never matches such a name.
+
+Every other character is reserved for the recipe *grammar* - the expression
+language users type. `+` already composes environments (`foo+bar` cooks both
+recipes into one environment), and `(` `)` `,` `=` are reserved for planned
+syntax. The reservation is what keeps the grammar extensible: a cookbook
+that emitted `fix+v2` would otherwise collide with composition.
+
+The allowed specials carry blessed meanings - conventions, not grammar, but
+following them keeps names predictable across cookbooks:
+
+| Character | Meaning                        | Examples                        |
+| --------- | ------------------------------ | ------------------------------- |
+| `#`       | an item within a container    | `enwiro#42`, `obsidian#my-note` |
+| `@`       | a ref or variant of something | `my-project@some-branch`        |
+| `/`       | hierarchy                     | `owner/repo`                    |
+
+If your source data can contain other characters (spaces, `+`, emoji in a
+note title...), normalize them into the alphabet yourself - e.g. slugify -
+or those recipes will be dropped.
 
 #### Global sort order
 

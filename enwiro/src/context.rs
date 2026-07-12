@@ -9,6 +9,7 @@ use crate::{
 use enwiro_daemon::ConfigurationValues;
 use enwiro_sdk::client::{CachedEntry, CookbookTrait, RpcCookbookClient};
 use enwiro_sdk::plugin::{PluginKind, get_plugins};
+use enwiro_sdk::recipe_expr::RecipeExpr;
 use std::{collections::HashMap, io::Write, os::unix::fs::symlink, path::Path, path::PathBuf};
 
 /// Per-invocation knobs for cooking an environment.
@@ -22,6 +23,14 @@ struct ResolvedRecipe {
     cookbook: String,
     description: Option<String>,
     via_pattern: bool,
+}
+
+/// One cooked recipe: the cookbook that cooked it, the project path it
+/// produced, and the description the cache resolved for it.
+struct CookedRecipe<'a> {
+    cookbook: &'a dyn CookbookTrait,
+    path: String,
+    description: Option<String>,
 }
 
 pub struct CommandContext<W: Write> {
@@ -75,8 +84,102 @@ impl<W: Write> CommandContext<W> {
         recipe_name: &str,
         cfg: &CookConfig,
     ) -> anyhow::Result<Environment> {
+        match enwiro_sdk::recipe_expr::parse(recipe_name)? {
+            RecipeExpr::Name(name) => self.cook_plain_environment(env_name, &name, cfg),
+            RecipeExpr::Composition(parts) => {
+                self.cook_composed_environment(env_name, recipe_name, &parts)
+            }
+        }
+    }
+
+    fn cook_plain_environment(
+        &self,
+        env_name: &str,
+        recipe_name: &str,
+        cfg: &CookConfig,
+    ) -> anyhow::Result<Environment> {
         self.notifier
             .notify_info(env_name, &format!("Preparing environment: {}", env_name));
+        let cooked = self.resolve_and_cook(env_name, recipe_name)?;
+        let flat_name = env_name.replace('/', "-");
+        // main_folder must be written before create_environment_symlink resolves its
+        // return value (via Environment::get_one) -- otherwise a re-cook could read a
+        // stale main_folder left over from a previous cook of the same env.
+        self.save_cook_metadata(
+            &flat_name,
+            cooked.cookbook.name(),
+            recipe_name,
+            cooked.description.as_deref(),
+        );
+        let env = self.create_environment_symlink(env_name, &cooked.path)?;
+        self.write_gear_if_present(cooked.cookbook, recipe_name, &flat_name);
+        self.write_external_paths_if_present(cooked.cookbook, recipe_name, &flat_name);
+        self.write_garnish_gear(&cooked.path, &flat_name, cfg);
+        mark_via_daemon(&flat_name, "active", enwiro_sdk::rpc::MarkSource::Auto);
+        Ok(env)
+    }
+
+    /// Cook `a+b(+...)` (#375): cook every part through normal resolution,
+    /// then build one env whose project directory is a real folder (the
+    /// "wrapper") holding a symlink per part - entering the env shows the
+    /// parts side by side. meta.json records the whole expression under the
+    /// reserved cookbook name `composed`. Gear and garnish hooks are not
+    /// collected: their commands assume the project directory is their own
+    /// part, which the wrapper is not.
+    fn cook_composed_environment(
+        &self,
+        env_name: &str,
+        expression: &str,
+        parts: &[String],
+    ) -> anyhow::Result<Environment> {
+        self.notifier.notify_info(
+            env_name,
+            &format!("Preparing composed environment: {}", env_name),
+        );
+        let flat_parts: Vec<String> = parts.iter().map(|p| p.replace('/', "-")).collect();
+        let mut seen = std::collections::HashSet::new();
+        for (part, flat_part) in parts.iter().zip(&flat_parts) {
+            if !seen.insert(flat_part) {
+                anyhow::bail!(
+                    "Recipe '{}' appears more than once in '{}'",
+                    part,
+                    expression
+                );
+            }
+        }
+
+        // Cook every part before touching the env directory: a failing part
+        // must not leave a half-composed environment behind. Already-cooked
+        // parts are not wasted - cooking is idempotent, so a retry (or
+        // cooking a part standalone) reuses them.
+        let mut cooked_parts: Vec<CookedRecipe> = Vec::new();
+        for part in parts {
+            let cooked = self
+                .resolve_and_cook(env_name, part)
+                .with_context(|| format!("Could not cook part '{}' of '{}'", part, expression))?;
+            cooked_parts.push(cooked);
+        }
+
+        let flat_name = env_name.replace('/', "-");
+        self.save_cook_metadata(
+            &flat_name,
+            enwiro_sdk::recipe_expr::COMPOSED_COOKBOOK_NAME,
+            expression,
+            None,
+        );
+        let env = self.create_composed_wrapper(env_name, &flat_parts, &cooked_parts)?;
+        self.write_composed_external_paths(&flat_name, parts, &cooked_parts);
+        mark_via_daemon(&flat_name, "active", enwiro_sdk::rpc::MarkSource::Auto);
+        Ok(env)
+    }
+
+    /// Resolve `recipe_name` in the daemon cache and cook it with the owning
+    /// cookbook. Shared by plain and composed cooks.
+    fn resolve_and_cook(
+        &self,
+        env_name: &str,
+        recipe_name: &str,
+    ) -> anyhow::Result<CookedRecipe<'_>> {
         let resolved = self.find_recipe_in_cache(recipe_name).ok_or_else(|| {
             tracing::error!(name = %recipe_name, "Recipe not in daemon cache");
             anyhow!(
@@ -111,23 +214,12 @@ impl<W: Write> CommandContext<W> {
         }
 
         tracing::debug!(env = %env_name, recipe = %recipe_name, cookbook = %cookbook_name, "Found recipe in cache");
-        let env_path = cookbook.cook(recipe_name)?;
-        let flat_name = env_name.replace('/', "-");
-        // main_folder must be written before create_environment_symlink resolves its
-        // return value (via Environment::get_one) -- otherwise a re-cook could read a
-        // stale main_folder left over from a previous cook of the same env.
-        self.save_cook_metadata(
-            &flat_name,
-            &cookbook_name,
-            recipe_name,
-            description.as_deref(),
-        );
-        let env = self.create_environment_symlink(env_name, &env_path)?;
-        self.write_gear_if_present(cookbook.as_ref(), recipe_name, &flat_name);
-        self.write_external_paths_if_present(cookbook.as_ref(), recipe_name, &flat_name);
-        self.write_garnish_gear(&env_path, &flat_name, cfg);
-        mark_via_daemon(&flat_name, "active", enwiro_sdk::rpc::MarkSource::Auto);
-        Ok(env)
+        let path = cookbook.cook(recipe_name)?;
+        Ok(CookedRecipe {
+            cookbook: cookbook.as_ref(),
+            path,
+            description,
+        })
     }
 
     pub fn find_recipe_in_cache_by_name(&self, recipe_name: &str) -> bool {
@@ -267,6 +359,73 @@ impl<W: Write> CommandContext<W> {
                 tracing::debug!(error = %e, "Cookbook external_paths() returned error, continuing");
             }
         }
+    }
+
+    /// Build the composed env's project directory: `<env>/<flat_name>/` is
+    /// a real directory holding one symlink per part, named after the
+    /// part's flattened recipe name. `main_folder` (already written) points
+    /// at it, so entering the env lands where every part is visible.
+    fn create_composed_wrapper(
+        &self,
+        name: &str,
+        flat_parts: &[String],
+        cooked_parts: &[CookedRecipe],
+    ) -> anyhow::Result<Environment> {
+        let flat_name = name.replace('/', "-");
+        let env_dir = Path::new(&self.config.workspaces_directory).join(&flat_name);
+        let wrapper = env_dir.join(&flat_name);
+        tracing::info!(name = %name, "Creating composed environment wrapper");
+        if wrapper.is_symlink() {
+            // The env was previously cooked from a plain recipe; its project
+            // symlink gives way to the wrapper directory.
+            std::fs::remove_file(&wrapper)?;
+        }
+        std::fs::create_dir_all(&wrapper)?;
+        for (flat_part, cooked) in flat_parts.iter().zip(cooked_parts) {
+            let link = wrapper.join(flat_part);
+            if link.is_symlink() || link.exists() {
+                std::fs::remove_file(&link)?;
+            }
+            symlink(Path::new(&cooked.path), &link)?;
+        }
+        self.notifier
+            .notify_success(name, &format!("Created environment: {}", name));
+        Environment::get_one(&self.config.workspaces_directory, &flat_name)
+    }
+
+    /// The union of every part's isolation needs, written as one file under
+    /// the `composed` contributor name: each part's cooked project path (the
+    /// wrapper's symlinks point outside the env) plus whatever the part's
+    /// own cookbook declares (e.g. a worktree's base repo).
+    fn write_composed_external_paths(
+        &self,
+        flat_name: &str,
+        parts: &[String],
+        cooked_parts: &[CookedRecipe],
+    ) {
+        let mut paths: Vec<String> = Vec::new();
+        for (part, cooked) in parts.iter().zip(cooked_parts) {
+            paths.push(cooked.path.clone());
+            match cooked.cookbook.external_paths(part) {
+                Ok(extra) => paths.extend(extra),
+                Err(e) => {
+                    tracing::debug!(error = %e, "Cookbook external_paths() returned error, continuing");
+                }
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        let env_dir = Path::new(&self.config.workspaces_directory).join(flat_name);
+        let file_path = enwiro_sdk::external_paths::external_paths_dir(&env_dir).join(
+            enwiro_sdk::external_paths::external_paths_filename(
+                enwiro_sdk::recipe_expr::COMPOSED_COOKBOOK_NAME,
+            ),
+        );
+        let data = enwiro_sdk::external_paths::ExternalPathsFileData {
+            version: enwiro_sdk::external_paths::SCHEMA_VERSION,
+            paths,
+        };
+        enwiro_sdk::dropin::write_json_file(&file_path, &data);
     }
 
     fn create_environment_symlink(
@@ -807,6 +966,226 @@ mod tests {
                 .find_recipe_in_cache("my-porject@feature")
                 .is_none()
         );
+    }
+
+    #[rstest]
+    fn test_cook_composed_environment_builds_wrapper_with_part_symlinks(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let foo_target = temp_dir.path().join("foo-target");
+        let bar_target = temp_dir.path().join("bar-target");
+        fs::create_dir(&foo_target).unwrap();
+        fs::create_dir(&bar_target).unwrap();
+
+        context_object.write_cache_entries(&[("git", "foo", None), ("git", "bar", None)]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["foo", "bar"],
+            vec![
+                ("foo", foo_target.to_str().unwrap()),
+                ("bar", bar_target.to_str().unwrap()),
+            ],
+        ))];
+
+        let env = context_object
+            .cook_environment("foo+bar", "foo+bar", &CookConfig::default())
+            .unwrap();
+
+        // The project directory is the wrapper folder, showing both parts.
+        let env_dir = temp_dir.path().join("foo+bar");
+        let wrapper = env_dir.join("foo+bar");
+        assert_eq!(env.path, wrapper.to_str().unwrap());
+        assert!(wrapper.is_dir() && !wrapper.is_symlink());
+        assert_eq!(wrapper.join("foo").read_link().unwrap(), foo_target);
+        assert_eq!(wrapper.join("bar").read_link().unwrap(), bar_target);
+
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(meta.cookbook.as_deref(), Some("composed"));
+        assert_eq!(meta.recipe.as_deref(), Some("foo+bar"));
+        assert_eq!(meta.main_folder.as_deref(), Some("foo+bar"));
+    }
+
+    #[rstest]
+    fn test_cook_composed_environment_unions_external_paths(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let foo_target = temp_dir.path().join("foo-target");
+        let bar_target = temp_dir.path().join("bar-target");
+        fs::create_dir(&foo_target).unwrap();
+        fs::create_dir(&bar_target).unwrap();
+
+        context_object.write_cache_entries(&[("git", "foo", None), ("git", "bar", None)]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["foo", "bar"],
+            vec![
+                ("foo", foo_target.to_str().unwrap()),
+                ("bar", bar_target.to_str().unwrap()),
+            ],
+        ))];
+
+        context_object
+            .cook_environment("foo+bar", "foo+bar", &CookConfig::default())
+            .unwrap();
+
+        // The wrapper's symlinks point outside the env, so the parts' cooked
+        // paths must be declared as external for isolation to reach them.
+        let file = temp_dir
+            .path()
+            .join("foo+bar")
+            .join("external-paths.d")
+            .join("cookbook-composed.json");
+        let data: enwiro_sdk::external_paths::ExternalPathsFileData =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(
+            data.paths
+                .contains(&foo_target.to_str().unwrap().to_string())
+        );
+        assert!(
+            data.paths
+                .contains(&bar_target.to_str().unwrap().to_string())
+        );
+    }
+
+    #[rstest]
+    fn test_cook_composed_environment_failing_part_leaves_no_env(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let foo_target = temp_dir.path().join("foo-target");
+        fs::create_dir(&foo_target).unwrap();
+
+        // 'bar' is in the cache but its cook fails (no cook result for it).
+        context_object.write_cache_entries(&[("git", "foo", None), ("git", "bar", None)]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["foo", "bar"],
+            vec![("foo", foo_target.to_str().unwrap())],
+        ))];
+
+        let result = context_object.cook_environment("foo+bar", "foo+bar", &CookConfig::default());
+
+        assert!(result.is_err());
+        assert!(
+            !temp_dir.path().join("foo+bar").exists(),
+            "a failing part must not leave a half-composed env behind"
+        );
+    }
+
+    #[rstest]
+    fn test_cook_composed_environment_rejects_duplicate_parts(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let foo_target = temp_dir.path().join("foo-target");
+        fs::create_dir(&foo_target).unwrap();
+        context_object.write_cache_entry("git", "foo");
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["foo"],
+            vec![("foo", foo_target.to_str().unwrap())],
+        ))];
+
+        let err = context_object
+            .cook_environment("foo+foo", "foo+foo", &CookConfig::default())
+            .unwrap_err();
+
+        assert!(err.to_string().contains("more than once"), "{err}");
+        assert!(!temp_dir.path().join("foo+foo").exists());
+    }
+
+    #[rstest]
+    fn test_cook_composed_environment_under_an_alias(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let foo_target = temp_dir.path().join("foo-target");
+        let bar_target = temp_dir.path().join("bar-target");
+        fs::create_dir(&foo_target).unwrap();
+        fs::create_dir(&bar_target).unwrap();
+
+        context_object.write_cache_entries(&[("git", "foo", None), ("git", "bar", None)]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "git",
+            vec!["foo", "bar"],
+            vec![
+                ("foo", foo_target.to_str().unwrap()),
+                ("bar", bar_target.to_str().unwrap()),
+            ],
+        ))];
+
+        let env = context_object
+            .cook_environment("work", "foo+bar", &CookConfig::default())
+            .unwrap();
+
+        let wrapper = temp_dir.path().join("work").join("work");
+        assert_eq!(env.path, wrapper.to_str().unwrap());
+        assert!(wrapper.join("foo").is_symlink());
+        assert!(wrapper.join("bar").is_symlink());
+        let meta = crate::usage_stats::load_env_meta(&temp_dir.path().join("work"));
+        assert_eq!(meta.recipe.as_deref(), Some("foo+bar"));
+    }
+
+    #[rstest]
+    fn test_cook_environment_rejects_invalid_recipe_grammar(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, context_object, _, _) = context_object;
+
+        let err = context_object
+            .cook_environment("foo+", "foo+", &CookConfig::default())
+            .unwrap_err();
+
+        assert!(err.to_string().contains("expected a recipe name"), "{err}");
+    }
+
+    #[rstest]
+    fn test_cook_composed_environment_flattens_slashes_in_part_links(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let a_target = temp_dir.path().join("a-target");
+        let b_target = temp_dir.path().join("b-target");
+        fs::create_dir(&a_target).unwrap();
+        fs::create_dir(&b_target).unwrap();
+
+        context_object
+            .write_cache_entries(&[("github", "owner/repo#4", None), ("git", "bar", None)]);
+        context_object.cookbooks = vec![
+            Box::new(FakeCookbook::new(
+                "github",
+                vec!["owner/repo#4"],
+                vec![("owner/repo#4", a_target.to_str().unwrap())],
+            )),
+            Box::new(FakeCookbook::new(
+                "git",
+                vec!["bar"],
+                vec![("bar", b_target.to_str().unwrap())],
+            )),
+        ];
+
+        context_object
+            .cook_environment(
+                "owner/repo#4+bar",
+                "owner/repo#4+bar",
+                &CookConfig::default(),
+            )
+            .unwrap();
+
+        let wrapper = temp_dir
+            .path()
+            .join("owner-repo#4+bar")
+            .join("owner-repo#4+bar");
+        assert!(wrapper.join("owner-repo#4").is_symlink());
+        assert!(wrapper.join("bar").is_symlink());
     }
 
     #[rstest]

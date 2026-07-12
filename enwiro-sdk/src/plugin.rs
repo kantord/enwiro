@@ -34,6 +34,13 @@ impl PluginName {
         if name == "." || name == ".." {
             return Err(InvalidPluginName(format!("'{name}' is reserved")));
         }
+        // Composed environments (#375) record `cookbook: "composed"` in
+        // meta.json; a real plugin under that name would collide with it.
+        if name == crate::recipe_expr::COMPOSED_COOKBOOK_NAME {
+            return Err(InvalidPluginName(
+                "'composed' is reserved for composed environments".into(),
+            ));
+        }
         if name.contains('/') || name.contains('\\') {
             return Err(InvalidPluginName("must not contain path separators".into()));
         }
@@ -242,6 +249,11 @@ mod tests {
         fn rejects_dot_and_dotdot() {
             assert!(PluginName::new(".").is_err());
             assert!(PluginName::new("..").is_err());
+        }
+
+        #[test]
+        fn rejects_reserved_composed() {
+            assert!(PluginName::new("composed").is_err());
         }
 
         #[test]

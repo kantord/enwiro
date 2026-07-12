@@ -12,10 +12,12 @@ pub struct Environment {
     pub name: String,
 }
 
-/// Which symlink inside `env_dir` (the "new format" per-env directory) is
+/// Which entry inside `env_dir` (the "new format" per-env directory) is
 /// this environment's project directory. Prefers `main_folder` from
-/// meta.json (composed environments, #375); every env cooked from here on
-/// always has it set (`context.rs::save_cook_metadata`).
+/// meta.json; every env cooked from here on always has it set
+/// (`context.rs::save_cook_metadata`). For a plain env that is a symlink to
+/// the cooked project; for a composed env (#375) it is a real directory
+/// (the wrapper folder holding one symlink per part).
 ///
 /// TODO(by 2026-09): the same-named-symlink fallback below only exists for
 /// envs cooked before main_folder was written unconditionally. Once enough
@@ -27,7 +29,7 @@ fn resolve_project_symlink(env_dir: &Path, id: &str) -> Option<PathBuf> {
         && is_plain_component(&main_folder)
     {
         let candidate = env_dir.join(main_folder);
-        if candidate.is_symlink() {
+        if candidate.is_symlink() || candidate.is_dir() {
             return Some(candidate);
         }
     }
@@ -158,6 +160,23 @@ mod tests {
         assert_eq!(
             environments["my-env"].path,
             env_dir.join("sub").to_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn get_all_accepts_a_real_directory_as_main_folder() {
+        // Composed environments (#375): the project directory is a real
+        // wrapper folder holding one symlink per part, not itself a symlink.
+        let root = tempfile::tempdir().unwrap();
+        let env_dir = new_format_env(root.path(), "foo+bar");
+        fs::create_dir(env_dir.join("foo+bar")).unwrap();
+        write_main_folder(&env_dir, "foo+bar");
+
+        let environments = Environment::get_all(root.path().to_str().unwrap()).unwrap();
+
+        assert_eq!(
+            environments["foo+bar"].path,
+            env_dir.join("foo+bar").to_str().unwrap()
         );
     }
 

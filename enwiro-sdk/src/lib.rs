@@ -25,6 +25,7 @@ pub mod logging;
 pub mod metadata;
 pub mod plugin;
 pub mod process;
+pub mod recipe_expr;
 pub mod recipe_pattern;
 pub mod rpc;
 pub mod status;

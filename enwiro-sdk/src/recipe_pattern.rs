@@ -95,11 +95,21 @@ pub struct PatternMatch {
 /// Match `name` against an already-anchored cached pattern. `None` means no
 /// match - an uncompilable pattern also counts as a non-match, since cache
 /// entries were validated at build time and can only be broken by hand.
+///
+/// A name outside the recipe-name alphabet ([`crate::recipe_expr`]) is also
+/// a non-match, no matter how permissive the pattern: a greedy claim like
+/// `repo@(?P<branch>.+)` must not swallow reserved grammar characters
+/// (`repo@fix+2` is the composition `repo@fix` + `2`, not a branch).
+/// Callers only ever pass atomic names - grammar is parsed off before
+/// resolution - so a valid match is always alphabet-clean.
 pub fn match_name(
     anchored_pattern: &str,
     template: Option<&str>,
     name: &str,
 ) -> Option<PatternMatch> {
+    if !crate::recipe_expr::is_valid_recipe_name(name) {
+        return None;
+    }
     let compiled = regex::Regex::new(anchored_pattern).ok()?;
     let captures = compiled.captures(name)?;
     let description = template.and_then(|template| {
@@ -188,6 +198,34 @@ mod tests {
             matched.description.as_deref(),
             Some("Create new branch 'feat/login' in my-project")
         );
+    }
+
+    #[test]
+    fn match_name_rejects_names_outside_the_recipe_alphabet() {
+        let anchored = anchor("my-project@(?P<branch>.+)");
+        for name in [
+            "my-project@fix+2",
+            "my-project@feat(x)",
+            "my-project@a,b",
+            "my-project@a=b",
+            "my-project@a b",
+        ] {
+            assert_eq!(match_name(&anchored, None, name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn match_name_accepts_conventional_chars() {
+        let anchored = anchor("my-project@(?P<branch>.+)");
+        assert!(match_name(&anchored, None, "my-project@feat/log-in.v2_x#1").is_some());
+    }
+
+    #[test]
+    fn match_name_rejects_banned_chars_even_in_pattern_literals() {
+        // The claim itself embeds '!': names it matches are still outside
+        // the recipe alphabet, so the claim is effectively dead.
+        let anchored = anchor("p!(?P<branch>[a-z]+)");
+        assert_eq!(match_name(&anchored, None, "p!main"), None);
     }
 
     #[test]
