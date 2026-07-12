@@ -41,6 +41,16 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Cookbooks',
+          items: [
+            { slug: 'cookbooks' },
+            {
+              label: 'Available Cookbooks',
+              items: [{ slug: 'cookbooks/available-cookbooks/git' }],
+            },
+          ],
+        },
+        {
           label: 'Bridges',
           items: [{ slug: 'bridges' }, { slug: 'bridges/creating-a-bridge' }],
         },
