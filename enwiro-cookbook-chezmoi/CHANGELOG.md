@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.23](https://github.com/kantord/enwiro/compare/enwiro-cookbook-chezmoi-v0.1.22...enwiro-cookbook-chezmoi-v0.1.23) - 2026-07-12
+
+### Added
+
+- unify metadata behavior ([#728](https://github.com/kantord/enwiro/pull/728))
+
+### Other
+
+- set up binary publishing ([#765](https://github.com/kantord/enwiro/pull/765))
+- small fixes ([#748](https://github.com/kantord/enwiro/pull/748))
+
 ## [0.1.22](https://github.com/kantord/enwiro/compare/enwiro-cookbook-chezmoi-v0.1.21...enwiro-cookbook-chezmoi-v0.1.22) - 2026-07-10
 
 ### Added

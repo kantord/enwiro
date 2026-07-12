@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.21](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.20...enwiro-daemon-v0.0.21) - 2026-07-12
+
+### Added
+
+- allow combining multiple environments ([#761](https://github.com/kantord/enwiro/pull/761))
+- add browser extension ([#739](https://github.com/kantord/enwiro/pull/739))
+- unify metadata behavior ([#728](https://github.com/kantord/enwiro/pull/728))
+
+### Fixed
+
+- *(deps)* update rust crate reqwest to 0.13 ([#744](https://github.com/kantord/enwiro/pull/744))
+
+### Other
+
+- set up binary publishing ([#765](https://github.com/kantord/enwiro/pull/765))
+- small metadta fixes ([#733](https://github.com/kantord/enwiro/pull/733))
+
 ## [0.0.20](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.19...enwiro-daemon-v0.0.20) - 2026-07-10
 
 ### Added
