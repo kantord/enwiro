@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.59](https://github.com/kantord/enwiro/compare/enwiro-v0.3.58...enwiro-v0.3.59) - 2026-07-12
+
+### Added
+
+- allow combining multiple environments ([#761](https://github.com/kantord/enwiro/pull/761))
+- add browser extension ([#739](https://github.com/kantord/enwiro/pull/739))
+
+### Other
+
+- set up binary publishing ([#765](https://github.com/kantord/enwiro/pull/765))
+- small fixes ([#748](https://github.com/kantord/enwiro/pull/748))
+
 ## [0.3.58](https://github.com/kantord/enwiro/compare/enwiro-v0.3.57...enwiro-v0.3.58) - 2026-07-10
 
 ### Added

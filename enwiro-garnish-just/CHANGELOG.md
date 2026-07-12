@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.17](https://github.com/kantord/enwiro/compare/enwiro-garnish-just-v0.1.16...enwiro-garnish-just-v0.1.17) - 2026-07-12
+
+### Added
+
+- unify metadata behavior ([#728](https://github.com/kantord/enwiro/pull/728))
+
+### Other
+
+- set up binary publishing ([#765](https://github.com/kantord/enwiro/pull/765))
+
 ## [0.1.16](https://github.com/kantord/enwiro/compare/enwiro-garnish-just-v0.1.15...enwiro-garnish-just-v0.1.16) - 2026-07-10
 
 ### Other

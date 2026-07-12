@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.10.3...enwiro-sdk-v0.11.0) - 2026-07-12
+
+### Added
+
+- allow combining multiple environments ([#761](https://github.com/kantord/enwiro/pull/761))
+- add browser extension ([#739](https://github.com/kantord/enwiro/pull/739))
+- unify metadata behavior ([#728](https://github.com/kantord/enwiro/pull/728))
+
+### Fixed
+
+- run test fixture scripts via sh to avoid ETXTBSY flake ([#745](https://github.com/kantord/enwiro/pull/745))
+
+### Other
+
+- small metadta fixes ([#733](https://github.com/kantord/enwiro/pull/733))
+
 ## [0.10.3](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.10.2...enwiro-sdk-v0.10.3) - 2026-07-10
 
 ### Added

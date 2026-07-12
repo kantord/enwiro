@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.27](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.26...enwiro-cookbook-github-v0.1.27) - 2026-07-12
+
+### Added
+
+- add browser extension ([#739](https://github.com/kantord/enwiro/pull/739))
+- unify metadata behavior ([#728](https://github.com/kantord/enwiro/pull/728))
+
+### Other
+
+- set up binary publishing ([#765](https://github.com/kantord/enwiro/pull/765))
+
 ## [0.1.26](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.25...enwiro-cookbook-github-v0.1.26) - 2026-07-10
 
 ### Added

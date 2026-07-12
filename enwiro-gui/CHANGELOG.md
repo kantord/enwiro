@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/kantord/enwiro/compare/enwiro-gui-v0.1.4...enwiro-gui-v0.1.5) - 2026-07-12
+
+### Other
+
+- set up binary publishing ([#765](https://github.com/kantord/enwiro/pull/765))
+- small fixes ([#748](https://github.com/kantord/enwiro/pull/748))
+- *(deps)* update dependency vite to v8.1.4 ([#746](https://github.com/kantord/enwiro/pull/746))
+- *(deps)* update dependency typescript to v7 ([#740](https://github.com/kantord/enwiro/pull/740))
+- *(deps)* update dependency @types/node to v24.13.3 ([#734](https://github.com/kantord/enwiro/pull/734))
+
 ## [0.1.4](https://github.com/kantord/enwiro/compare/enwiro-gui-v0.1.3...enwiro-gui-v0.1.4) - 2026-07-10
 
 ### Other
