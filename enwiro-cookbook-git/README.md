@@ -1,3 +1,3 @@
 # enwiro-cookbook-git
 
-See [enwiro documentation](https://enwi.ro/).
+See [enwiro-cookbook-git documentation](https://enwi.ro/cookbooks/available-cookbooks/git/).
