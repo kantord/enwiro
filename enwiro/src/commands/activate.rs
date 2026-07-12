@@ -92,7 +92,9 @@ pub fn activate<W: Write>(
         context
             .notifier
             .notify_error(&format!("Could not set up environment {}: {:#}", target, e));
-        tracing::warn!(error = %e, "Could not set up environment");
+        // `{:#}` keeps the whole context chain - `%e` alone would swallow
+        // the actual cause (e.g. WHICH part of a composed recipe failed).
+        tracing::warn!(error = %format_args!("{:#}", e), "Could not set up environment");
     }
 
     let gear = match enwiro_sdk::gear::LoadedGear::from_env_dir(&env_dir) {
