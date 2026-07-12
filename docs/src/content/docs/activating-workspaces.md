@@ -9,11 +9,11 @@ activate one by name and your tools (terminal, editor, browser, agents) follow
 it together.
 
 An [environment](/#environment) is such a unit of work that already exists. A
-[recipe](/#recipe) is a blueprint enwiro can turn into one an environment demand.
+[recipe](/#recipe) is a blueprint enwiro can turn into an environment on demand.
 
-You do not need to worry if an environment exists already - cookbooks and environments
-are addressed the same way, and if you attempt to use a recipe, ewiro just
-converts it into a environment on the fly.
+You do not need to worry if an environment exists already - recipes and environments
+are addressed the same way, and if you attempt to use a recipe, enwiro just
+converts it into an environment on the fly.
 
 ## Activating
 
