@@ -238,10 +238,14 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
     for (cookbook_name, entry) in state {
         for item in &entry.recipes {
             match item {
-                RecipeItem::Concrete(recipe) => all_recipes.push(SortableCachedRecipe {
-                    cached: cached_concrete_entry(cookbook_name, recipe),
-                    priority: entry.priority,
-                }),
+                RecipeItem::Concrete(recipe) => {
+                    if let Some(cached) = cached_concrete_entry(cookbook_name, recipe) {
+                        all_recipes.push(SortableCachedRecipe {
+                            cached,
+                            priority: entry.priority,
+                        });
+                    }
+                }
                 RecipeItem::Pattern(pattern) => {
                     if let Some(cached) = cached_pattern_entry(cookbook_name, pattern) {
                         all_patterns.push((entry.priority, cached));
@@ -276,8 +280,20 @@ pub(crate) fn build_cache_content(state: &HashMap<String, CookbookEntry>) -> Str
     output
 }
 
-fn cached_concrete_entry(cookbook: &str, recipe: &enwiro_sdk::Recipe) -> CachedRecipe {
-    CachedRecipe {
+/// Build the cache line for one concrete recipe. `None` (with a warning)
+/// drops a recipe whose name falls outside the recipe-name alphabet
+/// (`enwiro_sdk::recipe_expr`): characters like `+` are recipe grammar, and
+/// a cookbook-emitted name using one would shadow or break expressions.
+fn cached_concrete_entry(cookbook: &str, recipe: &enwiro_sdk::Recipe) -> Option<CachedRecipe> {
+    if !enwiro_sdk::recipe_expr::is_valid_recipe_name(&recipe.name) {
+        tracing::warn!(
+            cookbook = %cookbook,
+            recipe = %recipe.name,
+            "Dropping recipe whose name contains characters reserved for recipe grammar"
+        );
+        return None;
+    }
+    Some(CachedRecipe {
         cookbook: cookbook.to_string(),
         name: recipe.name.clone(),
         description: recipe
@@ -287,7 +303,7 @@ fn cached_concrete_entry(cookbook: &str, recipe: &enwiro_sdk::Recipe) -> CachedR
         sort_order: recipe.sort_order,
         equivalent_to: recipe.equivalent_to.clone(),
         scores: None,
-    }
+    })
 }
 
 /// Validate and anchor one cookbook-emitted pattern claim. `None` (with a
@@ -916,6 +932,27 @@ mod tests {
             patterns[0].url.is_none(),
             "invalid url rule must be dropped"
         );
+    }
+
+    #[test]
+    fn build_cache_content_drops_recipe_named_outside_the_alphabet() {
+        let mut state = HashMap::new();
+        state.insert(
+            "git".to_string(),
+            entry(
+                10,
+                vec![
+                    Recipe::new("c++utils"),
+                    Recipe::new("repo@fix+v2"),
+                    Recipe::new("fine-recipe"),
+                ],
+            ),
+        );
+
+        let output = build_cache_content(&state);
+        let cached = parse_cached_lines(&output);
+        assert_eq!(cached.len(), 1, "got: {output}");
+        assert_eq!(cached[0].name, "fine-recipe");
     }
 
     #[test]

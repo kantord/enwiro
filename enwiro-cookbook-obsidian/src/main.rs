@@ -29,8 +29,22 @@ struct VaultRecipe {
     vault_path: PathBuf,
 }
 
+/// Normalize a vault directory name into the recipe-name alphabet
+/// (`enwiro_sdk::recipe_expr`): lowercase, then collapse every disallowed
+/// character (spaces, but also grammar characters like `+`) to `-` - the
+/// daemon drops recipes whose names step outside the alphabet.
 fn slugify(dir_name: &str) -> String {
-    dir_name.to_lowercase().replace(' ', "-")
+    dir_name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if enwiro_sdk::recipe_expr::is_allowed_name_char(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 fn compute_sort_order(index: usize, total: usize) -> u32 {
@@ -330,6 +344,19 @@ mod tests {
         #[test]
         fn handles_multiple_spaces() {
             check("A B C", "a-b-c");
+        }
+
+        #[test]
+        fn collapses_grammar_chars_to_hyphens() {
+            // '+' and friends are recipe grammar; the daemon would drop a
+            // recipe name containing them.
+            check("C++ Notes", "c---notes");
+            check("a(b),c=d", "a-b--c-d");
+        }
+
+        #[test]
+        fn keeps_unicode_letters() {
+            check("Café Notes", "café-notes");
         }
     }
 
