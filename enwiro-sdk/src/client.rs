@@ -794,7 +794,6 @@ echo "$payload"
 
     mod wait_with_output_timeout {
         use super::super::wait_with_output_timeout;
-        use std::os::unix::fs::PermissionsExt;
         use std::process::{Command, Stdio};
         use std::time::{Duration, Instant};
 
@@ -803,11 +802,15 @@ echo "$payload"
         const TEST_TIMEOUT: Duration = Duration::from_secs(10);
         const TEST_SHORT_TIMEOUT: Duration = Duration::from_millis(300);
 
+        // Run via `sh` rather than exec'ing the file directly: exec'ing a
+        // just-written file races with concurrent fork+exec in other test
+        // threads (the forked child briefly holds the write fd, so exec
+        // fails with ETXTBSY). Reading it through sh is immune.
         fn spawn_script(dir: &std::path::Path, body: &str) -> std::process::Child {
             let path = dir.join("fixture.sh");
-            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Command::new(&path)
+            std::fs::write(&path, format!("{body}\n")).unwrap();
+            Command::new("/bin/sh")
+                .arg(&path)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
