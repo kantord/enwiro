@@ -250,6 +250,7 @@ mod tests {
             "github",
             "owner/repo#1",
             Some("Test"),
+            None,
             "my-env",
         );
 

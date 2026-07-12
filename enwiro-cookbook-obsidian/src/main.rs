@@ -103,6 +103,7 @@ fn vault_recipes_from_json(json: &str) -> Result<Vec<VaultRecipe>> {
                 description: Some(description),
                 sort_order: compute_sort_order(index, total),
                 equivalent_to: Vec::new(),
+                goal: None,
             },
             vault_path,
         })

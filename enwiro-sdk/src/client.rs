@@ -5,6 +5,7 @@ use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 use crate::cookbook::{CookbookMetadata, CookbookPayload, Recipe};
+use crate::goal::GoalDetail;
 use crate::plugin::Plugin;
 
 const DEFAULT_PRIORITY: u32 = 50;
@@ -34,6 +35,10 @@ pub struct CachedRecipe {
     /// can hide a recipe once an equivalent one has been cooked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equivalent_to: Vec<String>,
+    /// See `Recipe::goal`: carried through the daemon cache so `cook` can
+    /// record it on the resulting environment without re-deriving it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scores: Option<EnvScores>,
 }

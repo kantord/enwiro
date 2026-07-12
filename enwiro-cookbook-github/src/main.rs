@@ -165,15 +165,34 @@ fn discover_github_repos() -> anyhow::Result<Vec<RepoConfig>> {
     discover_github_repos_from_config(&git_config)
 }
 
-/// Parse a recipe name like "repo#123" into ("repo", 123).
-fn parse_recipe_name(name: &str) -> anyhow::Result<(&str, u64)> {
+/// The only recognized goal-variant suffix (#756): `repo#42@fix-ci` cooks
+/// the same PR as `repo#42`, just recorded with a "fix CI" goal instead of
+/// "work on it". `@` is this codebase's documented convention for "pins a
+/// ref or variant" (see `enwiro_sdk::recipe_expr`).
+const FIX_CI_VARIANT: &str = "fix-ci";
+
+/// Parse a recipe name like "repo#123" or "repo#123@fix-ci" into
+/// ("repo", 123, is_fix_ci_variant).
+fn parse_recipe_name(name: &str) -> anyhow::Result<(&str, u64, bool)> {
     let (repo, number_str) = name
         .rsplit_once('#')
         .context("Recipe name must contain '#' (expected format: repo#123)")?;
+    let (number_str, is_fix_ci_variant) = match number_str.split_once('@') {
+        Some((number_str, variant)) => {
+            anyhow::ensure!(
+                variant == FIX_CI_VARIANT,
+                "Unrecognized goal variant '@{}' (expected '@{}')",
+                variant,
+                FIX_CI_VARIANT
+            );
+            (number_str, true)
+        }
+        None => (number_str, false),
+    };
     let number = number_str
         .parse::<u64>()
         .with_context(|| format!("Invalid issue/PR number: {}", number_str))?;
-    Ok((repo, number))
+    Ok((repo, number, is_fix_ci_variant))
 }
 
 /// Build a GitHub search query string.
@@ -365,6 +384,65 @@ fn cooked_branch_name(item: &GithubItem) -> String {
     }
 }
 
+/// One goal-detail payload shared by every recipe derived from `item`:
+/// `{repo, number}`, enough for a future prompt generator to look the item
+/// back up without re-deriving it from the recipe name (#756).
+fn goal_detail(kind: &str, label: String, item: &GithubItem) -> enwiro_sdk::goal::GoalDetail {
+    enwiro_sdk::goal::GoalDetail {
+        kind: kind.to_string(),
+        label,
+        detail: Some(serde_json::json!({"repo": item.repo, "number": item.number})),
+    }
+}
+
+/// The recipe(s) one search result expands to: one for an issue
+/// (`repo#N`, goal `github_issue`), two for a PR - `repo#N` (goal
+/// `work_on`, unchanged from before goal-variants existed) and
+/// `repo#N@fix-ci` (goal `fix_ci`) - both cooking the same worktree, so
+/// they share `equivalent_to` (#756).
+fn recipes_for_item(
+    item: &GithubItem,
+    index: usize,
+    total: usize,
+    display_names: &std::collections::HashMap<String, String>,
+) -> Vec<Recipe> {
+    let safe_title = item.title.replace(['\n', '\0', '\x1f'], " ");
+    let sort_order = compute_sort_order(index, total);
+    let equivalent_to = display_names
+        .get(&item.repo)
+        .map(|display| vec![format!("{}@{}", display, cooked_branch_name(item))])
+        .unwrap_or_default();
+    let base_name = format!("{}#{}", item.repo, item.number);
+
+    match &item.kind {
+        GithubItemKind::Issue => {
+            let mut recipe = Recipe::with_description(base_name, format!("[issue] {}", safe_title));
+            recipe.sort_order = sort_order;
+            recipe.equivalent_to = equivalent_to;
+            recipe.goal = Some(goal_detail("github_issue", safe_title, item));
+            vec![recipe]
+        }
+        GithubItemKind::PullRequest { .. } => {
+            let mut work_on =
+                Recipe::with_description(base_name.clone(), format!("[PR] {}", safe_title));
+            work_on.sort_order = sort_order;
+            work_on.equivalent_to = equivalent_to.clone();
+            work_on.goal = Some(goal_detail("work_on", safe_title.clone(), item));
+
+            let fix_ci_label = format!("Fix CI for {}", safe_title);
+            let mut fix_ci = Recipe::with_description(
+                format!("{base_name}@{FIX_CI_VARIANT}"),
+                format!("[PR] {}", fix_ci_label),
+            );
+            fix_ci.sort_order = sort_order;
+            fix_ci.equivalent_to = equivalent_to;
+            fix_ci.goal = Some(goal_detail("fix_ci", fix_ci_label, item));
+
+            vec![work_on, fix_ci]
+        }
+    }
+}
+
 fn collect_recipes() -> Vec<Recipe> {
     let Ok(repos) = discover_github_repos() else {
         return Vec::new();
@@ -392,24 +470,7 @@ fn collect_recipes() -> Vec<Recipe> {
     items
         .iter()
         .enumerate()
-        .map(|(index, item)| {
-            let safe_title = item.title.replace(['\n', '\0', '\x1f'], " ");
-            let prefix = match &item.kind {
-                GithubItemKind::PullRequest { .. } => "[PR]",
-                GithubItemKind::Issue => "[issue]",
-            };
-            let mut recipe = Recipe::with_description(
-                format!("{}#{}", item.repo, item.number),
-                format!("{} {}", prefix, safe_title),
-            );
-            recipe.sort_order = compute_sort_order(index, total);
-            // Declare the git cookbook's `repo@<branch>` name for the same
-            // worktree so `ls` collapses the two once either is cooked.
-            if let Some(display) = display_names.get(&item.repo) {
-                recipe.equivalent_to = vec![format!("{}@{}", display, cooked_branch_name(item))];
-            }
-            recipe
-        })
+        .flat_map(|(index, item)| recipes_for_item(item, index, total, &display_names))
         .collect()
 }
 
@@ -448,9 +509,11 @@ fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
             RecipeItem::Pattern(PatternRecipe {
                 // [0-9]{1,19}, not \d+: the regex crate's \d is Unicode and
                 // unbounded, which would claim names whose number
-                // parse_recipe_name's u64 parse then rejects.
+                // parse_recipe_name's u64 parse then rejects. The trailing
+                // optional group claims the fix-ci goal variant (#756) for
+                // not-yet-listed numbers too, e.g. `repo#42@fix-ci`.
                 pattern: format!(
-                    "{}#(?P<number>[0-9]{{1,19}})",
+                    "{}#(?P<number>[0-9]{{1,19}})(?:@{FIX_CI_VARIANT})?",
                     enwiro_sdk::recipe_pattern::escape(&short_name)
                 ),
                 description: Some(format!(
@@ -778,8 +841,18 @@ fn cook_issue(
     print_worktree_path(&wt_path)
 }
 
+/// A goal-variant number resolved to an issue, not a PR - the variant only
+/// makes sense for PRs (#756).
+fn reject_fix_ci_on_issue(is_fix_ci_variant: bool, number: u64) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !is_fix_ci_variant,
+        "'@{FIX_CI_VARIANT}' only applies to pull requests, but #{number} is an issue"
+    );
+    Ok(())
+}
+
 fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
-    let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
+    let (repo_str, number, is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
 
     // Check if a worktree already exists for either PR or issue
@@ -790,6 +863,7 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
         return print_worktree_path(&pr_wt_path);
     }
     if issue_wt_path.exists() {
+        reject_fix_ci_on_issue(is_fix_ci_variant, number)?;
         return print_worktree_path(&issue_wt_path);
     }
 
@@ -822,6 +896,7 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     // "not found" / "couldn't find remote ref" indicate the number is an
     // issue, not a PR. Any other failure is a real error (network, auth, etc.)
     if stderr.contains("not found") || stderr.contains("couldn't find remote ref") {
+        reject_fix_ci_on_issue(is_fix_ci_variant, number)?;
         cook_issue(config, &repo_config, repo_str, number)
     } else {
         anyhow::bail!(
@@ -900,7 +975,7 @@ fn gear_with_writer<W: Write>(
 }
 
 fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
-    let (repo_str, number) = parse_recipe_name(&args.recipe_name)?;
+    let (repo_str, number, _is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
     gear_with_writer(
         config,
@@ -920,7 +995,7 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
 /// cookbook, there's no "base repo" recipe here to special-case: every PR
 /// and issue recipe is a worktree.
 fn resolve_external_paths(recipe_name: &str) -> anyhow::Result<Vec<String>> {
-    let (repo_str, _number) = parse_recipe_name(recipe_name)?;
+    let (repo_str, _number, _is_fix_ci_variant) = parse_recipe_name(recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
     Ok(vec![
         repo_config
@@ -974,9 +1049,24 @@ mod tests {
 
     #[test]
     fn test_parse_recipe_name_valid() {
-        let (repo, number) = parse_recipe_name("enwiro#42").unwrap();
+        let (repo, number, is_fix_ci_variant) = parse_recipe_name("enwiro#42").unwrap();
         assert_eq!(repo, "enwiro");
         assert_eq!(number, 42);
+        assert!(!is_fix_ci_variant);
+    }
+
+    #[test]
+    fn test_parse_recipe_name_fix_ci_variant() {
+        let (repo, number, is_fix_ci_variant) = parse_recipe_name("owner/repo#42@fix-ci").unwrap();
+        assert_eq!(repo, "owner/repo");
+        assert_eq!(number, 42);
+        assert!(is_fix_ci_variant);
+    }
+
+    #[test]
+    fn test_parse_recipe_name_rejects_unknown_variant() {
+        let result = parse_recipe_name("owner/repo#42@bogus");
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1040,6 +1130,17 @@ mod tests {
             matched.description.as_deref(),
             Some("Work on PR or issue #997 in enwiro")
         );
+
+        // The fix-ci goal variant (#756) must also be claimed by the same
+        // pattern, for a not-yet-listed PR number.
+        assert!(
+            enwiro_sdk::recipe_pattern::match_name(&enwiro_anchored, None, "enwiro#997@fix-ci")
+                .is_some()
+        );
+        assert!(
+            enwiro_sdk::recipe_pattern::match_name(&enwiro_anchored, None, "enwiro#997@bogus")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1093,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_parse_recipe_name_large_number() {
-        let (repo, number) = parse_recipe_name("next.js#12345").unwrap();
+        let (repo, number, _is_fix_ci_variant) = parse_recipe_name("next.js#12345").unwrap();
         assert_eq!(repo, "next.js");
         assert_eq!(number, 12345);
     }
@@ -1400,6 +1501,18 @@ mod tests {
     }
 
     #[test]
+    fn test_reject_fix_ci_on_issue_errors_for_fix_ci_variant() {
+        let result = reject_fix_ci_on_issue(true, 42);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("fix-ci"));
+    }
+
+    #[test]
+    fn test_reject_fix_ci_on_issue_allows_plain_variant() {
+        assert!(reject_fix_ci_on_issue(false, 42).is_ok());
+    }
+
+    #[test]
     fn test_cook_creates_worktree_for_pr() {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
@@ -1660,6 +1773,69 @@ mod tests {
         // cookbook's `repo@<branch>` recipe matches the equivalence alias.
         assert_eq!(cooked_branch_name(&pr), "pr-42");
         assert_eq!(cooked_branch_name(&issue), "issue-7");
+    }
+
+    #[test]
+    fn test_recipes_for_item_issue_yields_one_recipe_with_github_issue_goal() {
+        let item = GithubItem {
+            number: 42,
+            title: "Fix auth bug".to_string(),
+            repo: "owner/repo".to_string(),
+            kind: GithubItemKind::Issue,
+            updated_at: String::new(),
+        };
+        let recipes = recipes_for_item(&item, 0, 1, &std::collections::HashMap::new());
+        assert_eq!(recipes.len(), 1);
+        assert_eq!(recipes[0].name, "owner/repo#42");
+        assert_eq!(
+            recipes[0].goal.as_ref().map(|g| g.kind.as_str()),
+            Some("github_issue")
+        );
+    }
+
+    #[test]
+    fn test_recipes_for_item_pr_yields_work_on_and_fix_ci_variants() {
+        let item = GithubItem {
+            number: 42,
+            title: "Add feature".to_string(),
+            repo: "owner/repo".to_string(),
+            kind: GithubItemKind::PullRequest {
+                head_ref_name: "feature".to_string(),
+            },
+            updated_at: String::new(),
+        };
+        let recipes = recipes_for_item(&item, 0, 1, &std::collections::HashMap::new());
+        assert_eq!(recipes.len(), 2);
+        assert_eq!(recipes[0].name, "owner/repo#42");
+        assert_eq!(
+            recipes[0].goal.as_ref().map(|g| g.kind.as_str()),
+            Some("work_on")
+        );
+        assert_eq!(recipes[1].name, "owner/repo#42@fix-ci");
+        assert_eq!(
+            recipes[1].goal.as_ref().map(|g| g.kind.as_str()),
+            Some("fix_ci")
+        );
+    }
+
+    #[test]
+    fn test_recipes_for_item_pr_variants_share_equivalent_to() {
+        let item = GithubItem {
+            number: 42,
+            title: "Add feature".to_string(),
+            repo: "owner/repo".to_string(),
+            kind: GithubItemKind::PullRequest {
+                head_ref_name: "feature".to_string(),
+            },
+            updated_at: String::new(),
+        };
+        let mut display_names = std::collections::HashMap::new();
+        display_names.insert("owner/repo".to_string(), "repo".to_string());
+
+        let recipes = recipes_for_item(&item, 0, 1, &display_names);
+        assert_eq!(recipes.len(), 2);
+        assert_eq!(recipes[0].equivalent_to, vec!["repo@pr-42".to_string()]);
+        assert_eq!(recipes[1].equivalent_to, recipes[0].equivalent_to);
     }
 
     #[test]
