@@ -595,9 +595,20 @@ pub async fn run(
         std::env::set_var(enwiro_sdk::rpc::SOCKET_ENV_VAR, rpc_socket_path.as_os_str());
     }
 
+    // Bound synchronously so a failure here (stale socket path, permission
+    // race, ...) is fatal to daemon startup rather than a silently dropped
+    // background-task error: `tokio::spawn`'s JoinHandle was never awaited,
+    // so a bind failure used to leave the daemon looking "started" in the
+    // logs while every RPC-dependent operation (recipe cooking, hence the
+    // browser extension's activate) failed forever with no diagnostic
+    // trail (issue #766).
+    let rpc_listener = rpc::bind(&rpc_socket_path)
+        .with_context(|| format!("bind rpc socket at {}", rpc_socket_path.display()))?;
+
     let active_env: rpc::SharedActiveEnv = Arc::new(Mutex::new(None));
     let active_env_writer = active_env.clone();
-    tokio::spawn(rpc::serve(
+    tokio::spawn(rpc::serve_listener(
+        rpc_listener,
         rpc_socket_path.clone(),
         active_env,
         workspaces_directory.clone(),

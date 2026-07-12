@@ -423,39 +423,32 @@ async fn run_cookbook_subprocess(
     })
 }
 
-/// Bind the unix socket, set perms to 0600, and run the accept loop.
-pub async fn serve(
-    socket_path: PathBuf,
-    active_env: SharedActiveEnv,
-    workspaces_directory: PathBuf,
-    container_runtime: Option<String>,
-) -> anyhow::Result<()> {
+/// Bind the unix socket and set perms to 0600. `run` calls this
+/// synchronously and propagates a failure with `?`, so a bind failure is
+/// fatal to daemon startup (ADR-0002: "`enw` exits with a JSON-RPC error
+/// if the socket isn't bindable" only holds if the daemon itself doesn't
+/// silently run on without ever having bound it).
+pub fn bind(socket_path: &std::path::Path) -> anyhow::Result<UnixListener> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create runtime dir {}", parent.display()))?;
     }
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)
+    let _ = std::fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)
         .with_context(|| format!("bind unix socket at {}", socket_path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("chmod 0600 {}", socket_path.display()))?;
     }
-    serve_listener(
-        listener,
-        socket_path,
-        active_env,
-        workspaces_directory,
-        container_runtime,
-    )
-    .await
+    Ok(listener)
 }
 
-/// Run the accept loop against a pre-bound listener. Exposed so tests
-/// can own bind themselves (and surface bind errors directly) before
-/// signalling readiness.
+/// Run the accept loop against a pre-bound listener, decoupled from
+/// [`bind`] so callers can surface a bind failure before this ever runs:
+/// `run` binds synchronously and only spawns this loop once it holds a
+/// live listener; tests own bind themselves the same way.
 pub async fn serve_listener(
     listener: UnixListener,
     socket_path: PathBuf,
@@ -538,5 +531,37 @@ mod tests {
         assert!(best_effort_op_timeout("cook").is_none());
         assert!(best_effort_op_timeout("list-recipes").is_none());
         assert!(best_effort_op_timeout("future-op").is_none());
+    }
+
+    /// `run` binds this synchronously and propagates a failure with `?`
+    /// (issue #766: a bind failure used to be swallowed by an unawaited
+    /// `tokio::spawn`, leaving the daemon looking healthy while every
+    /// RPC-dependent operation, including the browser extension's
+    /// activate, failed forever with no diagnostic trail). That wiring
+    /// only holds if `bind` itself reliably surfaces a bind failure as
+    /// `Err`, which is what this locks in.
+    #[tokio::test]
+    async fn bind_succeeds_on_a_free_path_and_sets_owner_only_perms() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("rpc.sock");
+
+        let listener = bind(&socket_path).unwrap();
+        drop(listener);
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&socket_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn bind_fails_when_the_socket_path_is_unusable() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("rpc.sock");
+        std::fs::create_dir(&socket_path).unwrap();
+
+        assert!(bind(&socket_path).is_err());
     }
 }
