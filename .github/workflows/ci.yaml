@@ -16,6 +16,25 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
+      # cargo has no workspace-inheritance mechanism for [package.metadata.*]
+      # tables, so a new binary crate won't automatically pick up binstall
+      # config (see .github/workflows/binary-release.yaml) — catch the
+      # omission here instead of silently shipping a crate cargo binstall
+      # can't find.
+      - name: Check binstall metadata coverage
+        run: |
+          missing=$(cargo metadata --no-deps --format-version 1 | jq -r '
+            .packages[]
+            | select(.name != "enwiro-sdk")
+            | select(any(.targets[]; any(.kind[]; . == "bin")))
+            | select(.metadata.binstall == null)
+            | .name
+          ')
+          if [ -n "$missing" ]; then
+            echo "Crates with a [[bin]] target but no [package.metadata.binstall]:"
+            echo "$missing"
+            exit 1
+          fi
 
   build_and_test:
     runs-on: ${{ matrix.os }}

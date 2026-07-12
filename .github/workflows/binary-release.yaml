@@ -1,0 +1,108 @@
+name: Binary release
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  # Figures out which workspace crate this release's tag belongs to, and
+  # whether it actually has a shippable binary to build.
+  resolve:
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'kantord' }}
+    outputs:
+      crate: ${{ steps.resolve.outputs.crate }}
+      bin: ${{ steps.resolve.outputs.bin }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Resolve crate and binary from release tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.release.tag_name }}"
+          # release-plz tags each workspace crate as `<crate>-v<version>`. Match
+          # against real package versions instead of splitting the tag string,
+          # since crate names may themselves contain hyphens.
+          crate=$(cargo metadata --no-deps --format-version 1 | jq -r --arg tag "$tag" '
+            .packages[] | select("\(.name)-v\(.version)" == $tag) | .name
+          ')
+          if [ -z "$crate" ]; then
+            echo "Tag $tag does not match any workspace crate version; nothing to build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # enwiro-sdk's only [[bin]] is a test helper (test-fake-plugin), not a
+          # shipped product, so it has no real binary release to build.
+          if [ "$crate" = "enwiro-sdk" ]; then
+            echo "$crate has no shippable binary; nothing to build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bin=$(cargo metadata --no-deps --format-version 1 | jq -r --arg pkg "$crate" '
+            .packages[] | select(.name == $pkg) | .targets[] | select(.kind[] == "bin") | .name
+          ' | head -n1)
+          if [ -z "$bin" ]; then
+            echo "$crate has no [[bin]] target; nothing to build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "crate=$crate"
+            echo "bin=$bin"
+            echo "should_build=true"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      CRATE: ${{ needs.resolve.outputs.crate }}
+      BIN: ${{ needs.resolve.outputs.bin }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux build/signing dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools minisign
+      - name: Install macOS signing dependencies
+        if: runner.os == 'macOS'
+        run: brew install minisign
+      - name: Build
+        run: cargo build --release -p "$CRATE" --target "$TARGET"
+      - name: Package
+        run: |
+          asset="${CRATE}-${TARGET}.tgz"
+          tar -C "target/${TARGET}/release" -czf "$asset" "$BIN"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+      - name: Sign
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+        run: |
+          key=$(mktemp)
+          printf '%s\n' "$MINISIGN_PRIVATE_KEY" > "$key"
+          minisign -S -W -s "$key" -x "${ASSET}.sig" -m "$ASSET"
+          shred -u "$key" 2>/dev/null || rm -f "$key"
+      - name: Upload release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" "$ASSET" "${ASSET}.sig" \
+            --clobber --repo "${{ github.repository }}"

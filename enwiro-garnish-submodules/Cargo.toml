@@ -6,6 +6,17 @@ description = "Garnish that initialises git submodules on env cook"
 license = "GPL-3.0-or-later"
 repository.workspace = true
 
+# Tags are `<crate>-v<version>` (release-plz's workspace default), which
+# doesn't match binstall's built-in URL guesses, so pkg-url is explicit here.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-{ target }{ archive-suffix }"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.signing]
+algorithm = "minisign"
+pubkey = "RWQowPNA2jR6/GBAZNkd5d6by7LwOPBdEwK1NptQjAPGrB8UhUUHHP8T"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4.5.4", features = ["derive"] }
