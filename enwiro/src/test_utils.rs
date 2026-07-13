@@ -136,6 +136,7 @@ pub mod test_utilities {
                         description: description.map(|d| d.to_string()),
                         sort_order: 0,
                         equivalent_to: Vec::new(),
+                        goal: None,
                         scores: None,
                     };
                     let mut line = serde_json::to_string(&entry)
@@ -184,6 +185,7 @@ pub mod test_utilities {
                         description: description.map(|d| d.to_string()),
                         sort_order: 0,
                         equivalent_to: equivalents.iter().map(|e| e.to_string()).collect(),
+                        goal: None,
                         scores: None,
                     };
                     let mut line = serde_json::to_string(&entry)

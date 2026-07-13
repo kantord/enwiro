@@ -7,6 +7,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::goal::GoalDetail;
 use crate::metadata::{Capability, DeclaredCapabilities};
 
 /// The capabilities a cookbook is allowed to declare. Required subcommands
@@ -148,6 +149,13 @@ pub struct Recipe {
     /// when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub equivalent_to: Vec<String>,
+    /// The intent this recipe cooks towards, if the cookbook can derive one
+    /// (#756) - e.g. a github issue's "fix this issue", or one of a PR's
+    /// goal-variant recipes ("work on it" vs "fix CI"). Carried through the
+    /// daemon cache and recorded on the resulting environment at cook time;
+    /// see `enwiro_sdk::goal::GoalDetail`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalDetail>,
 }
 
 impl Recipe {
@@ -157,6 +165,7 @@ impl Recipe {
             description: None,
             sort_order: 0,
             equivalent_to: Vec::new(),
+            goal: None,
         }
     }
 
@@ -166,6 +175,7 @@ impl Recipe {
             description: Some(description.into()),
             sort_order: 0,
             equivalent_to: Vec::new(),
+            goal: None,
         }
     }
 
@@ -317,5 +327,24 @@ mod tests {
             r.to_jsonl(),
             r#"{"name":"foo","description":"bar","sort_order":0}"#
         );
+    }
+
+    #[test]
+    fn recipe_to_jsonl_includes_goal_when_set() {
+        let mut r = Recipe::new("foo");
+        r.goal = Some(crate::goal::GoalDetail {
+            kind: "manual".to_string(),
+            label: "Ship it".to_string(),
+            detail: None,
+        });
+        assert_eq!(
+            r.to_jsonl(),
+            r#"{"name":"foo","sort_order":0,"goal":{"kind":"manual","label":"Ship it"}}"#
+        );
+    }
+
+    #[test]
+    fn recipe_to_jsonl_omits_goal_when_none() {
+        assert!(!Recipe::new("foo").to_jsonl().contains("goal"));
     }
 }

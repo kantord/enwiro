@@ -11,6 +11,7 @@ use clap::Parser;
 use commands::activate::{ActivateArgs, activate};
 use commands::browser::{BrowserArgs, browser};
 use commands::env_info::{EnvInfoArgs, env_info};
+use commands::goal::{GoalArgs, goal};
 use commands::kanban::{KanbanArgs, kanban};
 use commands::ls::{LsArgs, ls};
 use commands::mark::{MarkArgs, mark};
@@ -44,6 +45,7 @@ enum EnwiroCli {
     /// being part of the interactive CLI surface.
     #[command(hide = true)]
     Browser(BrowserArgs),
+    Goal(GoalArgs),
     Info(EnvInfoArgs),
     Kanban(KanbanArgs),
     Ls(LsArgs),
@@ -109,6 +111,7 @@ fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
         EnwiroCli::Browser(args) => browser(&mut context_object, args),
+        EnwiroCli::Goal(args) => goal(&mut context_object, args),
         EnwiroCli::Info(args) => env_info(&mut context_object, args),
         EnwiroCli::Kanban(args) => kanban(&mut context_object, args),
         EnwiroCli::Ls(args) => {

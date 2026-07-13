@@ -244,6 +244,7 @@ mod tests {
                 description: None,
                 sort_order: 0,
                 equivalent_to: vec![],
+                goal: None,
                 scores: None,
             })
             .unwrap(),

@@ -2,6 +2,7 @@ pub mod activate;
 pub mod adapter;
 pub mod browser;
 pub mod env_info;
+pub mod goal;
 pub mod kanban;
 pub mod ls;
 pub mod mark;

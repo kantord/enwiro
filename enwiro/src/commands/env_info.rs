@@ -56,6 +56,7 @@ const SKIP_FIELDS: &[&str] = &[
     "prep_buffer",
     "event_log",
     "status",
+    "goal",
     // Surfaced instead as the resolved `path` field, not the raw meta value.
     "main_folder",
 ];
@@ -190,6 +191,11 @@ pub fn env_info<W: Write>(ctx: &mut CommandContext<W>, args: EnvInfoArgs) -> any
         .map(|m| status_label(m.status.as_ref()))
         .filter(|s| *s != "-");
 
+    let goal_str = meta
+        .as_ref()
+        .and_then(|m| m.goal.as_ref())
+        .map(|g| g.label.clone());
+
     let gear = env_dir.as_deref().map(load_gear).unwrap_or_default();
 
     if args.json {
@@ -238,6 +244,7 @@ pub fn env_info<W: Write>(ctx: &mut CommandContext<W>, args: EnvInfoArgs) -> any
             ("type", env_type.clone()),
             ("path", env_path.clone()),
             ("status", status_str.map(|s| s.to_string())),
+            ("goal", goal_str),
         ];
 
         write_text_fields(&mut ctx.writer, &extra_fields, &meta_value)?;
@@ -255,7 +262,7 @@ mod tests {
     use crate::test_utils::test_utilities::{
         AdapterLog, FakeContext, NotificationLog, context_object,
     };
-    use enwiro_daemon::meta::{CookedPhase, EnvStats, Status, UserIntentSignals};
+    use enwiro_daemon::meta::{CookedPhase, EnvStats, GoalDetail, Status, UserIntentSignals};
 
     #[rstest]
     fn test_env_info_text_shows_name_and_type(
@@ -416,6 +423,131 @@ mod tests {
         assert!(
             output.contains("Fix auth bug"),
             "output should contain description: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_env_info_text_shows_goal_label_not_raw_struct(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut ctx, _, _) = context_object;
+        ctx.create_mock_environment("my-env");
+
+        let meta = EnvStats {
+            goal: Some(GoalDetail {
+                kind: "github_issue".to_string(),
+                label: "Fix auth bug".to_string(),
+                detail: Some(serde_json::json!({"repo": "owner/repo", "number": 42})),
+            }),
+            ..Default::default()
+        };
+        std::fs::write(
+            temp_dir.path().join("my-env").join("meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+
+        env_info(
+            &mut ctx,
+            EnvInfoArgs {
+                name: Some("my-env".to_string()),
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let output = ctx.get_output();
+        assert!(
+            output.contains("goal:") && output.contains("Fix auth bug"),
+            "output should show the goal label: {output}"
+        );
+        assert!(
+            !output.contains("kind:") && !output.contains("github_issue"),
+            "text mode must not dump the raw goal struct: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_env_info_json_includes_full_goal_struct(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut ctx, _, _) = context_object;
+        ctx.create_mock_environment("my-env");
+
+        let meta = EnvStats {
+            goal: Some(GoalDetail {
+                kind: "github_issue".to_string(),
+                label: "Fix auth bug".to_string(),
+                detail: Some(serde_json::json!({"repo": "owner/repo", "number": 42})),
+            }),
+            ..Default::default()
+        };
+        std::fs::write(
+            temp_dir.path().join("my-env").join("meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+
+        env_info(
+            &mut ctx,
+            EnvInfoArgs {
+                name: Some("my-env".to_string()),
+                json: true,
+            },
+        )
+        .unwrap();
+
+        let output = ctx.get_output();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["goal"]["kind"], "github_issue");
+        assert_eq!(parsed["goal"]["label"], "Fix auth bug");
+        assert_eq!(parsed["goal"]["detail"]["number"], 42);
+    }
+
+    #[rstest]
+    fn test_env_info_text_omits_goal_when_absent(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut ctx, _, _) = context_object;
+        ctx.create_mock_environment("my-env");
+
+        env_info(
+            &mut ctx,
+            EnvInfoArgs {
+                name: Some("my-env".to_string()),
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let output = ctx.get_output();
+        assert!(
+            !output.contains("goal:"),
+            "goal: line should be omitted in text mode when unset: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_env_info_json_omits_goal_when_absent(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut ctx, _, _) = context_object;
+        ctx.create_mock_environment("my-env");
+
+        env_info(
+            &mut ctx,
+            EnvInfoArgs {
+                name: Some("my-env".to_string()),
+                json: true,
+            },
+        )
+        .unwrap();
+
+        let output = ctx.get_output();
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(
+            parsed.get("goal").is_none(),
+            "goal key should be absent in JSON when unset: {output}"
         );
     }
 

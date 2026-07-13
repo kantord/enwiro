@@ -39,7 +39,16 @@ pub struct EnvStats {
     pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub event_log: Vec<EventLogEntry>,
+    /// The intent this environment was cooked towards, if known (#756):
+    /// derived from the cooked recipe's declared goal, or set manually via
+    /// `enw goal set`. Unlike `description`/`recipe`/`cookbook`, mutable
+    /// after first cook - `enw goal set`/`clear` update it directly, and a
+    /// later re-cook only overwrites it when the recipe declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalDetail>,
 }
+
+pub use enwiro_sdk::goal::GoalDetail;
 
 // The status schema lives in `enwiro-sdk` so cookbooks (which emit it on the
 // `status_changed` wire event) and the daemon (which writes it to meta.json)
@@ -232,17 +241,23 @@ pub fn record_prep_per_env(env_dir: &Path) {
     }
 }
 
-/// Save cookbook, recipe, description, and main_folder metadata in per-env
-/// meta.json. Best-effort.
+/// Save cookbook, recipe, description, goal, and main_folder metadata in
+/// per-env meta.json. Best-effort.
 ///
 /// `main_folder` is written unconditionally on every cook so that newly
 /// cooked envs never depend on `resolve_project_symlink`'s same-named-symlink
 /// fallback (#375) -- only envs cooked before this existed do.
+///
+/// `goal`, like `description`, is only overwritten when the recipe declares
+/// one (#756): `None` leaves whatever goal is already recorded untouched, so
+/// a manually-set goal (`enw goal set`) survives a re-cook of a recipe that
+/// doesn't have a goal opinion.
 pub fn record_cook_metadata_per_env(
     env_dir: &Path,
     cookbook: &str,
     recipe: &str,
     description: Option<&str>,
+    goal: Option<&GoalDetail>,
     main_folder: &str,
 ) {
     let mut meta = load_env_meta(env_dir);
@@ -251,6 +266,9 @@ pub fn record_cook_metadata_per_env(
     meta.main_folder = Some(main_folder.to_string());
     if let Some(d) = description {
         meta.description = Some(d.to_string());
+    }
+    if let Some(g) = goal {
+        meta.goal = Some(g.clone());
     }
     if let Err(e) = save_env_meta(env_dir, &meta) {
         tracing::warn!(error = %e, "Could not save environment metadata");
@@ -372,6 +390,7 @@ mod tests {
             "github",
             "kantord/enwiro#325",
             Some("Fix auth bug"),
+            None,
             "my-project",
         );
 
@@ -388,7 +407,14 @@ mod tests {
         let env_dir = dir.path().join("my-project");
         fs::create_dir(&env_dir).unwrap();
 
-        record_cook_metadata_per_env(&env_dir, "github", "owner/repo#42", None, "my-project");
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "owner/repo#42",
+            None,
+            None,
+            "my-project",
+        );
 
         let raw = fs::read_to_string(env_dir.join("meta.json")).unwrap();
         assert!(
@@ -398,6 +424,119 @@ mod tests {
 
         let meta = load_env_meta(&env_dir);
         assert_eq!(meta.recipe, Some("owner/repo#42".to_string()));
+    }
+
+    #[test]
+    fn test_record_cook_metadata_writes_goal_when_some() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let goal = GoalDetail {
+            kind: "github_issue".to_string(),
+            label: "Fix auth bug".to_string(),
+            detail: None,
+        };
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "owner/repo#42",
+            None,
+            Some(&goal),
+            "my-project",
+        );
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.goal, Some(goal));
+    }
+
+    #[test]
+    fn test_record_cook_metadata_preserves_goal_when_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let goal = GoalDetail {
+            kind: "manual".to_string(),
+            label: "Ship the release".to_string(),
+            detail: None,
+        };
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "owner/repo#42",
+            None,
+            Some(&goal),
+            "my-project",
+        );
+        // Re-cook the same recipe with no goal opinion this time.
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "owner/repo#42",
+            None,
+            None,
+            "my-project",
+        );
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(
+            meta.goal,
+            Some(goal),
+            "a recook that declares no goal must not clobber a previously-set one"
+        );
+    }
+
+    #[test]
+    fn test_record_cook_metadata_overwrites_goal_when_recipe_declares_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        let work_on = GoalDetail {
+            kind: "work_on".to_string(),
+            label: "Work on PR".to_string(),
+            detail: None,
+        };
+        let fix_ci = GoalDetail {
+            kind: "fix_ci".to_string(),
+            label: "Fix CI for PR".to_string(),
+            detail: None,
+        };
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "owner/repo#42",
+            None,
+            Some(&work_on),
+            "my-project",
+        );
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "owner/repo#42@fix-ci",
+            None,
+            Some(&fix_ci),
+            "my-project",
+        );
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.goal, Some(fix_ci));
+    }
+
+    #[test]
+    fn test_env_stats_goal_defaults_to_none_for_old_envs() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("legacy");
+        fs::create_dir(&env_dir).unwrap();
+        fs::write(
+            env_dir.join("meta.json"),
+            r#"{"cookbook":"github","description":"old env"}"#,
+        )
+        .unwrap();
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.goal, None);
     }
 
     #[test]
@@ -436,6 +575,7 @@ mod tests {
             "git",
             "my/project",
             Some("My project"),
+            None,
             "my-project",
         );
 

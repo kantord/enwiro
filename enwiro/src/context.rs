@@ -22,15 +22,17 @@ pub struct CookConfig {
 struct ResolvedRecipe {
     cookbook: String,
     description: Option<String>,
+    goal: Option<enwiro_sdk::goal::GoalDetail>,
     via_pattern: bool,
 }
 
 /// One cooked recipe: the cookbook that cooked it, the project path it
-/// produced, and the description the cache resolved for it.
+/// produced, and the description/goal the cache resolved for it.
 struct CookedRecipe<'a> {
     cookbook: &'a dyn CookbookTrait,
     path: String,
     description: Option<String>,
+    goal: Option<enwiro_sdk::goal::GoalDetail>,
 }
 
 pub struct CommandContext<W: Write> {
@@ -110,6 +112,7 @@ impl<W: Write> CommandContext<W> {
             cooked.cookbook.name(),
             recipe_name,
             cooked.description.as_deref(),
+            cooked.goal.as_ref(),
         );
         let env = self.create_environment_symlink(env_name, &cooked.path)?;
         self.write_gear_if_present(cooked.cookbook, recipe_name, &flat_name);
@@ -167,10 +170,12 @@ impl<W: Write> CommandContext<W> {
         }
 
         let flat_name = env_name.replace('/', "-");
+        // No single goal makes sense across multiple parts, same as description.
         self.save_cook_metadata(
             &flat_name,
             enwiro_sdk::recipe_expr::COMPOSED_COOKBOOK_NAME,
             expression,
+            None,
             None,
         );
         let env = self.create_composed_wrapper(env_name, &flat_parts, &cooked_parts)?;
@@ -197,6 +202,7 @@ impl<W: Write> CommandContext<W> {
         let ResolvedRecipe {
             cookbook: cookbook_name,
             description,
+            goal,
             via_pattern,
         } = resolved;
 
@@ -225,6 +231,7 @@ impl<W: Write> CommandContext<W> {
             cookbook: cookbook.as_ref(),
             path,
             description,
+            goal,
         })
     }
 
@@ -264,6 +271,7 @@ impl<W: Write> CommandContext<W> {
                 return Some(ResolvedRecipe {
                     cookbook: concrete.cookbook.clone(),
                     description: concrete.description.clone(),
+                    goal: concrete.goal.clone(),
                     via_pattern: false,
                 });
             }
@@ -279,6 +287,9 @@ impl<W: Write> CommandContext<W> {
                 return Some(ResolvedRecipe {
                     cookbook: pattern.cookbook.clone(),
                     description: matched.description,
+                    // Pattern claims have no per-instance goal template - only
+                    // listed (concrete) recipes carry one (#756).
+                    goal: None,
                     via_pattern: true,
                 });
             }
@@ -292,6 +303,7 @@ impl<W: Write> CommandContext<W> {
         cookbook: &str,
         recipe: &str,
         description: Option<&str>,
+        goal: Option<&enwiro_sdk::goal::GoalDetail>,
     ) {
         let env_dir = Path::new(&self.config.workspaces_directory).join(env_name);
         crate::usage_stats::record_cook_metadata_per_env(
@@ -299,6 +311,7 @@ impl<W: Write> CommandContext<W> {
             cookbook,
             recipe,
             description,
+            goal,
             env_name,
         );
     }
@@ -806,6 +819,7 @@ mod fire_autorun_tests {
 mod tests {
     use rstest::rstest;
     use std::fs;
+    use std::path::Path;
 
     use super::CookConfig;
     use crate::test_utils::test_utilities::{
@@ -848,6 +862,24 @@ mod tests {
             description: None,
             sort_order: 0,
             equivalent_to: Vec::new(),
+            goal: None,
+            scores: None,
+        })
+        .unwrap()
+    }
+
+    fn concrete_cache_line_with_goal(
+        cookbook: &str,
+        name: &str,
+        goal: enwiro_sdk::goal::GoalDetail,
+    ) -> String {
+        serde_json::to_string(&enwiro_sdk::client::CachedRecipe {
+            cookbook: cookbook.to_string(),
+            name: name.to_string(),
+            description: None,
+            sort_order: 0,
+            equivalent_to: Vec::new(),
+            goal: Some(goal),
             scores: None,
         })
         .unwrap()
@@ -1440,6 +1472,69 @@ mod tests {
             .cook_environment("owner/repo#42", "owner/repo#42", &CookConfig::default())
             .unwrap();
         assert_eq!(env.name, "owner-repo#42");
+    }
+
+    #[rstest]
+    fn test_cook_environment_writes_goal_from_cache_to_meta(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        let goal = enwiro_sdk::goal::GoalDetail {
+            kind: "github_issue".to_string(),
+            label: "Fix auth bug".to_string(),
+            detail: None,
+        };
+        context_object.write_cache_lines(&[concrete_cache_line_with_goal(
+            "github",
+            "owner/repo#42",
+            goal.clone(),
+        )]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "github",
+            vec!["owner/repo#42"],
+            vec![("owner/repo#42", cooked_dir.to_str().unwrap())],
+        ))];
+
+        context_object
+            .cook_environment("owner/repo#42", "owner/repo#42", &CookConfig::default())
+            .unwrap();
+
+        let env_dir = Path::new(&context_object.config.workspaces_directory).join("owner-repo#42");
+        let meta = enwiro_daemon::meta::load_env_meta(&env_dir);
+        assert_eq!(meta.goal, Some(goal));
+    }
+
+    #[rstest]
+    fn test_cook_environment_pattern_match_leaves_goal_unset(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.write_cache_lines(&[pattern_cache_line(
+            "github",
+            "owner/repo#(?P<n>[0-9]+)",
+            None,
+        )]);
+        context_object.cookbooks = vec![Box::new(FakeCookbook::new(
+            "github",
+            vec!["owner/repo#99"],
+            vec![("owner/repo#99", cooked_dir.to_str().unwrap())],
+        ))];
+
+        context_object
+            .cook_environment("owner/repo#99", "owner/repo#99", &CookConfig::default())
+            .unwrap();
+
+        let env_dir = Path::new(&context_object.config.workspaces_directory).join("owner-repo#99");
+        let meta = enwiro_daemon::meta::load_env_meta(&env_dir);
+        assert_eq!(meta.goal, None);
     }
 
     #[rstest]

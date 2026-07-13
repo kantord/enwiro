@@ -302,6 +302,7 @@ fn cached_concrete_entry(cookbook: &str, recipe: &enwiro_sdk::Recipe) -> Option<
             .map(enwiro_sdk::recipe_pattern::truncate_description),
         sort_order: recipe.sort_order,
         equivalent_to: recipe.equivalent_to.clone(),
+        goal: recipe.goal.clone(),
         scores: None,
     })
 }
@@ -1068,6 +1069,33 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "repo-a");
         assert!(entries[0].description.is_none());
+    }
+
+    #[test]
+    fn build_cache_content_includes_goal() {
+        let mut recipe = Recipe::new("owner/repo#42");
+        recipe.goal = Some(enwiro_sdk::goal::GoalDetail {
+            kind: "github_issue".to_string(),
+            label: "Fix auth bug".to_string(),
+            detail: None,
+        });
+        let mut state = HashMap::new();
+        state.insert("github".to_string(), entry(30, vec![recipe]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].goal.as_ref().map(|g| g.kind.as_str()),
+            Some("github_issue")
+        );
+    }
+
+    #[test]
+    fn build_cache_content_omits_goal_when_none() {
+        let mut state = HashMap::new();
+        state.insert("git".to_string(), entry(10, vec![Recipe::new("repo-a")]));
+        let entries = parse_cached_lines(&build_cache_content(&state));
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].goal.is_none());
     }
 
     #[test]
