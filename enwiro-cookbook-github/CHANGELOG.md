@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.28](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.27...enwiro-cookbook-github-v0.1.28) - 2026-07-13
+
+### Added
+
+- add the concept of goal tracking ([#768](https://github.com/kantord/enwiro/pull/768))
+
 ## [0.1.27](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.26...enwiro-cookbook-github-v0.1.27) - 2026-07-12
 
 ### Added

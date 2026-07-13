@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.21...enwiro-daemon-v0.0.22) - 2026-07-13
+
+### Added
+
+- add the concept of goal tracking ([#768](https://github.com/kantord/enwiro/pull/768))
+
+### Fixed
+
+- avoid silent connection errors ([#767](https://github.com/kantord/enwiro/pull/767))
+
 ## [0.0.21](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.20...enwiro-daemon-v0.0.21) - 2026-07-12
 
 ### Added

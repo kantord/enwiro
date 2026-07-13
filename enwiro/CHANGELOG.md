@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.60](https://github.com/kantord/enwiro/compare/enwiro-v0.3.59...enwiro-v0.3.60) - 2026-07-13
+
+### Added
+
+- add the concept of goal tracking ([#768](https://github.com/kantord/enwiro/pull/768))
+
 ## [0.3.59](https://github.com/kantord/enwiro/compare/enwiro-v0.3.58...enwiro-v0.3.59) - 2026-07-12
 
 ### Added
