@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.60"
+version = "0.3.61"
 dependencies = [
  "anyhow",
  "assertables",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-daemon"
-version = "0.0.22"
+version = "0.0.23"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-gui"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "axum",
