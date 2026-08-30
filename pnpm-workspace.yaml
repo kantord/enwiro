@@ -10,10 +10,16 @@ allowBuilds:
 # Supply-chain hardening:
 # - minimumReleaseAge: refuse to install a package version published less
 #   than this many minutes ago (cooldown against compromised fresh releases).
+#   Must match renovate.json's minimumReleaseAge (3 days) - Renovate's own
+#   minimumReleaseAge does not apply to lockFileMaintenance (it delegates
+#   resolution to pnpm), so pnpm's gate is what actually enforces the
+#   cooldown for lockfile-refresh PRs; a mismatch here left lockFileMaintenance
+#   free to pick versions pnpm allowed (1 day) but Renovate's stability-days
+#   check still rejected (3 days), so those PRs never cleared the check.
 # - onlyBuiltDependencies: allowlist of packages permitted to run install/
 #   lifecycle scripts. pnpm blocks all dependency build scripts by default;
 #   anything needing one must be listed here explicitly.
-minimumReleaseAge: 1440
+minimumReleaseAge: 4320
 minimumReleaseAgeExclude:
   - hono@4.12.25
   - js-yaml@4.1.2
