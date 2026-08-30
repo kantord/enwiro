@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.61](https://github.com/kantord/enwiro/compare/enwiro-v0.3.60...enwiro-v0.3.61) - 2026-08-30
+
+### Added
+
+- add `enw shell` ([#784](https://github.com/kantord/enwiro/pull/784))
+
 ## [0.3.60](https://github.com/kantord/enwiro/compare/enwiro-v0.3.59...enwiro-v0.3.60) - 2026-07-13
 
 ### Added
