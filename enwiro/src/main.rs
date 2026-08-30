@@ -20,6 +20,7 @@ use commands::rm::{RmArgs, rm};
 use commands::run::{RunArgs, run};
 use commands::run_gear;
 use commands::run_gear::{ENV_FLAG, LONG_YES_FLAG, SHORT_YES_FLAG};
+use commands::shell::{ShellArgs, shell};
 use commands::wrap::{WrapArgs, wrap};
 use context::CommandContext;
 use enwiro_daemon::ConfigurationValues;
@@ -53,6 +54,7 @@ enum EnwiroCli {
     Prep(PrepArgs),
     Rm(RmArgs),
     Run(RunArgs),
+    Shell(ShellArgs),
     Wrap(WrapArgs),
 }
 
@@ -123,6 +125,7 @@ fn main() -> anyhow::Result<()> {
         EnwiroCli::Prep(args) => prep(&mut context_object, args),
         EnwiroCli::Rm(args) => rm(&mut context_object, args),
         EnwiroCli::Run(args) => run(&mut context_object, args),
+        EnwiroCli::Shell(args) => shell(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
     };
 

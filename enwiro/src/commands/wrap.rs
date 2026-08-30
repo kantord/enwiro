@@ -96,7 +96,7 @@ pub fn wrap<W: Write>(context: &mut CommandContext<W>, args: WrapArgs) -> anyhow
 
 /// Why a daemon `launch.resolve` attempt failed. Kept distinct so the degraded
 /// (bare) launch is reported accurately instead of always blaming a down daemon.
-enum DaemonLaunchError {
+pub(crate) enum DaemonLaunchError {
     /// Couldn't reach the daemon (runtime build or connect failed): daemon down.
     Unreachable(String),
     /// The daemon answered but `launch.resolve` itself returned an error.
@@ -105,7 +105,7 @@ enum DaemonLaunchError {
 
 impl DaemonLaunchError {
     /// One-line, user-facing explanation of the degraded bare launch.
-    fn degraded_launch_message(&self, command: &str) -> String {
+    pub(crate) fn degraded_launch_message(&self, command: &str) -> String {
         let cause = match self {
             Self::Unreachable(e) => format!("daemon not running ({e})"),
             Self::Resolve(e) => format!("daemon error ({e})"),
@@ -116,7 +116,7 @@ impl DaemonLaunchError {
 
 /// Block on the daemon's `launch.resolve` RPC. The empty env name (home-dir
 /// fallback) is passed through too; the daemon simply returns the host command.
-fn resolve_launch_via_daemon(
+pub(crate) fn resolve_launch_via_daemon(
     environment_name: &str,
     environment_path: &str,
     command: &str,

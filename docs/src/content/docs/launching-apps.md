@@ -52,6 +52,33 @@ directory set to the environment's path and `ENWIRO_ENV` set to the environment
 name, so tools and shells can detect which environment they are in. The
 daemon-down fallback is the exception: it runs bare.
 
+## Using enwiro as your terminal's shell
+
+`enw shell` is `enw wrap` for your shell, built to be set as the terminal
+emulator's configured shell (e.g. kitty's `shell enw shell`). Every new
+terminal window then opens inside the active environment automatically:
+
+```sh
+enw shell [--timeout <SECONDS>] [SHELL_ARGS...]
+```
+
+It resolves the shell from `$SHELL` (ignoring it if it points back at
+enwiro itself), falling back to your login shell from passwd, then
+`/bin/sh`, and forwards any arguments verbatim - so `enw shell -c 'ls'`
+works wherever `$SHELL -c` is expected.
+
+Where it differs from `wrap`: activation owns cooking, `enw shell` never
+cooks (see ADR-0005). If the active workspace's environment has a matching
+recipe but does not exist yet - typically because `enw activate` is still
+cooking it in another process - `enw shell` shows a spinner on stderr and
+waits for the environment to appear, up to `--timeout` seconds (default 30,
+0 waits forever). On timeout it prints one warning line and starts a plain
+shell; the environment is picked up by new terminals once it is ready.
+
+In every degraded case - no environment, no matching recipe, no adapter, or
+the daemon unreachable - it silently starts your plain, unwrapped shell, so
+a terminal always opens.
+
 ## The host path (default)
 
 Out of the box, the daemon returns the command unchanged: it runs on the host,
