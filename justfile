@@ -86,3 +86,8 @@ gui-gen:
     set -euo pipefail
     cargo run -p enw-gui -- --dump-openapi > enw-gui/web/openapi.json
     pnpm --filter ./enw-gui/web gen
+
+# Regenerate the docs site's CLI reference page from the clap definitions.
+# CI checks that the committed page matches (see ci.yaml).
+docs-cli:
+    cargo run --quiet -p enwiro --bin enw -- generate-cli-docs > docs/src/content/docs/reference/cli.md

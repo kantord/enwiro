@@ -41,6 +41,10 @@ struct Cli {
 #[derive(clap::Subcommand)]
 enum EnwiroCli {
     Activate(ActivateArgs),
+    /// Hidden: dumps the CLI reference page for the docs site
+    /// (`just docs-cli`); not part of the interactive CLI surface.
+    #[command(hide = true)]
+    GenerateCliDocs,
     /// Hidden: the browser extension's native messaging host and its
     /// installer, spawned by the browser / run once at setup rather than
     /// being part of the interactive CLI surface.
@@ -56,6 +60,37 @@ enum EnwiroCli {
     Run(RunArgs),
     Shell(ShellArgs),
     Wrap(WrapArgs),
+}
+
+/// The docs site's CLI reference page (`docs/src/content/docs/reference/cli.md`),
+/// generated from the clap definitions so `--help` stays the single source of
+/// truth. Regenerate with `just docs-cli`; CI fails if the committed page drifts.
+fn generate_cli_docs<W: Write>(writer: &mut W) -> anyhow::Result<()> {
+    let options = clap_markdown::MarkdownOptions::new()
+        .title("CLI reference".to_string())
+        .show_footer(false);
+    // The crate is `enwiro` but the binary is `enw` (see tests/binary_name.rs);
+    // rename so the reference shows the command users actually type.
+    let command = <Cli as clap::CommandFactory>::command()
+        .name("enw")
+        .bin_name("enw");
+    let body = clap_markdown::help_markdown_command_custom(&command, &options);
+    // Starlight renders the frontmatter title as the page's H1; drop
+    // clap-markdown's own H1 to avoid a duplicate heading. Trim the end too:
+    // main() appends the global trailing newline, and the pre-commit
+    // end-of-file-fixer (and the CI drift check) require exactly one.
+    let body = body
+        .strip_prefix("# CLI reference\n")
+        .unwrap_or(&body)
+        .trim();
+    write!(
+        writer,
+        "---\ntitle: CLI reference\ndescription: Every enw subcommand, generated from the CLI's own help text.\n---\n\n\
+         This page is generated from the `enw` CLI definitions with `just docs-cli` - do not edit it by hand.\n\n\
+         In addition to the subcommands below, `enw [-y] :<gear> [entry]` dispatches\n\
+         to an environment's [gear](/launching-apps/) entries directly.\n\n{body}"
+    )?;
+    Ok(())
 }
 
 fn ensure_can_run<W: Write>(config: &CommandContext<W>) -> anyhow::Result<()> {
@@ -112,6 +147,7 @@ fn main() -> anyhow::Result<()> {
 
     let result = match cli.command {
         EnwiroCli::Activate(args) => activate(&mut context_object, args),
+        EnwiroCli::GenerateCliDocs => generate_cli_docs(&mut context_object.writer),
         EnwiroCli::Browser(args) => browser(&mut context_object, args),
         EnwiroCli::Goal(args) => goal(&mut context_object, args),
         EnwiroCli::Info(args) => env_info(&mut context_object, args),
