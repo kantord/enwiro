@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/kantord/enwiro/compare/enwiro-gui-v0.1.6...enwiro-gui-v0.1.7) - 2026-08-30
+
+### Fixed
+
+- *(deps)* update patch updates ([#777](https://github.com/kantord/enwiro/pull/777))
+
+### Other
+
+- *(deps)* update dependency @vitejs/plugin-react to v6.1.0 ([#787](https://github.com/kantord/enwiro/pull/787))
+
 ## [0.1.6](https://github.com/kantord/enwiro/compare/enwiro-gui-v0.1.5...enwiro-gui-v0.1.6) - 2026-07-13
 
 ### Other
