@@ -46,3 +46,18 @@ be resolved.
 Wrapping the user's shell in the current environment, waiting for a pending
 cook to finish before starting it. Falls back to a plain, unwrapped shell
 when no environment exists or nothing enwiro-related is reachable.
+
+**Project**:
+A named, configurable codebase-identity that environments resolve to. It is
+the home of per-codebase policy (isolation first, other rules later), carried
+by the project-level `.enwiro.toml`. Distinct from an environment, which is
+per-workspace; the same project can be present as many environments (branches,
+worktrees).
+_Avoid_: policy scope (same thing, coined before "project" was settled)
+
+**Isolation**:
+A project policy deciding how an environment's applications are wrapped when
+launched: run on the host, inside a container, or inside a microVM. Owned by
+the wrap layer, not the recipe or cookbook.
+_Avoid_: sandboxing (conflates with the loop layer; enwiro only owns the
+isolation substrate, not the agentic loop that runs on it)
