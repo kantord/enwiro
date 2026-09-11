@@ -15,6 +15,7 @@ use commands::goal::{GoalArgs, goal};
 use commands::kanban::{KanbanArgs, kanban};
 use commands::ls::{LsArgs, ls};
 use commands::mark::{MarkArgs, mark};
+use commands::meta::{MetaArgs, meta};
 use commands::prep::{PrepArgs, prep};
 use commands::rm::{RmArgs, rm};
 use commands::run::{RunArgs, run};
@@ -55,6 +56,7 @@ enum EnwiroCli {
     Kanban(KanbanArgs),
     Ls(LsArgs),
     Mark(MarkArgs),
+    Meta(MetaArgs),
     Prep(PrepArgs),
     Rm(RmArgs),
     Run(RunArgs),
@@ -158,6 +160,7 @@ fn main() -> anyhow::Result<()> {
             ls(&mut context_object, scope, args.json, status_filter)
         }
         EnwiroCli::Mark(args) => mark(&mut context_object, args),
+        EnwiroCli::Meta(args) => meta(&mut context_object, args),
         EnwiroCli::Prep(args) => prep(&mut context_object, args),
         EnwiroCli::Rm(args) => rm(&mut context_object, args),
         EnwiroCli::Run(args) => run(&mut context_object, args),

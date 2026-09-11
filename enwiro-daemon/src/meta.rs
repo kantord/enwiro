@@ -25,6 +25,14 @@ pub struct EnvStats {
     pub signals: UserIntentSignals,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Who last wrote `description` (ADR-0006). `None` for envs cooked
+    /// before this field existed - not "manual", just unknown. Every
+    /// `description` write through `record_cook_metadata_per_env` sets
+    /// this to `Auto`; there is no manual-set path yet, so `Manual` is
+    /// unused today but reserved for one, so it can check this field
+    /// before overwriting instead of being silently clobbered on re-cook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_source: Option<DescriptionSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cookbook: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,6 +57,14 @@ pub struct EnvStats {
 }
 
 pub use enwiro_sdk::goal::GoalDetail;
+
+/// Who last wrote an environment's `description` (ADR-0006).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DescriptionSource {
+    Auto,
+    Manual,
+}
 
 // The status schema lives in `enwiro-sdk` so cookbooks (which emit it on the
 // `status_changed` wire event) and the daemon (which writes it to meta.json)
@@ -266,6 +282,7 @@ pub fn record_cook_metadata_per_env(
     meta.main_folder = Some(main_folder.to_string());
     if let Some(d) = description {
         meta.description = Some(d.to_string());
+        meta.description_source = Some(DescriptionSource::Auto);
     }
     if let Some(g) = goal {
         meta.goal = Some(g.clone());
@@ -399,6 +416,27 @@ mod tests {
         assert_eq!(meta.recipe, Some("kantord/enwiro#325".to_string()));
         assert_eq!(meta.description, Some("Fix auth bug".to_string()));
         assert_eq!(meta.main_folder, Some("my-project".to_string()));
+        assert_eq!(meta.description_source, Some(DescriptionSource::Auto));
+    }
+
+    #[test]
+    fn test_record_cook_metadata_leaves_description_source_untouched_when_description_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_dir = dir.path().join("my-project");
+        fs::create_dir(&env_dir).unwrap();
+
+        record_cook_metadata_per_env(
+            &env_dir,
+            "github",
+            "kantord/enwiro#325",
+            None,
+            None,
+            "my-project",
+        );
+
+        let meta = load_env_meta(&env_dir);
+        assert_eq!(meta.description, None);
+        assert_eq!(meta.description_source, None);
     }
 
     #[test]

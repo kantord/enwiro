@@ -65,7 +65,10 @@ Add `describe()` to `CookbookTrait` as above. `enwiro-cookbook-github`
 implements it with a single `gh api repos/{repo}/issues/{number}` call
 (covers both issues and PRs - a PR is distinguished by the presence of the
 `pull_request` key in the response, avoiding a second sequential `gh`
-call and its timeout risk). `resolve_and_cook` persists
+call and its timeout risk). Like `gear()`, the cookbook binary's stdout is
+parsed directly as the trait's `Option<T>` payload (`T = String` here) -
+it prints a bare JSON string (e.g. `"[PR] Fix auth bug"`), not a wrapper
+object. `resolve_and_cook` persists
 `describe()`'s result instead of the static template for pattern-routed
 cooks, and also uses it (falling back to the static template on `None`)
 for the `notify_info` toast, so the toast shows the same real title that

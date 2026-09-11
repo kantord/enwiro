@@ -6,6 +6,7 @@ pub mod goal;
 pub mod kanban;
 pub mod ls;
 pub mod mark;
+pub mod meta;
 pub mod prep;
 pub mod rm;
 pub mod run;

@@ -22,6 +22,8 @@ This document contains the help content for the `enw` command-line program.
 * [`enw kanban`↴](#enw-kanban)
 * [`enw ls`↴](#enw-ls)
 * [`enw mark`↴](#enw-mark)
+* [`enw meta`↴](#enw-meta)
+* [`enw meta refresh`↴](#enw-meta-refresh)
 * [`enw prep`↴](#enw-prep)
 * [`enw rm`↴](#enw-rm)
 * [`enw run`↴](#enw-run)
@@ -40,6 +42,7 @@ This document contains the help content for the `enw` command-line program.
 * `kanban` — interactive kanban board of environments grouped by status
 * `ls` — list existing environments and/or available recipes
 * `mark` — Set the status of the current environment
+* `meta` — Refresh environment metadata resolved once at cook time
 * `prep` — Cook (if needed) and print the env path; no adapter contact
 * `rm` — Remove an environment
 * `run` — Run a command via the active environment's adapter
@@ -169,6 +172,35 @@ Set the status of the current environment
 
   Possible values: `ready`, `active`, `waiting`, `done`, `evergreen`
 
+
+
+
+## `enw meta`
+
+Refresh environment metadata resolved once at cook time
+
+**Usage:** `enw meta <COMMAND>`
+
+###### **Subcommands:**
+
+* `refresh` — Re-resolve descriptions still stuck on their cook-time pattern-recipe template (ADR-0006), e.g. "Work on PR or issue #42 in myrepo"
+
+
+
+## `enw meta refresh`
+
+Re-resolve descriptions still stuck on their cook-time pattern-recipe template (ADR-0006), e.g. "Work on PR or issue #42 in myrepo"
+
+**Usage:** `enw meta refresh [OPTIONS] [ENV_NAME]`
+
+###### **Arguments:**
+
+* `<ENV_NAME>` — Environment to refresh (defaults to the current environment)
+
+###### **Options:**
+
+* `--all` — Refresh every environment instead of just one
+* `--dry-run` — Report what would change without writing anything
 
 
 

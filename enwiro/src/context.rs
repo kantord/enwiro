@@ -218,19 +218,34 @@ impl<W: Write> CommandContext<W> {
                 )
             })?;
 
+        // A pattern-routed cook resolves a fresh, real description (ADR-0006)
+        // - e.g. the actual PR/issue title behind a `repo#N` cook - instead of
+        // the static cache template, which is now only a fallback for when
+        // that resolution fails.
+        let live_description = if via_pattern {
+            cookbook.describe(recipe_name)?
+        } else {
+            None
+        };
+
         // A pattern-routed cook does something the recipe list never showed
-        // (e.g. creating a new branch) - surface the rendered description so
+        // (e.g. creating a new branch) - surface the resolved description so
         // a typo'd name is noticed instead of silently becoming a branch.
-        if via_pattern && let Some(rendered) = &description {
+        if via_pattern && let Some(rendered) = live_description.as_ref().or(description.as_ref()) {
             self.notifier.notify_info(env_name, rendered);
         }
 
         tracing::debug!(env = %env_name, recipe = %recipe_name, cookbook = %cookbook_name, "Found recipe in cache");
         let path = cookbook.cook(recipe_name)?;
+        let persisted_description = if via_pattern {
+            live_description
+        } else {
+            description
+        };
         Ok(CookedRecipe {
             cookbook: cookbook.as_ref(),
             path,
-            description,
+            description: persisted_description,
             goal,
         })
     }
@@ -939,12 +954,67 @@ mod tests {
             notifications.borrow()
         );
 
+        // ... but NOT persisted as the env description (ADR-0006): the
+        // cache template is only a fallback for the toast, never for what
+        // gets written to meta.json. This fake cookbook has no `describe()`
+        // result configured, so nothing is persisted.
+        let env_dir = temp_dir.path().join("my-project@new-idea");
+        let meta = crate::usage_stats::load_env_meta(&env_dir);
+        assert_eq!(meta.description, None);
+    }
+
+    #[rstest]
+    fn test_cook_environment_via_pattern_match_persists_and_notifies_live_description(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, notifications) = context_object;
+
+        let cooked_dir = temp_dir.path().join("cooked-target");
+        fs::create_dir(&cooked_dir).unwrap();
+
+        context_object.write_cache_lines(&[
+            concrete_cache_line("git", "my-project"),
+            pattern_cache_line(
+                "git",
+                "my-project@(?P<branch>.+)",
+                Some("Create new branch '{branch}' in my-project"),
+            ),
+        ]);
+        context_object.cookbooks = vec![Box::new(
+            FakeCookbook::new(
+                "git",
+                vec!["my-project"],
+                vec![("my-project@new-idea", cooked_dir.to_str().unwrap())],
+            )
+            .with_describe("Add the new onboarding flow"),
+        )];
+
+        let env = context_object
+            .cook_environment(
+                "my-project@new-idea",
+                "my-project@new-idea",
+                &CookConfig::default(),
+            )
+            .unwrap();
+        assert_eq!(env.name, "my-project@new-idea");
+
+        // The live, resolved description is what gets surfaced in the
+        // toast - not the static cache template.
+        assert!(
+            notifications
+                .borrow()
+                .iter()
+                .any(|n| n.contains("Add the new onboarding flow")),
+            "notifications: {:?}",
+            notifications.borrow()
+        );
+
         // ... and persisted as the env description.
         let env_dir = temp_dir.path().join("my-project@new-idea");
         let meta = crate::usage_stats::load_env_meta(&env_dir);
         assert_eq!(
             meta.description.as_deref(),
-            Some("Create new branch 'new-idea' in my-project")
+            Some("Add the new onboarding flow")
         );
     }
 
