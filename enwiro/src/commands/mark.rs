@@ -6,7 +6,10 @@ use enwiro_sdk::rpc::{EnvMarkParams, EnwiroRpcClient};
 use crate::CommandContext;
 
 #[derive(clap::Args)]
-#[command(about = "Set the status of the current environment")]
+#[command(
+    about = "Set the status of the current environment",
+    arg_required_else_help = true
+)]
 pub struct MarkArgs {
     #[arg(value_enum)]
     pub status: MarkStatus,
