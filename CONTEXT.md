@@ -19,6 +19,20 @@ _Avoid_: environment
 **Recipe**:
 A description of how to create an environment, offered by a cookbook.
 
+**Description** (`meta.json` field):
+The one-line label meant to convey an environment's goal in adapter UIs
+(e.g. tauler's workspace list). Resolved once, at cook time, and frozen
+into `meta.json` thereafter - it is not the same thing as `Goal`.
+_Avoid_: goal (colloquial for this in bug reports; the structured field is
+a different, separate thing - see `Goal`)
+
+**Goal** (`GoalDetail`):
+A structured `{kind, label, detail}` field describing why an environment
+exists (e.g. `{kind: "github_issue", label: "Fix auth bug", detail:
+{repo, number}}`). Exists in `meta.json` and on cookbook-declared recipes.
+Not currently rendered by any adapter UI - `Description` is what's shown
+today, and is a strictly weaker stand-in for the same idea.
+
 **Cookbook**:
 A plugin that lists recipes and can cook them.
 
