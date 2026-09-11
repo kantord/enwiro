@@ -5,6 +5,9 @@
     "helpers:pinGitHubActionDigestsToSemver"
   ],
   "minimumReleaseAge": "3 days",
+  "vulnerabilityAlerts": {
+    "minimumReleaseAge": null
+  },
   "lockFileMaintenance": {
     "enabled": true,
     "automerge": true
@@ -17,9 +20,30 @@
       "minimumReleaseAge": null
     },
     {
+      "description": "lockFileMaintenance has no release timestamp of its own -- it's a whole-lockfile refresh, not a single package bump -- so under the default timestamp-required behavior the age gate never clears and silently disables automerge above. This makes automerge here rely on ci.yaml's frontend and audit jobs (pnpm audit, cargo audit) as the only compensating checks; neither catches a same-day, not-yet-disclosed compromise.",
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "minimumReleaseAge": null
+    },
+    {
       "description": "Patch updates are low-review-effort; land them as one PR",
       "matchUpdateTypes": ["patch"],
       "groupName": "patch updates"
+    },
+    {
+      "description": "Action digest bumps are independent and noisy; one PR is enough.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions"
+    },
+    {
+      "description": "Starlight and its themes/integrations peer-depend on the Astro major.",
+      "matchManagers": ["npm"],
+      "matchPackageNames": [
+        "astro",
+        "/^@astrojs//",
+        "/^starlight-/",
+        "/^astro-/"
+      ],
+      "groupName": "astro + starlight"
     }
   ]
 }
