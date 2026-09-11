@@ -16,6 +16,6 @@
     "astro-mermaid": "^2.0.4",
     "mermaid": "^11.15.0",
     "sharp": "^0.35.0",
-    "starlight-theme-flexoki": "^0.2.2"
+    "starlight-theme-flexoki": "^0.3.0"
   }
 }
