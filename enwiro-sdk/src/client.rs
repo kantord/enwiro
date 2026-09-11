@@ -102,6 +102,14 @@ pub trait CookbookTrait {
     fn external_paths(&self, _recipe: &str) -> anyhow::Result<Vec<String>> {
         Ok(Vec::new())
     }
+    /// Best-effort, freshly-resolved description for a recipe (ADR-0006):
+    /// e.g. the real PR/issue title behind a pattern-routed `repo#N` cook.
+    /// Only meaningful for pattern-routed cooks - a concrete recipe's cache
+    /// entry already carries a real description, resolved when the recipe
+    /// was listed.
+    fn describe(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Sort cookbooks by priority (lower first), then alphabetically by name.
@@ -535,6 +543,16 @@ impl CookbookTrait for RpcCookbookClient {
         )
         .unwrap_or_default())
     }
+
+    /// Best-effort `describe <recipe>` via the daemon -- see
+    /// [`best_effort_json_via_rpc`] for the shared failure contract.
+    fn describe(&self, recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(best_effort_json_via_rpc(
+            self.invoke("describe", vec![recipe.to_string()]),
+            self.plugin.name.as_str(),
+            "describe",
+        ))
+    }
 }
 
 impl CookbookTrait for CookbookClient {
@@ -615,6 +633,18 @@ impl CookbookTrait for CookbookClient {
             "external-paths",
         )
         .unwrap_or_default())
+    }
+
+    /// Invoke the cookbook binary's optional `describe <recipe>` subcommand
+    /// -- see [`best_effort_json_via_subprocess`] for the shared failure
+    /// contract.
+    fn describe(&self, recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(best_effort_json_via_subprocess(
+            self.spawn_with_payload_timeout(&["describe", recipe], BEST_EFFORT_SUBCOMMAND_TIMEOUT),
+            self.plugin.name.as_str(),
+            recipe,
+            "describe",
+        ))
     }
 }
 

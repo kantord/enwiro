@@ -13,6 +13,7 @@ decision, and the trade-offs.
 | [0003](0003-pattern-recipes.md)            | Pattern recipes for cooking unlisted names | Accepted |
 | [0004](0004-recipe-grammar-and-composed-environments.md) | Recipe-name grammar and composed environments | Accepted |
 | [0005](0005-shell-waits-never-cooks.md)    | `enw shell` waits for cooking, never cooks | Accepted |
+| [0006](0006-description-resolution-for-pattern-recipes.md) | Resolving real descriptions for pattern-routed cooks | Accepted |
 
 ## Status values
 

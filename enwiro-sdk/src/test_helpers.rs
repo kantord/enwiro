@@ -15,6 +15,7 @@ pub struct FakeCookbook {
     pub cook_results: HashMap<String, String>,
     pub priority: u32,
     pub gear_json: Option<serde_json::Value>,
+    pub describe_result: Option<String>,
 }
 
 impl FakeCookbook {
@@ -28,11 +29,17 @@ impl FakeCookbook {
                 .collect(),
             priority: 50,
             gear_json: None,
+            describe_result: None,
         }
     }
 
     pub fn with_gear(mut self, gear: serde_json::Value) -> Self {
         self.gear_json = Some(gear);
+        self
+    }
+
+    pub fn with_describe(mut self, description: &str) -> Self {
+        self.describe_result = Some(description.to_string());
         self
     }
 
@@ -56,6 +63,7 @@ impl FakeCookbook {
                 .collect(),
             priority: 50,
             gear_json: None,
+            describe_result: None,
         }
     }
 
@@ -94,6 +102,10 @@ impl CookbookTrait for FakeCookbook {
 
     fn gear(&self, _recipe: &str) -> anyhow::Result<Option<serde_json::Value>> {
         Ok(self.gear_json.clone())
+    }
+
+    fn describe(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.describe_result.clone())
     }
 }
 

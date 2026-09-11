@@ -55,6 +55,7 @@ enum EnwiroCookbookGithub {
     Core(CookbookCore),
     Gear(GearArgs),
     ExternalPaths(ExternalPathsArgs),
+    Describe(DescribeArgs),
     Listen,
 }
 
@@ -65,6 +66,11 @@ pub struct GearArgs {
 
 #[derive(clap::Args)]
 pub struct ExternalPathsArgs {
+    recipe_name: String,
+}
+
+#[derive(clap::Args)]
+pub struct DescribeArgs {
     recipe_name: String,
 }
 
@@ -395,6 +401,14 @@ fn goal_detail(kind: &str, label: String, item: &GithubItem) -> enwiro_sdk::goal
     }
 }
 
+/// Strip control characters (newline, NUL, unit separator) from a
+/// GitHub-sourced title before it's used as a recipe description - shared
+/// by the search-result path (`recipes_for_item`) and `describe()`
+/// (ADR-0006) so the two can't silently drift apart.
+fn sanitize_title(title: &str) -> String {
+    title.replace(['\n', '\0', '\x1f'], " ")
+}
+
 /// The recipe(s) one search result expands to: one for an issue
 /// (`repo#N`, goal `github_issue`), two for a PR - `repo#N` (goal
 /// `work_on`, unchanged from before goal-variants existed) and
@@ -406,7 +420,7 @@ fn recipes_for_item(
     total: usize,
     display_names: &std::collections::HashMap<String, String>,
 ) -> Vec<Recipe> {
-    let safe_title = item.title.replace(['\n', '\0', '\x1f'], " ");
+    let safe_title = sanitize_title(&item.title);
     let sort_order = compute_sort_order(index, total);
     let equivalent_to = display_names
         .get(&item.repo)
@@ -1009,6 +1023,51 @@ fn resolve_external_paths(recipe_name: &str) -> anyhow::Result<Vec<String>> {
 fn external_paths(args: ExternalPathsArgs) -> anyhow::Result<()> {
     let paths = resolve_external_paths(&args.recipe_name)?;
     println!("{}", serde_json::to_string(&paths)?);
+    Ok(())
+}
+
+/// Parse a `gh api repos/{repo}/issues/{number}` response into a prefixed,
+/// sanitized description. That endpoint returns pull requests too -
+/// identified by the presence of the `pull_request` key - so one call
+/// covers both, avoiding a second sequential `gh pr view` / `gh issue view`
+/// call and its timeout risk (ADR-0006).
+fn parse_describe_response(json: &[u8]) -> anyhow::Result<String> {
+    let value: serde_json::Value =
+        serde_json::from_slice(json).context("gh api produced invalid JSON")?;
+    let title = value
+        .get("title")
+        .and_then(|t| t.as_str())
+        .context("gh api response had no string 'title'")?;
+    let prefix = if value.get("pull_request").is_some() {
+        "[PR]"
+    } else {
+        "[issue]"
+    };
+    Ok(format!("{} {}", prefix, sanitize_title(title)))
+}
+
+/// Resolve a fresh description for `repo#number` via a single `gh api` call.
+fn resolve_description(repo: &str, number: u64) -> anyhow::Result<String> {
+    let output = Command::new("gh")
+        .args(["api", &format!("repos/{repo}/issues/{number}")])
+        .output()
+        .context(
+            "Failed to run gh CLI. Is it installed and authenticated? \
+             (https://cli.github.com/, then run: gh auth login)",
+        )?;
+    anyhow::ensure!(
+        output.status.success(),
+        "gh api failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_describe_response(&output.stdout)
+}
+
+fn describe(args: DescribeArgs) -> anyhow::Result<()> {
+    let (repo_str, number, _is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
+    let repo_config = resolve_repo_config(repo_str)?;
+    let description = resolve_description(&repo_config.repo, number)?;
+    println!("{}", serde_json::to_string(&description)?);
     Ok(())
 }
 
@@ -1890,6 +1949,45 @@ mod tests {
         assert_eq!(compute_sort_order(2, 3), 100);
     }
 
+    mod describe_tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_describe_response_issue_gets_issue_prefix() {
+            let json = br#"{"title": "Fix auth bug"}"#;
+            assert_eq!(
+                parse_describe_response(json).unwrap(),
+                "[issue] Fix auth bug"
+            );
+        }
+
+        #[test]
+        fn test_parse_describe_response_pull_request_gets_pr_prefix() {
+            let json = br#"{"title": "Fix auth bug", "pull_request": {}}"#;
+            assert_eq!(parse_describe_response(json).unwrap(), "[PR] Fix auth bug");
+        }
+
+        #[test]
+        fn test_parse_describe_response_sanitizes_control_characters() {
+            let json = "{\"title\": \"Fix\\nauth bug\"}";
+            assert_eq!(
+                parse_describe_response(json.as_bytes()).unwrap(),
+                "[issue] Fix auth bug"
+            );
+        }
+
+        #[test]
+        fn test_parse_describe_response_errors_on_missing_title() {
+            let json = br#"{"pull_request": {}}"#;
+            assert!(parse_describe_response(json).is_err());
+        }
+
+        #[test]
+        fn test_parse_describe_response_errors_on_invalid_json() {
+            assert!(parse_describe_response(b"not json").is_err());
+        }
+    }
+
     mod interpret_gh_output_tests {
         use super::*;
 
@@ -2081,6 +2179,9 @@ fn main() -> anyhow::Result<()> {
         }
         EnwiroCookbookGithub::ExternalPaths(args) => {
             external_paths(args)?;
+        }
+        EnwiroCookbookGithub::Describe(args) => {
+            describe(args)?;
         }
         EnwiroCookbookGithub::Core(CookbookCore::Metadata) => {
             println!(

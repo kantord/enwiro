@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 pub use enwiro_daemon::meta::{
-    EnvStats, load_env_meta, now_timestamp, record_activation_per_env,
-    record_cook_metadata_per_env, record_prep_per_env,
+    DescriptionSource, EnvStats, load_env_meta, now_timestamp, record_activation_per_env,
+    record_cook_metadata_per_env, record_prep_per_env, save_env_meta,
 };
 pub use enwiro_daemon::scoring::{launcher_score, slot_scores};
 
