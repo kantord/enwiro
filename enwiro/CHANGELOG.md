@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.63](https://github.com/kantord/enwiro/compare/enwiro-v0.3.62...enwiro-v0.3.63) - 2026-09-11
+
+### Fixed
+
+- show possible status commands in enw mark ([#808](https://github.com/kantord/enwiro/pull/808))
+
 ## [0.3.62](https://github.com/kantord/enwiro/compare/enwiro-v0.3.61...enwiro-v0.3.62) - 2026-09-11
 
 ### Added
