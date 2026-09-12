@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -54,10 +54,11 @@ Four gaps block turning this into a real isolation substrate:
    which removes the motivation for a backend-agnostic abstraction layer
    rather than creating one.
 
-microsandbox (github.com/microsandbox/microsandbox) is a CLI (`msb`)
-driving libkrun microVMs, already validated outside enwiro: a personal
-project's coding-agent dispatch tooling runs it in production today,
-shelling out to `msb run`/`copy`/`exec`/`rm` as subprocesses, using
+microsandbox (github.com/superradcompany/microsandbox) is a CLI (`msb`)
+driving libkrun microVMs. It isn't validated by any independent
+third party here, but it is validated by our own prior use: a separate
+personal project's coding-agent dispatch tooling already runs it in
+production, shelling out to `msb run`/`copy`/`exec`/`rm` as subprocesses, using
 `--secret ENV@HOST` to scope an API key to one domain with
 block-and-terminate on violation, and `--from-snapshot <name>` to boot a
 prebuilt base. That usage is fully-permissive/ephemeral by design and
@@ -184,15 +185,22 @@ instead of the current whole-container `--user` workaround.
 
 ### Ownership handling
 
-- ✓ **Chosen — per-mount `uid=<N>,gid=<N>`** (msb's `-v`/`--mount-dir`
-  option) presenting the host-owned project directory as the guest's
-  owner at the mount itself. Structural fix, and backend-uniform — no
-  more "krun ignores `--user`" special case, because `--user` isn't what
-  solves this anymore.
+- ✓ **Chosen — nothing.** Verified hands-on, before writing any argv code:
+  microsandbox's mounts already present a host-owned directory as owned by
+  the guest's own uid, in both directions (a file the guest creates as
+  root comes back on the host owned by the real host user), independent of
+  which uid the guest process runs as. `git commit` in a bind-mounted repo
+  works with zero ownership flags. The `uid=`/`gid=` mount option this ADR
+  originally planned to use turned out to solve a problem that no longer
+  exists under this backend.
+- ✗ **Rejected — per-mount `uid=<N>,gid=<N>`** (msb's `-v`/`--mount-dir`
+  option), the ADR's original plan before this was verified. Unnecessary:
+  see above.
 - ✗ **Rejected — port the existing whole-container `--user <uid>:<gid>` +
-  `HOME` rewrite.** Works today but is exactly the mechanism that
-  diverges between podman and krun; carrying it forward keeps that split
-  alive.
+  `HOME` rewrite.** Was the mechanism that diverged between podman and
+  krun; also unnecessary now that ownership is solved structurally. `-u`
+  is still set, but only for non-root *process* hardening, orthogonal to
+  ownership.
 
 ### Network policy
 
@@ -263,10 +271,16 @@ instead of the current whole-container `--user` workaround.
 4. **No backend-agnostic seam.** The wrap layer calls microsandbox
    directly.
 5. **No enwiro-shipped default image.** An unresolved image with
-   `isolate = true` fails loud. A user may configure their own default
-   snapshot name in `~/.config/enwiro/enwiro.toml`.
-6. **Ownership is handled per-mount** (`uid=`/`gid=`), not by running the
-   whole container as the host user.
+   `isolate = true` makes `launch.resolve` return an explicit error, which
+   `enw wrap` treats exactly like any other resolve failure it already
+   handles: a loud warning, then a bare host launch — not a silent,
+   unannounced host fallback, but also not a new hard-refusal failure mode
+   (the CLI has exactly one degrade path today; this reuses it rather than
+   adding a second). A user may configure their own default snapshot name
+   under `[isolation]` in `~/.config/enwiro/isolation.toml`.
+6. **Ownership needs no special handling at all** (verified: microsandbox's
+   mounts already map it correctly); `-u <host-uid>:<host-gid>` is set only
+   for non-root process hardening, unrelated to ownership.
 7. **Egress is open by default**; no network policy config surface ships
    in v1.
 8. **Credential passthrough is a first-class part of this policy**,
@@ -308,7 +322,11 @@ instead of the current whole-container `--user` workaround.
 ### Risks
 
 - **Silent host fallback.** Mitigated by design: `isolate = true` with no
-  resolvable image fails loud rather than silently running on the host.
+  resolvable image makes `launch.resolve` return an explicit error, which
+  `enw wrap` surfaces loudly (stderr + desktop notification) before it
+  falls back to the host — the same treatment as a down daemon, so the
+  fallback is never *unannounced*, even though it also isn't a hard
+  refusal (see Decision, point 5).
 - **Worktree policy misses.** If the cookbook symlink isn't created, a
   worktree silently runs unisolated. Needs a guard/check.
 - **Retiring `proxy.rs` on faith.** `--secret ... --on-secret-violation
@@ -323,19 +341,58 @@ instead of the current whole-container `--user` workaround.
 
 ## Implementation notes
 
-- Rewrites the container branch of `enwiro-daemon/src/launch.rs`
-  (`resolve_launch`) to build `msb run`/`exec`/`copy`/`rm` invocations
-  instead of podman ones; removes the podman/krun-specific code
-  (`--user`/`--userns=keep-id` handling, `CONTAINER_ENGINE`,
-  `find_container_engine`) and the `container_runtime` config setting.
-- Deletes `enwiro-daemon/src/proxy.rs` and the capability-token/shim
-  machinery; Claude's token moves to `--secret`.
-- Reuses `enwiro-sdk/src/config/mod.rs` (the project-walker) for
-  `isolate`/image-name resolution; reuses the `external_paths` mechanism
-  unchanged for worktree main-repo mounting, ported to msb's mount
-  syntax.
-- New: `isolate` and image-name keys in `.enwiro.toml`; a user-level
-  default-image key in `~/.config/enwiro/enwiro.toml`.
+Implemented. What actually landed, including a few corrections found only by
+building and testing against the real `msb` CLI:
+
+- Rewrote the isolation branch of `enwiro-daemon/src/launch.rs`
+  (`resolve_launch`) to build `msb run` invocations (foreground, no `-d`)
+  instead of podman ones; removed all podman/krun-specific code
+  (`--user`/`--userns=keep-id` handling, `CONTAINER_ENGINE`, image-tag
+  sanitization, `is_krun_runtime`, `half_host_memory_mib`) and the
+  `container_runtime` config setting end to end (`ConfigurationValues`,
+  `DaemonConfig`, the RPC layer, `main.rs`).
+- **Fail-loud is the existing degrade path, not a new one.** `enw wrap`
+  already has exactly one failure mode for any `launch.resolve` problem: a
+  loud stderr warning + desktop notification, then a bare unwrapped host
+  launch (never a hard refusal). `isolate = true` with no resolvable image
+  reuses that path (`resolve_launch` now returns `Result<_, String>`) rather
+  than introducing a first-ever "refuse to launch" behavior, which would have
+  been inconsistent with that invariant.
+- **Ownership needed no new mechanism at all**, contrary to the original
+  plan to use msb's per-mount `uid=`/`gid=` option: verified hands-on that
+  microsandbox's bind mounts already present host-owned files as owned by
+  the guest's own uid in both directions, with zero flags -- `git commit` in
+  a mounted repo works out of the box. `-u <host-uid>:<host-gid>` is set
+  anyway, purely for non-root process hardening (unrelated to the
+  now-solved ownership question).
+- **`msb`-on-`PATH` is checked explicitly** (`which`, kept as a dependency)
+  as part of resolving isolation, mirroring the old podman-engine lookup --
+  otherwise a missing `msb` binary would surface as a raw exec failure
+  instead of the same degrade path as a missing image.
+- Deleted `enwiro-daemon/src/proxy.rs` and its capability-token/shim
+  machinery (and its now-unused deps: `bytes`, `http-body-util`, `hyper`,
+  `hyper-util`, `reqwest`). Claude's token moves to
+  `--secret <ENV>@api.anthropic.com` + `--on-secret-violation
+  block-and-terminate`; the real value lives only in the `msb` process's own
+  environment (never in argv, visible via `ps`/`msb inspect`). One
+  correction found by testing: `--secret ENV@HOST` delivers the value inside
+  the guest as `MSB_<ENV>`, not `<ENV>` -- the launch prelude renames it to
+  `CLAUDE_CODE_OAUTH_TOKEN`, the name `claude` actually reads.
+- Reused `enwiro_sdk::config::build_cookbook_config` (the existing
+  project-config walker) directly for `isolate`/image resolution, scope
+  `"isolation"` -- this is also where the user-level default naturally
+  lands: **`~/.config/enwiro/isolation.toml`**, not bundled into the
+  daemon's own `enwiro.toml`, since that's the file this loader already
+  reads for any given scope with no new code.
+- Reused the `external_paths` mechanism unchanged for worktree main-repo
+  mounting, ported to msb's `-v SOURCE:DEST` mount syntax.
+- **Known regression vs. podman**: `msb`'s mount flags have no colon-safe
+  syntax (`--mount type=bind,source=,target=` had none to port); `msb`
+  itself refuses a host path containing `:`, `,`, or `;` (verified hands-on)
+  rather than mis-mounting it. Documented as a known limitation; not
+  expected to matter in practice for enwiro project paths.
+- New config surface: `[isolation]` `isolate`/`image` keys in `.enwiro.toml`
+  and in `~/.config/enwiro/isolation.toml`.
 
 ## Related decisions
 
@@ -360,9 +417,11 @@ instead of the current whole-container `--user` workaround.
 - `enwiro-sdk/src/config/mod.rs` — the project-config walker.
 - `docs/creating-a-cookbook.md` — the cookbook contract (`cook` returns a
   path; recipes are names, not config carriers).
-- microsandbox — github.com/microsandbox/microsandbox (`msb` CLI: `run`,
-  `exec`, `copy`, `rm`, `--secret`, `--net-rule`, `--mount-dir ... uid=/gid=`).
-- A personal project's coding-agent dispatch tooling — production usage
-  of `msb` as a subprocess with `--secret ENV@HOST` scoping and
-  `--from-snapshot`, validating the integration shape (though not its
-  egress policy, which that usage runs fully open).
+- microsandbox — github.com/superradcompany/microsandbox (`msb` CLI:
+  `run`, `exec`, `copy`, `rm`, `--secret`, `--net-rule`,
+  `--mount-dir ... uid=/gid=`).
+- Our own prior use of `msb`, in a separate personal project's
+  coding-agent dispatch tooling — production usage of `msb` as a
+  subprocess with `--secret ENV@HOST` scoping and `--from-snapshot`,
+  validating the integration shape (though not its egress policy, which
+  that usage runs fully open).

@@ -58,7 +58,6 @@ pub type SharedActiveEnv = Arc<Mutex<Option<ActiveEnvState>>>;
 struct DaemonRpc {
     active_env: SharedActiveEnv,
     workspaces_directory: PathBuf,
-    container_runtime: Option<String>,
 }
 
 /// `APPLICATION_ERROR_CODE` constructor — every "cookbook X failed at Y"
@@ -260,20 +259,16 @@ impl EnwiroRpcServer for DaemonRpc {
         &self,
         params: LaunchResolveParams,
     ) -> Result<LaunchResolveResult, ErrorObjectOwned> {
-        // `resolve_launch` can shell out to the container engine (image probe),
-        // which is blocking; run it off the async worker so a slow/hung engine
-        // can't stall other RPC handlers on this thread.
+        // `resolve_launch` can shell out (isolation-policy resolution, git
+        // identity), which is blocking; run it off the async worker so a
+        // slow/hung call can't stall other RPC handlers on this thread.
         let workspaces_directory = self.workspaces_directory.clone();
-        let container_runtime = self.container_runtime.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::launch::resolve_launch(
-                &params,
-                &workspaces_directory,
-                container_runtime.as_deref(),
-            )
+        let result = tokio::task::spawn_blocking(move || {
+            crate::launch::resolve_launch(&params, &workspaces_directory)
         })
         .await
-        .map_err(|e| app_err(format!("launch.resolve task failed: {e}")))
+        .map_err(|e| app_err(format!("launch.resolve task failed: {e}")))?;
+        result.map_err(app_err)
     }
 
     async fn env_list(&self) -> Result<EnvListResult, ErrorObjectOwned> {
@@ -454,12 +449,10 @@ pub async fn serve_listener(
     socket_path: PathBuf,
     active_env: SharedActiveEnv,
     workspaces_directory: PathBuf,
-    container_runtime: Option<String>,
 ) -> anyhow::Result<()> {
     let rpc = DaemonRpc {
         active_env,
         workspaces_directory,
-        container_runtime,
     };
     let methods: Methods = rpc.into_rpc().into();
     tracing::info!(path = %socket_path.display(), "rpc server listening");

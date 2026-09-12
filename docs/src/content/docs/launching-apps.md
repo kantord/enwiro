@@ -5,7 +5,7 @@ description: How enwiro runs a command inside an environment via the wrap chokep
 
 Everything enwiro launches in an environment goes through one command:
 **`enw wrap`**. It is the single chokepoint where an environment's working
-directory, its `ENWIRO_ENV` variable, and (optionally) container isolation are
+directory, its `ENWIRO_ENV` variable, and (optionally) microVM isolation are
 applied before your program starts.
 
 ```sh
@@ -37,15 +37,15 @@ flowchart TD
     B --> C{"daemon reachable?"}
     C -- "no" --> H["Command runs unwrapped<br/>(not in the environment)"]
     C -- "yes" --> D["daemon decides how to launch"]
-    D --> E{"container image for this env?"}
+    D --> E{"project has isolate = true?"}
     E -- "no" --> F["Command runs on host, in the environment"]
-    E -- "yes" --> G["Command runs in container isolation"]
-    click G "#the-container-isolation-path-experimental" "How container isolation runs your command"
+    E -- "yes" --> G["Command runs in a microsandbox microVM"]
+    click G "#the-isolation-path-experimental" "How isolation runs your command"
 ```
 
-The container branch runs your command inside a per-environment image; see
-[the container isolation path](#the-container-isolation-path-experimental) for
-the exact invocation.
+The isolated branch runs your command inside a microsandbox microVM; see
+[the isolation path](#the-isolation-path-experimental) for the exact
+invocation.
 
 When the daemon answers (host or container), the program runs with its working
 directory set to the environment's path and `ENWIRO_ENV` set to the environment
@@ -85,46 +85,68 @@ Out of the box, the daemon returns the command unchanged: it runs on the host,
 in the environment's directory, with `ENWIRO_ENV` set. This is the behaviour you
 get without any isolation build flag.
 
-## The container isolation path (experimental)
+## The isolation path (experimental)
 
 :::caution[Highly experimental]
-Container isolation is an early, experimental feature and is subject to rapid
-change. Expect rough edges and breaking changes; do not rely on the exact
-behaviour described below.
+Isolation is an early, experimental feature and is subject to rapid change.
+Expect rough edges and breaking changes; do not rely on the exact behaviour
+described below.
 :::
 
-enwiro can instead run your command inside a container, one image per
-environment. This is **off by default** and gated two ways:
+enwiro can instead run your command inside a [microsandbox](https://github.com/superradcompany/microsandbox)
+microVM (ADR-0006). This is **off by default** and gated two ways:
 
 - The daemon must be built with the `container-wrap` feature (see below).
-- A local OCI image named `enwiro/<environment-name>` must exist. Its presence
-  is the trigger; building it is out of band (you bring your own image). If no
-  such image exists, the launch falls back to the host path.
+- The project's `.enwiro.toml` must declare `isolate = true` under
+  `[isolation]`, with an image/snapshot name to boot -- either there, or as a
+  personal default under `[isolation]` in `~/.config/enwiro/isolation.toml`.
+  enwiro never builds this image itself (you bring your own); there is no
+  enwiro-shipped default at either level.
 
-When both hold, the daemon returns a container invocation roughly equivalent to:
-
-```sh
-<engine> run --rm -it \
-  --mount type=bind,source=<env-path>,target=<env-path> -w <env-path> \
-  -e ENWIRO_ENV=<env-name> \
-  enwiro/<env-name> <command> [args...]
+```toml
+# .enwiro.toml, at the project root
+[isolation]
+isolate = true
+image = "my-snapshot"
 ```
 
-- **Engine**: Podman only. (Rootless Docker lacks `--userns=keep-id`, which the
-  non-root-user handling below relies on, and rootless Podman's networking has
-  no host-bindable "bridge gateway" the way Docker's does, so supporting both
-  would mean two silently-different code paths behind one build flag.)
-- The project directory is bind-mounted at the same path it has on the host (and
-  used as the working directory), so paths match and file watching/HMR work on a
-  Linux host. A `--mount` is used rather than `-v src:dst` so a path containing a
-  colon is not mis-parsed.
-- `-it` is used when the caller's stdin is a terminal, `-i` otherwise.
+If `isolate = true` but no image resolves anywhere, or the `msb` CLI isn't
+installed, `launch.resolve` errors and `enw wrap` falls back to its one
+existing degrade path: a loud warning, then a bare host launch (same as a
+down daemon -- see [Notes and limits](#notes-and-limits)).
+
+When isolation is configured, the daemon returns an invocation roughly
+equivalent to:
+
+```sh
+msb run -t \
+  -v <env-path>:<env-path> -w <env-path> \
+  -e ENWIRO_ENV=<env-name> \
+  -u <your-uid>:<your-gid> \
+  <image> -- <command> [args...]
+```
+
+- **Backend**: microsandbox only, driven as a subprocess to its `msb` CLI --
+  no other engine, no runtime choice. Each launch is a real libkrun microVM
+  (its own guest kernel), not a shared-kernel container.
+- The project directory is bind-mounted at the same path it has on the host
+  (and used as the working directory), so paths match and file watching/HMR
+  work. Ownership needs no special handling: microsandbox's mounts already
+  present a host-owned directory as owned by the guest's own uid in either
+  direction (verified hands-on: a file the guest creates comes back on the
+  host owned by the real host user, and `git commit` in a bind-mounted repo
+  works with no ownership flags at all).
+- `-u <your-uid>:<your-gid>` is set anyway (Linux only), purely so the process
+  itself doesn't run as root -- hardening, and required by Claude's
+  `--dangerously-skip-permissions`. It has no effect on file ownership, which
+  already works regardless of which uid the guest runs as.
+- `-t` is used when the caller's stdin is a terminal, `--no-tty` otherwise.
 - If the project directory is itself a symlink (enwiro's own per-environment
   layout uses one, so an environment keeps a stable address across re-cooks),
   the real path behind it is bind-mounted too, alongside the symlink path.
   Some tools hard-code the real absolute path into their own metadata - a git
   worktree's main repo, for instance, references the worktree's real path in
-  its own internal bookkeeping - and need it to resolve inside the container.
+  its own internal bookkeeping - and need it to resolve inside the sandbox.
 - Cookbooks can also declare that an environment depends on additional host
   paths beyond its own project directory - e.g. a git worktree's main repo,
   which holds the shared object database the worktree's `.git` points into.
@@ -133,70 +155,40 @@ When both hold, the daemon returns a container invocation roughly equivalent to:
 > For git worktrees specifically: mounting a worktree's main repo mounts its
 > whole `.git`, including the object database every branch's commits live in.
 > So this isn't scoped to just this worktree - any committed content on any
-> branch of the repo is already reachable from inside the container (`git
+> branch of the repo is already reachable from inside the sandbox (`git
 > show`/`checkout` any commit), and `git worktree list` just makes the other
 > worktrees' names and commit hashes easy to find (others show `prunable`,
 > since their checkout paths aren't mounted, but their commits are). Only
 > *uncommitted* changes sitting in another worktree's own working directory
 > stay inaccessible.
 
-> The image tag is `enwiro/<name>`, with the environment name sanitized into a
-> valid OCI repository component first (lowercased, invalid characters
-> collapsed to `-`) — so a GitHub-issue env named e.g. `myrepo#513` looks for
-> `enwiro/myrepo-513`. This is a best-effort, lossy mapping, not a
-> collision-free encoding: e.g. `my#env` and `my.env` sanitize to the same tag.
+> **Known limitation:** `msb`'s mount flags (`-v` and friends) have no
+> colon-safe syntax the way podman's `--mount type=bind,...` did -- a host
+> path containing `:`, `,`, or `;` is refused by `msb` itself at launch time,
+> rather than mis-mounted silently. Rare in practice for enwiro project paths.
+
+> **Egress is open by default.** enwiro doesn't configure any network policy
+> today (no `--net-rule`/`--no-net`); microsandbox's own default already
+> allows outbound to the public internet while denying inbound to
+> private/internal targets. A hardened, project-configurable egress policy is
+> future work, not part of this feature yet.
 
 ### Running with the isolation build flag
 
-The container path lives behind the `container-wrap` Cargo feature on the
+The isolation path lives behind the `container-wrap` Cargo feature on the
 `enwiro-daemon` crate, so it is only available from a source build. Follow the
 [development setup](/development-setup/) first; its `just install-dev` recipe
 already builds the feature in (it passes
-`--features enwiro-daemon/container-wrap`) and restarts the daemon. Because the
-path is still image-gated, nothing changes until you create a trigger image.
+`--features enwiro-daemon/container-wrap`) and restarts the daemon. Nothing
+changes for a project until it sets `isolate = true` and an image resolves.
 
 To build just the daemon by hand instead:
 `cargo build --release -p enwiro-daemon --features container-wrap`.
 
-### Running under a different OCI runtime (microVM isolation)
-
-By default the container path uses whatever OCI runtime the engine defaults
-to (typically `runc` or `crun`). To run containers inside a lightweight VM
-instead -- a stronger isolation boundary, since each container gets its own
-guest kernel rather than sharing the host's -- set `container_runtime` in
-`~/.config/enwiro/enwiro.toml`:
-
-```toml
-container_runtime = "krun"
-```
-
-[`krun`](https://github.com/containers/krun) is crun's own
-[libkrun](https://github.com/containers/libkrun)-backed OCI runtime handler:
-a drop-in `--runtime` swap, no separate CLI or exec model, verified working
-rootless with genuine KVM-backed isolation (a launched container's kernel
-version differs from the host's). A bare name like `krun` is resolved the same
-way the container engine itself is (a PATH lookup at launch time), so this
-value stays portable across machines with different install layouts -- prefer
-it over a hardcoded path like `/usr/bin/krun` unless you specifically need to
-pin one of several installed copies. Any `--runtime`-compatible value works,
-not just `krun` -- `crun`/`runc` pins that runtime instead of the engine's
-default, for example.
-
-Linux only: `krun` has no macOS build (it's a Linux-native OCI runtime tied to
-KVM), so this setting has no equivalent there yet.
-
-Restart the daemon after changing it (`systemctl --user restart
-enwiro-daemon.service`), since it's read once at startup. This is a single
-global toggle applied to every containerized launch, not a per-environment or
-per-app setting.
-
-> `krun` ignores `--userns=keep-id`/`--user` entirely -- a container always
-> runs as `uid=0` in its own guest kernel regardless of those flags, so
-> enwiro skips them specifically for `krun`. It solves the problem those
-> flags exist for (root-owned files leaking onto the host) a different way:
-> `krun` does its own uid-mapping for the bind-mounted share independent of
-> `--userns`. Any *other* configured runtime still gets the normal
-> `--userns=keep-id`/`--user` treatment.
+Also install [microsandbox](https://github.com/superradcompany/microsandbox)
+itself (the `msb` CLI) -- it isn't an enwiro dependency, it's a separate tool
+enwiro shells out to, so it needs its own install per the project's own
+instructions.
 
 ### Try it end to end
 
@@ -204,34 +196,40 @@ per-app setting.
 # 1. Build + install with the feature (restarts the daemon)
 just install-dev
 
-# 2. Create a trigger image for a simple-named environment, e.g. "my-project"
-echo 'FROM debian:stable-slim' | podman build -t enwiro/my-project -
+# 2. Turn on isolation for a project, pointing at an image/snapshot you
+#    already have (enwiro never builds one for you)
+cat >> /path/to/my-project/.enwiro.toml <<'EOF'
+[isolation]
+isolate = true
+image = "my-snapshot"
+EOF
 
-# 3. Launch into it: you land in the container, at the bind-mounted project dir
+# 3. Launch into it: you land in the microVM, at the bind-mounted project dir
 enw wrap bash my-project
 
-# An environment with no matching image still runs on the host:
+# A project with no [isolation] section still runs on the host:
 enw wrap bash some-other-env
 ```
 
-To turn the container path off again for an environment, remove its image
-(`podman rmi enwiro/my-project`).
+To turn isolation off again, remove or set `isolate = false` in the
+project's `.enwiro.toml`.
 
 ### Running Claude Code in isolation
 
-Running an agent like Claude Code inside the container was a motivating use case
+Running an agent like Claude Code inside the sandbox was a motivating use case
 for this layer: the agent sees only the environment's project directory, not the
-rest of your machine. Two enwiro-specific pieces make it work smoothly.
+rest of your machine.
 
-**Authentication, without the credential entering the container.** A naive
-approach would inject your token as an environment variable, but anything running
-in the container (including the agent, if it is led astray by a prompt injection)
-could then read and exfiltrate it. Instead, the daemon runs a small host-side
-auth proxy: a `claude` launch is pointed at it via `ANTHROPIC_BASE_URL` and given
-a random capability token minted fresh for that launch, and the proxy swaps in
-your real token on the host before forwarding to Anthropic, rejecting any request
-that doesn't present a capability it minted itself. **The real credential never
-enters the container.** Configure it once:
+**Authentication, without the credential entering the sandbox.** A naive
+approach would inject your token as a plain environment variable, but anything
+running in the sandbox (including the agent, if it is led astray by a prompt
+injection) could then read and exfiltrate it. Instead, enwiro uses
+microsandbox's own `--secret` mechanism: the real token lives only in the
+`msb` process's own environment on the host, `--secret ...@api.anthropic.com`
+scopes it to that one host, and any attempt to send it elsewhere terminates
+the sandbox (`--on-secret-violation block-and-terminate`). **The real
+credential is never inlined into the sandbox config**, and never appears in
+`msb` argv (visible via `ps`/`msb inspect`). Configure it once:
 
 ```sh
 # Mint a long-lived token tied to your subscription, then store it host-side:
@@ -241,40 +239,35 @@ printf '%s\n' 'PASTE_THE_TOKEN' > ~/.config/enwiro/claude_oauth_token
 chmod 600 ~/.config/enwiro/claude_oauth_token
 ```
 
-With a token configured and an `enwiro/<env>` image that ships `claude`,
-`enw wrap claude <env>` authenticates through the proxy using your subscription.
-The routing is installed as a `claude` shim on the container's `PATH`, so running
-`claude` from a shell inside the environment (for example after `enw wrap kitty
-<env>`) works the same way. Only `claude` is affected; other commands are left
-alone.
+With a token configured and an image that ships `claude`, `enw wrap claude
+<env>` authenticates using your subscription -- and so does running `claude`
+from a shell inside the environment (for example after `enw wrap kitty
+<env>`), since the launch prelude renames the secret to the env var `claude`
+itself reads (`CLAUDE_CODE_OAUTH_TOKEN`).
 
 **First-run onboarding is skipped automatically** (see the note below), so the
 session lands straight at the prompt.
 
 This is **experimental and intended for your own, trusted environments only.**
-Known limits: a capability, once minted, stays valid for the daemon's lifetime
-(no per-container revocation or expiry yet), it protects the credential but not
-Claude's server-side tools such as web search (those run on Anthropic's
-infrastructure and never traverse the proxy), and running an agent against
-untrusted code in a shared kernel is not a strong security boundary. Treat it
-accordingly.
+Known limits: it protects the credential but not Claude's server-side tools
+such as web search (those run on Anthropic's infrastructure and never
+traverse this mechanism), and running an agent against untrusted code in a
+shared kernel is not a strong security boundary even with a real microVM.
+Treat it accordingly.
 
 ## Notes and limits
 
 - **The daemon must be running.** It is the source of truth for how a command is
   launched. If it is down, `enw wrap` does not half-wrap: it prints an error to
   stderr, shows a desktop notification, and execs the command bare, with no
-  environment directory, no `ENWIRO_ENV`, and no isolation.
+  environment directory, no `ENWIRO_ENV`, and no isolation. A project with
+  `isolate = true` but no resolvable image degrades the same way -- there is
+  no separate "refuse to launch" failure mode.
 - **Terminal emulators are wrapped specially.** A recognised terminal (currently
   kitty only) runs on the host with the environment's shell wrapped inside it, so
   the terminal needs no display passthrough. This is an experimental pilot.
-- **The OCI runtime is configurable, one setting for every environment.** See
-  [Running under a different OCI
-  runtime](#running-under-a-different-oci-runtime-microvm-isolation) above --
-  by default it's the engine's own default runtime; setting `container_runtime`
-  swaps in something like `krun` for microVM-level isolation instead.
-- **Claude Code is authenticated through a host-side proxy** so the credential
-  never enters the container. See [Running Claude Code in
+- **Claude Code is authenticated via microsandbox's `--secret`** so the
+  credential never enters the sandbox. See [Running Claude Code in
   isolation](#running-claude-code-in-isolation) above.
 - **First-run onboarding is skipped automatically.** Claude Code has no env var
   or setting to skip its first-run wizard (theme picker and "trust this folder"
