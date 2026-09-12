@@ -39,7 +39,7 @@ container-wrap = [
 anyhow = "1"
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
-dirs = "6"
+dirs = "7"
 enwiro-sdk.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 home.workspace = true
