@@ -10,7 +10,6 @@ async fn main() -> anyhow::Result<()> {
     enwiro_daemon::run(
         enwiro_daemon::DaemonConfig {
             workspaces_directory: PathBuf::from(config.workspaces_directory),
-            container_runtime: config.container_runtime,
             adapter: config.adapter,
             browser_integration: config.browser_integration,
         },

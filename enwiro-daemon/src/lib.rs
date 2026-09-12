@@ -9,8 +9,6 @@
 pub mod config;
 pub mod launch;
 pub mod meta;
-#[cfg(feature = "container-wrap")]
-pub mod proxy;
 pub mod rpc;
 pub mod scoring;
 pub use config::ConfigurationValues;
@@ -47,9 +45,6 @@ pub struct DaemonConfig {
     /// Root directory under which env worktrees live; switch events name
     /// envs by basename, resolved as `workspaces_directory/<env_name>`.
     pub workspaces_directory: PathBuf,
-    /// OCI runtime for container launches (issue #540); see
-    /// `config::ConfigurationValues::container_runtime`.
-    pub container_runtime: Option<String>,
     /// Name of the adapter whose `listen` subcommand feeds switch events
     /// (`config::ConfigurationValues::adapter`). `None` means no adapter
     /// was configured or auto-selected.
@@ -566,7 +561,6 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let DaemonConfig {
         workspaces_directory,
-        container_runtime,
         adapter,
         browser_integration,
     } = config;
@@ -613,12 +607,7 @@ pub async fn run(
         rpc_socket_path.clone(),
         active_env,
         workspaces_directory.clone(),
-        container_runtime,
     ));
-
-    // Host-side Claude auth proxy: keeps the OAuth token off the container.
-    #[cfg(feature = "container-wrap")]
-    tokio::spawn(proxy::serve());
 
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamItem>();
     let mut pool = ProcessPool::new(stream_tx);
