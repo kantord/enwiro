@@ -425,7 +425,16 @@ fn host_gid() -> u32 {
 /// ephemeral filesystem.
 #[cfg(feature = "container-wrap")]
 const ISOLATED_PRELUDE_SCRIPT: &str = concat!(
-    r#"[ -n "$HOME" ] && mkdir -p "$HOME"; "#,
+    // A `-u <uid>` with no matching `/etc/passwd` entry in the image (the
+    // common case for a generic image, not just a bespoke one) leaves `HOME`
+    // defaulting to `/` -- verified hands-on, NOT empty/unset as might be
+    // assumed, so a plain `-z "$HOME"` check never catches it. `/` is
+    // unwritable by a non-root uid, so onboarding-seed then fails with
+    // "can't create //.claude.json: Permission denied". Testing writability
+    // directly (rather than guessing at msb's particular default value)
+    // catches this case and any other unwritable default, while still
+    // leaving a real, writable, passwd-matched home untouched.
+    r#"[ -w "$HOME" ] 2>/dev/null || export HOME=/tmp/enwiro-home; mkdir -p "$HOME"; "#,
     r#"[ -n "$MSB_"#,
     "ENWIRO_CLAUDE_TOKEN",
     r#"" ] && export CLAUDE_CODE_OAUTH_TOKEN="$MSB_"#,
