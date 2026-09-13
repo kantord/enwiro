@@ -3,7 +3,7 @@ name = "enwiro-bridge-activitywatch"
 version = "0.1.8"
 edition = "2024"
 description = "ActivityWatch bridge for enwiro: reports the active enwiro env as aw-server heartbeats"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 # Tags are `<crate>-v<version>` (release-plz's workspace default), which
