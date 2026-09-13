@@ -13,7 +13,7 @@ async-trait = "0.1"
 chumsky = "0.13"
 clap = { version = "4.5.4", features = ["derive"], optional = true }
 config = { version = "0.15", default-features = false, features = ["toml"] }
-dirs = "6"
+dirs = "7"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 home.workspace = true
 http = "1"

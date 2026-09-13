@@ -37,7 +37,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 strum_macros = "0.28.0"
 notify-rust = "4"
 tracing.workspace = true
-dirs = "6"
+dirs = "7"
 dialoguer = { version = "0.12", default-features = false }
 ratatui = "0.30"
 crossterm = "0.29"
