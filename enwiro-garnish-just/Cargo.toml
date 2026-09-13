@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-garnish-just"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2024"
 description = "Garnish that surfaces `just` recipes as enwiro CLI gear"
 license = "MIT OR Apache-2.0"
