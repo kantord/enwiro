@@ -18,6 +18,13 @@ use std::path::Path;
 #[cfg(feature = "container-wrap")]
 const MSB_BIN: &str = "msb";
 
+/// Guest memory for every isolated launch. `msb`'s own default (~517M,
+/// verified hands-on) is too small for real dev tools; see
+/// `build_isolated_argv`'s use of this for the full story on why this is a
+/// fixed ceiling rather than a fraction of the host's RAM.
+#[cfg(feature = "container-wrap")]
+const ISOLATED_GUEST_MEMORY: &str = "4G";
+
 /// Terminal emulators enwiro runs as host chrome with a wrapped shell inside
 /// (pilot: kitty only; see the launch-template registry plan). Matched by binary
 /// basename; the terminal itself never needs display passthrough.
@@ -66,13 +73,12 @@ pub fn resolve_launch(
         if !params.env_name.is_empty()
             && let Some(image) = isolation_image(&params.env_path)?
         {
+            let environment_path = canonical_environment_path(&params.env_path)?;
             let git_identity = host_git_identity(&params.env_path);
-            let claude_token = claude_oauth_token();
             let env = IsolatedEnv {
                 image: &image,
-                environment_path: &params.env_path,
+                environment_path: &environment_path,
                 environment_name: &params.env_name,
-                inject_claude_secret: claude_token.is_some(),
                 git_identity: git_identity
                     .as_ref()
                     .map(|(name, email)| (name.as_str(), email.as_str())),
@@ -81,7 +87,7 @@ pub fn resolve_launch(
             return Ok(LaunchResolveResult {
                 program: params.command.clone(),
                 args: build_terminal_isolated_args(&params.args, &env),
-                env_vars: claude_secret_env_vars(claude_token.as_deref()),
+                env_vars: Vec::new(),
             });
         }
 
@@ -98,13 +104,12 @@ pub fn resolve_launch(
     if !params.env_name.is_empty()
         && let Some(image) = isolation_image(&params.env_path)?
     {
+        let environment_path = canonical_environment_path(&params.env_path)?;
         let git_identity = host_git_identity(&params.env_path);
-        let claude_token = claude_oauth_token();
         let env = IsolatedEnv {
             image: &image,
-            environment_path: &params.env_path,
+            environment_path: &environment_path,
             environment_name: &params.env_name,
-            inject_claude_secret: claude_token.is_some(),
             git_identity: git_identity
                 .as_ref()
                 .map(|(name, email)| (name.as_str(), email.as_str())),
@@ -113,11 +118,10 @@ pub fn resolve_launch(
         return Ok(LaunchResolveResult {
             program: MSB_BIN.to_string(),
             args: build_isolated_argv(&env, &params.command, &params.args, params.interactive),
-            // Everything the *guest* needs is delivered via `-e`/`--secret` inside
-            // `build_isolated_argv`; the only thing the `msb` process itself (the
-            // exec target here) needs from its own environment is the raw secret
-            // value `--secret` reads at start time -- see `claude_secret_env_vars`.
-            env_vars: claude_secret_env_vars(claude_token.as_deref()),
+            // Everything the guest needs is delivered via `-e` inside
+            // `build_isolated_argv`; the `msb` process itself needs nothing
+            // from its own environment.
+            env_vars: Vec::new(),
         });
     }
 
@@ -186,6 +190,28 @@ fn isolation_image(environment_path: &str) -> Result<Option<String>, String> {
     Ok(Some(image))
 }
 
+/// Resolve `environment_path` to its real, symlink-free absolute form.
+///
+/// `environment_path` is often enwiro's own stable per-env symlink
+/// (`<workspaces_directory>/<name>/<name>`) -- that indirection is what lets
+/// an env keep the same address across re-cooks even if what a cookbook
+/// produces underneath changes. Podman's bind mounts happily followed a
+/// symlinked source; microsandbox's do not -- verified hands-on, mounting a
+/// symlink itself (not its target) fails with "Too many levels of symbolic
+/// links" (ELOOP), even though the same path resolved to its real target
+/// mounts fine. So the real path isn't an *additional*, best-effort mount
+/// alongside the symlink anymore (as it was under podman) -- it's the *only*
+/// one that works, and is used for the mount, the working directory, and
+/// everything else `build_isolated_argv` does with a path.
+#[cfg(feature = "container-wrap")]
+fn canonical_environment_path(environment_path: &str) -> Result<String, String> {
+    std::fs::canonicalize(environment_path)
+        .map_err(|e| format!("could not resolve environment path {environment_path}: {e}"))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| format!("environment path {environment_path} is not valid UTF-8"))
+}
+
 /// The host's effective git identity `(user.name, user.email)` for the
 /// environment (issue #725). Resolved with `git -C <env_path> config --get`
 /// rather than `--global` so conditional includes (`includeIf "gitdir:..."`)
@@ -219,7 +245,6 @@ struct IsolatedEnv<'a> {
     image: &'a str,
     environment_path: &'a str,
     environment_name: &'a str,
-    inject_claude_secret: bool,
     /// The host's effective git `(user.name, user.email)` for this env, or
     /// `None` when it couldn't be resolved (no seeding then; the sandbox
     /// behaves as if the host had no identity configured either).
@@ -255,24 +280,6 @@ fn mount_arg(path: &str) -> [String; 2] {
     ["-v".to_string(), format!("{path}:{path}")]
 }
 
-/// The `msb --secret` source-env-var name carrying Claude's real token. Never
-/// appears in `msb` argv (which is visible via `ps`/`msb inspect`) -- only in
-/// the `msb` process's own environment, which `--secret` reads from at start
-/// time and never inlines into the sandbox config.
-#[cfg(feature = "container-wrap")]
-const CLAUDE_TOKEN_HOST_ENV_VAR: &str = "ENWIRO_CLAUDE_TOKEN";
-
-/// `LaunchResolveResult.env_vars` for the process about to be exec'd (i.e.
-/// `msb` itself, not the guest) when Claude's token is configured: just the
-/// raw value under [`CLAUDE_TOKEN_HOST_ENV_VAR`], for `--secret` to read.
-/// Empty when no token is configured -- the daemon injects nothing.
-#[cfg(feature = "container-wrap")]
-fn claude_secret_env_vars(claude_token: Option<&str>) -> Vec<(String, String)> {
-    claude_token
-        .map(|token| vec![(CLAUDE_TOKEN_HOST_ENV_VAR.to_string(), token.to_string())])
-        .unwrap_or_default()
-}
-
 /// Assemble the `run ...` args (the `msb` binary itself is the `program`, not
 /// part of this). The env's project dir is bind-mounted at the *same* path it
 /// has on the host, cwd set there, `ENWIRO_ENV` injected; `-t` when the
@@ -285,8 +292,9 @@ fn claude_secret_env_vars(claude_token: Option<&str>) -> Vec<(String, String)> {
 /// the host owned by the real host user, and `git commit` in a bind-mounted
 /// repo works with no ownership flags at all. So there is no `--userns`/
 /// `--user`-for-ownership dance to port over. `-u` below is set purely for
-/// process hardening (non-root; Claude's `--dangerously-skip-permissions`
-/// requires it), independent of the (already-solved) ownership question.
+/// process hardening (non-root; some tools refuse to run as root at all,
+/// e.g. Claude Code's `--dangerously-skip-permissions`), independent of the
+/// (already-solved) ownership question.
 #[cfg(feature = "container-wrap")]
 fn build_isolated_argv(
     env: &IsolatedEnv,
@@ -298,28 +306,31 @@ fn build_isolated_argv(
         image,
         environment_path,
         environment_name,
-        inject_claude_secret,
         git_identity,
         workspaces_directory,
     } = *env;
     let mut argv = vec!["run".to_string()];
+    // `msb`'s default guest memory is tiny -- verified hands-on: `free -h`
+    // inside a default-sized sandbox shows ~517M total, and an 800M
+    // allocation fails outright. Real dev tools (a Node/Bun-based CLI, a
+    // Rust build) don't fit; without this flag they get silently SIGKILLed
+    // (OOM), which surfaces to the user as just "Killed" with no other
+    // explanation. Unlike the old krun runtime, microsandbox does not appear
+    // to return freed guest memory to the host as it's freed (verified: RSS
+    // for a sandbox that allocated then freed 2G stayed flat) -- so this is a
+    // fixed, modest ceiling, not "half the host's RAM" the way krun's sizing
+    // was, since that would actually reserve that much per concurrent
+    // sandbox here rather than being effectively free.
+    argv.push("-m".to_string());
+    argv.push(ISOLATED_GUEST_MEMORY.to_string());
     argv.push(if interactive { "-t" } else { "--no-tty" }.to_string());
+    // `environment_path` arrives here already canonicalized by
+    // `canonical_environment_path` -- not just enwiro's stable per-env
+    // symlink, but the real path a git worktree's own internal bookkeeping
+    // (`.git/worktrees/<name>/gitdir`) references too, so one mount serves
+    // both needs (unlike podman, `msb` can't mount a symlinked source at
+    // all -- see `canonical_environment_path`'s doc comment).
     argv.extend(mount_arg(environment_path));
-    // `environment_path` is often enwiro's own stable per-env symlink
-    // (`<workspaces_directory>/<name>/<name>`), not the real underlying path --
-    // that indirection is what lets an env keep the same address across
-    // re-cooks even if what a cookbook produces underneath changes. But some
-    // tools hard-code the *real* absolute path into their own metadata (e.g. a
-    // git worktree's main repo references this worktree's own real path in its
-    // reverse `.git/worktrees/<name>/gitdir` pointer), which won't resolve
-    // inside a sandbox that only sees the symlink path. Mount the real path
-    // too, purely additively.
-    if let Ok(real_path) = std::fs::canonicalize(environment_path)
-        && let Some(real_path) = real_path.to_str()
-        && real_path != environment_path
-    {
-        argv.extend(mount_arg(real_path));
-    }
     // Cookbooks may declare that this environment depends on additional host
     // paths beyond its own directory to function -- e.g. a git worktree's
     // `.git` is a pointer into a separate main repo holding the shared object
@@ -353,28 +364,17 @@ fn build_isolated_argv(
         argv.push("-u".to_string());
         argv.push(format!("{}:{}", host_uid(), host_gid()));
     }
-    // Claude auth (ADR-0006): the real token lives only in the `msb` process's
-    // own environment (see `claude_secret_env_vars`); `--secret` reads it from
-    // there and scopes it to api.anthropic.com, terminating the sandbox on any
-    // attempt to send it elsewhere. This replaces the old host-side proxy +
-    // per-launch capability token entirely -- one generic mechanism instead of
-    // a bespoke one for this single credential.
-    if inject_claude_secret {
-        argv.push("--secret".to_string());
-        argv.push(format!("{CLAUDE_TOKEN_HOST_ENV_VAR}@api.anthropic.com"));
-        argv.push("--on-secret-violation".to_string());
-        argv.push("block-and-terminate".to_string());
-    }
     argv.push(image.to_string());
     argv.push("--".to_string());
-    // Run the command through a small `sh` prelude that (1) seeds a default
-    // `.claude.json` to skip claude's first-run wizard, (2) seeds git identity
-    // when unresolvable otherwise, and (3) renames the `--secret`-delivered
-    // token to the name claude actually reads, then `exec`s the real command.
-    // Doing this at start (rather than baking into the image) keeps BYO
-    // images untouched; everything written is non-secret (or, for the
-    // renamed token, no more exposed than `--secret` already made it) and
-    // lives in the sandbox's ephemeral filesystem.
+    // Run the command through a small `sh` prelude that (1) guarantees a
+    // writable `$HOME` and (2) seeds git identity when unresolvable
+    // otherwise, then `exec`s the real command. Doing this at start (rather
+    // than baking into the image) keeps BYO images untouched; everything
+    // written is non-secret and lives in the sandbox's ephemeral filesystem.
+    //
+    // Credential passthrough for a specific tool (e.g. an agent CLI's own
+    // API auth) is deliberately not enwiro's concern here -- that's on the
+    // image or the tool's own config, same as any other BYO dependency.
     argv.push("sh".to_string());
     argv.push("-c".to_string());
     argv.push(ISOLATED_PRELUDE_SCRIPT.to_string());
@@ -401,18 +401,17 @@ fn host_gid() -> u32 {
 /// `sh -c` launch prelude, run before the actual command. Then `exec "$@"`
 /// (the real command, supplied after the `sh` `$0`):
 ///
-/// 1. **Claude token rename.** `--secret ENV@HOST` delivers the value inside
-///    the guest as `MSB_<ENV>`, not `<ENV>` (verified hands-on) -- claude
-///    itself reads `CLAUDE_CODE_OAUTH_TOKEN`, so rename it when present.
-/// 2. **Onboarding seed.** Write a default `.claude.json` (only when absent) so a
-///    fresh sandbox skips Claude's first-run wizard. Claude has no env/setting
-///    for this (issue anthropics/claude-code#4714), so the file is the only lever.
-///    It marks `hasCompletedOnboarding` (theme + welcome) and, for the working
-///    directory, `hasTrustDialogAccepted` (the "trust this folder" prompt).
-///    Claude's config is `$CLAUDE_CONFIG_DIR/.claude.json` when set, else
-///    `$HOME/.claude.json`. An image that ships its own `.claude.json` is left
-///    untouched.
-/// 3. **Git identity seed** (issue #725). When the daemon passed the host's
+/// 1. **Writable `$HOME`.** A `-u <uid>` with no matching `/etc/passwd`
+///    entry in the image (the common case for a generic image, not just a
+///    bespoke one) leaves `HOME` defaulting to `/` -- verified hands-on, NOT
+///    empty/unset as might be assumed, so a plain `-z "$HOME"` check never
+///    catches it. `/` is unwritable by a non-root uid, so anything a tool
+///    tries to write under `$HOME` (its own config, cache, ...) fails with a
+///    bare "Permission denied". Testing writability directly (rather than
+///    guessing at msb's particular default value) catches this case and any
+///    other unwritable default, while leaving a real, writable,
+///    passwd-matched home untouched.
+/// 2. **Git identity seed** (issue #725). When the daemon passed the host's
 ///    identity (`ENWIRO_GIT_USER_NAME`/`_EMAIL`) and git can't already resolve
 ///    a `user.email` from any config the image ships (system, global, or the
 ///    bind-mounted repo's own -- the workdir is the repo), write it to global
@@ -420,60 +419,18 @@ fn host_gid() -> u32 {
 ///    `git config --global` rather than `printf`ing a file so git does the
 ///    value escaping, and global scope keeps repo-local config authoritative.
 ///
-/// Everything written here is non-secret (or, for the renamed token, no more
-/// exposed than `--secret` already made it) and lives in the sandbox's
-/// ephemeral filesystem.
+/// Everything written here is non-secret and lives in the sandbox's
+/// ephemeral filesystem. Deliberately does not do anything tool-specific
+/// (no per-tool onboarding seeds, no credential wiring) -- that's on the
+/// image or the tool's own config.
 #[cfg(feature = "container-wrap")]
 const ISOLATED_PRELUDE_SCRIPT: &str = concat!(
-    // A `-u <uid>` with no matching `/etc/passwd` entry in the image (the
-    // common case for a generic image, not just a bespoke one) leaves `HOME`
-    // defaulting to `/` -- verified hands-on, NOT empty/unset as might be
-    // assumed, so a plain `-z "$HOME"` check never catches it. `/` is
-    // unwritable by a non-root uid, so onboarding-seed then fails with
-    // "can't create //.claude.json: Permission denied". Testing writability
-    // directly (rather than guessing at msb's particular default value)
-    // catches this case and any other unwritable default, while still
-    // leaving a real, writable, passwd-matched home untouched.
     r#"[ -w "$HOME" ] 2>/dev/null || export HOME=/tmp/enwiro-home; mkdir -p "$HOME"; "#,
-    r#"[ -n "$MSB_"#,
-    "ENWIRO_CLAUDE_TOKEN",
-    r#"" ] && export CLAUDE_CODE_OAUTH_TOKEN="$MSB_"#,
-    "ENWIRO_CLAUDE_TOKEN",
-    r#""; "#,
-    r#"if [ -n "$CLAUDE_CONFIG_DIR" ]; then f="$CLAUDE_CONFIG_DIR/.claude.json"; else f="$HOME/.claude.json"; fi; "#,
-    r#"[ -f "$f" ] || { mkdir -p "$(dirname "$f")" && "#,
-    r#"printf '{"hasCompletedOnboarding":true,"theme":"dark-ansi","projects":{"%s":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' "$(pwd)" > "$f"; }; "#,
     r#"if [ -n "$ENWIRO_GIT_USER_NAME" ] && [ -n "$ENWIRO_GIT_USER_EMAIL" ] && command -v git >/dev/null 2>&1 "#,
     r#"&& ! git config --get user.email >/dev/null 2>&1; then "#,
     r#"git config --global user.name "$ENWIRO_GIT_USER_NAME" && git config --global user.email "$ENWIRO_GIT_USER_EMAIL"; fi; "#,
     r#"exec "$@""#,
 );
-
-/// A cached Claude Code OAuth token to inject into a *claude*-capable launch,
-/// or `None` if none is configured. Sources, first wins: the daemon's
-/// `CLAUDE_CODE_OAUTH_TOKEN` env var, else a single line in
-/// `$XDG_CONFIG_HOME/enwiro/claude_oauth_token` (defaulting to
-/// `~/.config/enwiro/claude_oauth_token`). Mint one with `claude setup-token`.
-///
-/// One cached token is reused across envs (no per-env token proliferation);
-/// see `claude_secret_env_vars` for how it reaches `msb`.
-#[cfg(feature = "container-wrap")]
-pub(crate) fn claude_oauth_token() -> Option<String> {
-    if let Some(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty())
-    {
-        return Some(token);
-    }
-    let path = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| home::home_dir().map(|home| home.join(".config")))?
-        .join("enwiro")
-        .join("claude_oauth_token");
-    let token = std::fs::read_to_string(path).ok()?;
-    let token = token.trim();
-    (!token.is_empty()).then(|| token.to_string())
-}
 
 #[cfg(test)]
 mod terminal_tests {
@@ -518,12 +475,11 @@ mod tests {
 
     /// An `IsolatedEnv` fixture for tests that only care about the command
     /// being run, not the environment identity around it.
-    fn test_env(inject_claude_secret: bool) -> IsolatedEnv<'static> {
+    fn test_env() -> IsolatedEnv<'static> {
         IsolatedEnv {
             image: "my-snapshot",
             environment_path: "/p",
             environment_name: "x",
-            inject_claude_secret,
             git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
         }
@@ -555,7 +511,6 @@ mod tests {
             image: "my-snapshot",
             environment_path: env_path.path().to_str().unwrap(),
             environment_name: "x",
-            inject_claude_secret: false,
             git_identity: None,
             workspaces_directory: workspaces_dir.path(),
         };
@@ -571,42 +526,44 @@ mod tests {
         );
     }
 
-    // `environment_path` is often enwiro's own stable per-env symlink, not the
-    // env's real underlying path -- e.g. a git worktree's main repo references
-    // the worktree's own *real* absolute path in its reverse `.git/worktrees/
-    // <name>/gitdir` pointer, which needs to resolve inside the sandbox too.
+    // `msb` refuses to mount a symlinked source at all (verified hands-on:
+    // ELOOP), unlike podman -- so `environment_path` must already be
+    // resolved by the time it reaches `build_isolated_argv`, via
+    // `canonical_environment_path` (tested separately below). This
+    // resolves the same real path a git worktree's own internal bookkeeping
+    // (`.git/worktrees/<name>/gitdir`) references, so one mount serves both
+    // needs -- no more "mount the symlink AND the real path" as under podman.
     #[test]
-    fn isolated_argv_additionally_mounts_the_real_path_behind_a_symlinked_env_path() {
+    fn canonical_environment_path_resolves_a_symlink_to_its_real_target() {
         let real_target = tempfile::tempdir().unwrap();
         let symlink_parent = tempfile::tempdir().unwrap();
         let symlinked_env_path = symlink_parent.path().join("env-symlink");
         std::os::unix::fs::symlink(real_target.path(), &symlinked_env_path).unwrap();
 
-        let env = IsolatedEnv {
-            environment_path: symlinked_env_path.to_str().unwrap(),
-            ..test_env(false)
-        };
-        let argv = build_isolated_argv(&env, "bash", &[], true);
-
-        let symlink_mount = format!("{0}:{0}", symlinked_env_path.display());
-        let real_mount = format!("{0}:{0}", real_target.path().display());
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "-v" && w[1] == symlink_mount),
-            "missing the primary symlink mount: {argv:?}"
-        );
-        assert!(
-            argv.windows(2).any(|w| w[0] == "-v" && w[1] == real_mount),
-            "missing the additive real-path mount: {argv:?}"
+        let resolved = canonical_environment_path(symlinked_env_path.to_str().unwrap()).unwrap();
+        // `tempdir()` paths can themselves sit behind a symlink (e.g. macOS's
+        // `/tmp` -> `/private/tmp`), so compare against the target's own
+        // canonicalization rather than its raw path.
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(real_target.path())
+                .unwrap()
+                .to_str()
+                .unwrap()
         );
     }
 
     #[test]
-    fn isolated_argv_mounts_a_non_symlinked_env_path_only_once() {
+    fn canonical_environment_path_errors_when_it_does_not_exist() {
+        assert!(canonical_environment_path("/nonexistent-enwiro-env-path").is_err());
+    }
+
+    #[test]
+    fn isolated_argv_mounts_environment_path_exactly_once() {
         let real_dir = tempfile::tempdir().unwrap();
         let env = IsolatedEnv {
             environment_path: real_dir.path().to_str().unwrap(),
-            ..test_env(false)
+            ..test_env()
         };
         let argv = build_isolated_argv(&env, "bash", &[], true);
 
@@ -620,16 +577,15 @@ mod tests {
             image: "my-snapshot",
             environment_path: "/home/u/.enwiro_envs/my-proj/my-proj",
             environment_name: "my-proj",
-            inject_claude_secret: false,
             git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
         };
         let argv = build_isolated_argv(&env, "bash", &["-l".to_string()], true);
-        // Before the image: `run` + tty flag + mount + cwd + ENWIRO_ENV (plus
-        // `-u` on Linux, checked separately).
+        // Before the image: `run` + memory + tty flag + mount + cwd +
+        // ENWIRO_ENV (plus `-u` on Linux, checked separately).
         let image_idx = argv.iter().position(|a| a == "my-snapshot").unwrap();
         let head = &argv[..image_idx];
-        assert_eq!(&argv[..2], &["run", "-t"]);
+        assert_eq!(&argv[..4], &["run", "-m", "4G", "-t"]);
         assert!(
             head.windows(2).any(|w| w[0] == "-v"
                 && w[1]
@@ -656,7 +612,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn isolated_argv_runs_as_host_uid_on_linux() {
-        let argv = build_isolated_argv(&test_env(false), "bash", &[], true);
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "-u" && w[1] == format!("{}:{}", host_uid(), host_gid())),
@@ -666,26 +622,30 @@ mod tests {
 
     #[test]
     fn isolated_argv_uses_no_tty_when_not_interactive() {
-        let argv = build_isolated_argv(&test_env(false), "echo", &[], false);
+        let argv = build_isolated_argv(&test_env(), "echo", &[], false);
         assert!(argv.contains(&"--no-tty".to_string()));
         assert!(!argv.contains(&"-t".to_string()));
     }
 
-    // A default `.claude.json` is seeded only if absent, then the real command
-    // is exec'd, so a fresh sandbox skips Claude's onboarding wizard (theme +
-    // workspace-trust) without baking anything into the image.
+    // `msb`'s own default guest memory (~517M, verified hands-on) OOM-kills
+    // real dev tools (a Node/Bun-based CLI, a Rust build) with no explanation
+    // beyond a bare "Killed" -- every isolated launch needs a real ceiling.
     #[test]
-    fn isolated_argv_seeds_onboarding_then_execs_command() {
-        let argv = build_isolated_argv(&test_env(false), "claude", &[], true);
-        let script = &argv[argv.iter().position(|a| a == "-c").unwrap() + 1];
-        assert!(script.contains("hasCompletedOnboarding"), "{script}");
-        assert!(script.contains("hasTrustDialogAccepted"), "{script}");
-        assert!(script.contains(r#"f="$HOME/.claude.json""#), "{script}");
-        assert!(script.contains(r#""$(pwd)""#), "{script}");
+    fn isolated_argv_always_sizes_guest_memory() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         assert!(
-            script.contains(".claude.json") && script.contains("[ -f"),
-            "seeds only when absent: {script}"
+            argv.windows(2)
+                .any(|w| w[0] == "-m" && w[1] == ISOLATED_GUEST_MEMORY),
+            "{argv:?}"
         );
+    }
+
+    // The prelude always ends by exec'ing the real command -- no tool-specific
+    // seeding happens (that's on the image or the tool's own config).
+    #[test]
+    fn isolated_argv_prelude_execs_the_command() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
+        let script = &argv[argv.iter().position(|a| a == "-c").unwrap() + 1];
         assert!(script.trim_end().ends_with(r#"exec "$@""#), "{script}");
     }
 
@@ -696,7 +656,7 @@ mod tests {
     fn isolated_argv_passes_git_identity_env_when_known() {
         let env = IsolatedEnv {
             git_identity: Some(("Jane Dev", "jane@dev.example")),
-            ..test_env(false)
+            ..test_env()
         };
         let argv = build_isolated_argv(&env, "bash", &[], true);
         assert!(
@@ -713,7 +673,7 @@ mod tests {
 
     #[test]
     fn isolated_argv_omits_git_identity_env_when_unknown() {
-        let argv = build_isolated_argv(&test_env(false), "bash", &[], true);
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         assert!(
             !argv
                 .windows(2)
@@ -778,54 +738,19 @@ mod tests {
         assert_eq!(host_git_identity("/nonexistent-enwiro-env-path"), None);
     }
 
-    // With the Claude secret enabled, the sandbox gets `--secret ...@api.anthropic.com`
-    // plus `--on-secret-violation block-and-terminate`, never a raw token in argv.
+    // Isolation is deliberately tool-agnostic: nothing in the argv or prelude
+    // is specific to any particular credential or tool (unlike the pre-ADR-0006
+    // proxy, which was Claude-only).
     #[test]
-    fn isolated_argv_injects_claude_secret_when_enabled() {
-        let argv = build_isolated_argv(&test_env(true), "claude", &[], true);
-        assert!(
-            argv.windows(2).any(|w| w[0] == "--secret"
-                && w[1] == format!("{CLAUDE_TOKEN_HOST_ENV_VAR}@api.anthropic.com")),
-            "{argv:?}"
-        );
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--on-secret-violation" && w[1] == "block-and-terminate"),
-            "{argv:?}"
-        );
-    }
-
-    #[test]
-    fn isolated_argv_no_secret_when_disabled() {
-        let argv = build_isolated_argv(&test_env(false), "bash", &[], true);
+    fn isolated_argv_and_prelude_have_no_tool_specific_credential_logic() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         assert!(!argv.iter().any(|a| a == "--secret"), "{argv:?}");
         assert!(
             !argv.iter().any(|a| a == "--on-secret-violation"),
             "{argv:?}"
         );
-    }
-
-    // The `msb` process itself (about to be exec'd) needs the raw token in its
-    // own environment for `--secret` to read; it must never appear in argv.
-    #[test]
-    fn claude_secret_env_vars_carries_the_raw_token() {
-        assert_eq!(
-            claude_secret_env_vars(Some("tok-123")),
-            vec![(CLAUDE_TOKEN_HOST_ENV_VAR.to_string(), "tok-123".to_string())]
-        );
-        assert_eq!(claude_secret_env_vars(None), Vec::<(String, String)>::new());
-    }
-
-    #[test]
-    fn prelude_renames_the_secret_delivered_token_for_claude() {
-        // `--secret ENV@HOST` delivers the value inside the guest as
-        // `MSB_<ENV>`; claude itself reads `CLAUDE_CODE_OAUTH_TOKEN`.
         assert!(
-            ISOLATED_PRELUDE_SCRIPT.contains(&format!("MSB_{CLAUDE_TOKEN_HOST_ENV_VAR}")),
-            "{ISOLATED_PRELUDE_SCRIPT}"
-        );
-        assert!(
-            ISOLATED_PRELUDE_SCRIPT.contains("export CLAUDE_CODE_OAUTH_TOKEN="),
+            !ISOLATED_PRELUDE_SCRIPT.contains("CLAUDE"),
             "{ISOLATED_PRELUDE_SCRIPT}"
         );
     }
@@ -853,7 +778,6 @@ mod tests {
             image: "my-snapshot",
             environment_path: "/p",
             environment_name: "my-proj",
-            inject_claude_secret: false,
             git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
         };

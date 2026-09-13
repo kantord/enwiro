@@ -202,6 +202,26 @@ instead of the current whole-container `--user` workaround.
   is still set, but only for non-root *process* hardening, orthogonal to
   ownership.
 
+### Guest memory sizing
+
+- ✓ **Chosen — fixed 4G ceiling for every isolated launch.** `msb`'s own
+  default (~517M, verified hands-on: `free -h` inside a default sandbox,
+  and an 800M allocation failing outright) silently OOM-kills any real dev
+  tool (a Node/Bun CLI, a Rust build), surfacing to the user as a bare
+  `Killed` with no other explanation — found only by real end-to-end
+  testing (`opencode run` got SIGKILLed; unit tests, which never invoke real
+  `msb`, could not have caught this). A fixed, modest ceiling rather than
+  the old krun-era policy ("half the host's RAM," justified by krun
+  returning freed guest memory to the host): verified hands-on that
+  microsandbox does **not** return freed guest memory the same way (a
+  sandbox that allocated then freed 2G held that RSS on the host
+  afterward), so sizing to a fraction of host RAM would actually reserve
+  that much per concurrent sandbox here, not be effectively free.
+- ✗ **Rejected — half the host's physical RAM** (the old krun policy,
+  ported as-is). Unsafe here given the ballooning-behavior difference above.
+- ✗ **Rejected — `msb`'s own default.** Verified insufficient for real
+  tools.
+
 ### Network policy
 
 - ✓ **Chosen — open by default; no `.enwiro.toml` network config surface
@@ -225,37 +245,37 @@ instead of the current whole-container `--user` workaround.
   separate feature (which ports, static vs. detected) with its own
   design; not bundled into this migration.
 
-### Credential passthrough
+### Credential passthrough (reversed after real-world testing)
 
-- ✓ **Chosen — in scope for this ADR, preferring `--secret ENV@HOST`
-  scoping.** SSH keys, git tokens, and registry credentials are as core
-  to "a project's isolation policy" as mounts are. `--secret` keeps a
-  credential out of the sandbox's inlined config and scopes it to the
-  one host it's for, with `--on-secret-violation block-and-terminate` —
-  directly answers the "proper access control" gap from the history.
-  Raw mounts (e.g. an SSH agent socket, which has no `--secret`-shaped
-  equivalent) remain the fallback where no host-scoped secret form fits.
-- ✗ **Rejected — leave credential passthrough for a separate,
-  later issue.** The ADR's whole subject is what a project's isolation
-  policy carries; deferring credentials risks a second isolation-policy
-  schema later instead of one now.
-- ✗ **Rejected — plain mounts/env vars for everything, as today.**
-  Repeats the exact "raw token exposed inside the sandbox" problem the
-  Claude auth proxy was built specifically to avoid, for every other
-  credential this ADR now covers.
-
-### Claude authentication
-
-- ✓ **Chosen — retire the bespoke host-side proxy and capability-token
-  scheme (`enwiro-daemon/src/proxy.rs`) in favor of
-  `--secret ANTHROPIC_TOKEN@api.anthropic.com`.** Same guarantee (the
-  real token never enters the sandbox, and never inlines into config) via
-  the same generic mechanism used for every other credential — one
-  code path instead of two purpose-built ones.
-- ✗ **Rejected — keep the custom proxy, use `--secret` only for the
-  newly-in-scope credentials.** Avoids touching working code, but leaves
-  two different credential-protection mechanisms coexisting for no
-  structural reason.
+- ✓ **Chosen — no credential passthrough of any kind, for any tool.**
+  Originally scoped in (see below), but real end-to-end testing surfaced a
+  load-bearing problem with the mechanism this was going to be built on:
+  `--secret ENV@HOST` silently enables full TLS interception (a real
+  `microsandbox CA`-issued cert substituted for every HTTPS connection) for
+  the **entire sandbox**, not just traffic to the named host — verified
+  hands-on (a bare `msb run --secret ...` intercepted `curl` to an unrelated
+  domain; a run with no `--secret` at all did not). A tool that doesn't
+  trust that CA (most non-system-store HTTP clients, e.g. many Node/Bun
+  CLIs) silently fails or hangs. Isolation now does nothing tool- or
+  credential-specific: whatever a tool needs is on the image or the tool's
+  own config, exactly like any other BYO dependency.
+- ✗ **Rejected (originally chosen, reversed) — in scope, preferring
+  `--secret ENV@HOST` scoping** for SSH keys, git tokens, and registry
+  credentials. Sound in the abstract (keeps a credential out of the
+  sandbox's inlined config, scopes it to one host), but the TLS-interception
+  side effect makes it an unacceptably broad hammer for a general
+  "any tool, any credential" mechanism — it would break other tools in the
+  same sandbox as a side effect of protecting one credential.
+- ✗ **Rejected — retire the bespoke Claude auth proxy in favor of
+  `--secret ANTHROPIC_TOKEN@api.anthropic.com`.** This was implemented,
+  then removed once the interception side effect was found: it doesn't just
+  affect other credentials, it broke a completely unrelated tool (opencode)
+  running in the same sandbox, for no reason connected to opencode at all.
+- ✗ **Rejected — leave credential passthrough for a separate, later
+  issue** (without deciding against it). Superseded by the "no" above once
+  the mechanism it would have been built on turned out to have this cost;
+  a future mechanism (if any) needs its own design that isn't `--secret`
+  wielded this broadly, not just a deferral.
 
 ## Decision
 
@@ -281,13 +301,18 @@ instead of the current whole-container `--user` workaround.
 6. **Ownership needs no special handling at all** (verified: microsandbox's
    mounts already map it correctly); `-u <host-uid>:<host-gid>` is set only
    for non-root process hardening, unrelated to ownership.
-7. **Egress is open by default**; no network policy config surface ships
+7. **Guest memory is fixed at 4G for every isolated launch** (`msb`'s own
+   default silently OOM-kills real tools; unlike krun, microsandbox does
+   not appear to return freed guest memory, so this is a fixed ceiling, not
+   a fraction of host RAM).
+8. **Egress is open by default**; no network policy config surface ships
    in v1.
-8. **Credential passthrough is a first-class part of this policy**,
-   preferring `--secret ENV@HOST` scoping (SSH/git/registry credentials),
-   falling back to mounts only where no secret-shaped equivalent exists.
-9. **Claude's auth proxy is retired** in favor of the same `--secret`
-   mechanism.
+9. **No credential passthrough of any kind, for any tool, including
+   Claude.** Reversed after real end-to-end testing found `--secret`
+   silently enables full TLS interception for the entire sandbox, not just
+   the named host — an unacceptable side effect for a general mechanism.
+   Whatever a tool needs is on the image or its own config, like any other
+   BYO dependency.
 10. **Dev-server port forwarding is deferred** to a follow-up.
 
 ## Consequences
@@ -295,14 +320,18 @@ instead of the current whole-container `--user` workaround.
 ### Positive
 
 - One codebase, one isolation policy, all branches/worktrees.
-- Basic git operations (identity, ownership, worktree object access) and
-  credentialed operations (push, private registries) work by default —
-  directly addresses the feature's actual multi-year pain history,
-  rather than the egress leak it was originally scoped around.
+- Basic git operations (identity, ownership, worktree object access) work
+  by default — directly addresses the feature's actual multi-year pain
+  history, rather than the egress leak it was originally scoped around.
+- Real dev tools actually run: mount, ownership, and guest memory all
+  verified end-to-end against a real project and a real agent CLI, not
+  just unit-tested argv construction.
 - One isolation implementation and one ownership model instead of two
   (podman's `--user` dance vs. krun's own mapping).
-- One credential-protection mechanism (`--secret`) instead of a bespoke
-  proxy plus ad hoc mounts.
+- No bespoke per-tool logic anywhere in the isolation path (the old
+  Claude-only proxy is gone, and nothing replaced it with an equally
+  narrow mechanism) — isolation behaves identically regardless of what's
+  running inside it.
 - Stays a thin runner: no image building, no autorun of project files,
   works the same for coding and non-coding projects.
 
@@ -315,9 +344,18 @@ instead of the current whole-container `--user` workaround.
 - Egress is open by default: the original driver ("the one place
   containers genuinely beat worktrees — network scoping") is not
   delivered in v1. Isolation's practical benefit in v1 is filesystem and
-  process scoping plus credential handling, not a network boundary.
+  process scoping, not a network boundary or a credential story.
+- No credential passthrough at all: a tool needing auth (an agent CLI's
+  API key, a private registry token) must get it entirely on its own,
+  same as any fresh, un-configured environment — this ADR does nothing to
+  make that easier, having tried and found the natural-seeming mechanism
+  unsound.
 - Removing podman/krun support is a breaking change for anyone with an
   existing `enwiro/<env>` OCI image relying on it.
+- A fixed 4G guest-memory ceiling reserves that much per concurrent
+  sandbox (not returned to the host until the sandbox exits, verified),
+  unlike krun's apparent ballooning — running several isolated launches at
+  once costs real host RAM, not just a paper ceiling.
 
 ### Risks
 
@@ -329,15 +367,16 @@ instead of the current whole-container `--user` workaround.
   refusal (see Decision, point 5).
 - **Worktree policy misses.** If the cookbook symlink isn't created, a
   worktree silently runs unisolated. Needs a guard/check.
-- **Retiring `proxy.rs` on faith.** `--secret ... --on-secret-violation
-  block-and-terminate` needs to be verified end-to-end (does violation
-  really terminate the sandbox, does the secret really never appear in
-  `msb inspect`/logs) before deleting the existing, working proxy code —
-  don't remove the proven mechanism until the replacement is confirmed
-  equivalent.
 - **No egress boundary.** With v1 open by default, isolation should not
   be marketed or relied on as a network security boundary; that remains
   future work, not a regression from a promise this ADR made and broke.
+- **`--secret`'s TLS-interception side effect is a trap for any future
+  attempt at credential passthrough on this backend.** It looks like a
+  narrow, per-host mechanism from its own `--help` text, but verified
+  hands-on to intercept *all* traffic in the sandbox. Any future design
+  that reaches for `--secret` again needs to design around this
+  explicitly (e.g. `--tls-bypass` per domain a non-system-store tool
+  needs), not rediscover it.
 
 ## Implementation notes
 
@@ -371,13 +410,46 @@ building and testing against the real `msb` CLI:
   instead of the same degrade path as a missing image.
 - Deleted `enwiro-daemon/src/proxy.rs` and its capability-token/shim
   machinery (and its now-unused deps: `bytes`, `http-body-util`, `hyper`,
-  `hyper-util`, `reqwest`). Claude's token moves to
-  `--secret <ENV>@api.anthropic.com` + `--on-secret-violation
-  block-and-terminate`; the real value lives only in the `msb` process's own
-  environment (never in argv, visible via `ps`/`msb inspect`). One
-  correction found by testing: `--secret ENV@HOST` delivers the value inside
-  the guest as `MSB_<ENV>`, not `<ENV>` -- the launch prelude renames it to
-  `CLAUDE_CODE_OAUTH_TOKEN`, the name `claude` actually reads.
+  `hyper-util`, `reqwest`) -- **not replaced with `--secret`.** A
+  `--secret`-based replacement was implemented first, then removed once
+  real end-to-end testing (running `opencode`, a tool with nothing to do
+  with Claude, in the same kind of sandbox) surfaced that `--secret`
+  silently enables TLS interception for the *entire* sandbox, not just
+  the named host -- confirmed by a minimal repro (`msb run --secret
+  X@host-a` intercepted an unrelated `curl` to host-b; the same command
+  without `--secret` did not). Isolation now does nothing tool-specific at
+  all; a tool's credentials are entirely its own or the image's concern.
+- **`msb` cannot mount a symlinked source path at all.** Verified hands-on:
+  mounting a symlink itself (not its target) fails with "Too many levels of
+  symbolic links" (ELOOP), even though the same path resolved to its real
+  target mounts fine -- unlike podman, which followed a symlinked bind-mount
+  source transparently. Enwiro's own per-environment layout
+  (`<workspaces_directory>/<name>/<name>`) is *always* a symlink, so this
+  broke the primary mount on essentially every isolated launch, not just
+  worktrees. Fixed by canonicalizing `environment_path` once in
+  `resolve_launch` (`canonical_environment_path`) before it's used for
+  anything -- the mount, the working directory, everything. This also
+  simplified away the old podman-era "mount the symlink AND the real path
+  additively" logic entirely: there is only ever one path to mount now.
+- **Guest memory needed an explicit floor.** `msb`'s default (~517M,
+  verified: `free -h` inside a default sandbox, an 800M allocation failing
+  outright) OOM-kills real tools -- found when `opencode run` came back
+  `Killed` with zero other explanation. Fixed at `-m 4G` for every
+  isolated launch (`ISOLATED_GUEST_MEMORY` in `launch.rs`). Not sized as a
+  fraction of host RAM the way the old krun policy was: verified hands-on
+  that microsandbox does not return freed guest memory to the host the
+  way krun apparently did (RSS for a sandbox that allocated then freed 2G
+  stayed flat), so a "half the host's RAM" policy would actually reserve
+  that much per concurrent sandbox here.
+- **Real end-to-end regression tests**, not just unit tests of argv
+  construction: `enwiro-daemon/tests/msb_manual_e2e.rs`, `#[ignore]`d
+  (needs a real `msb` install + KVM + network, which CI doesn't have), run
+  explicitly via `cargo test --features container-wrap --test
+  msb_manual_e2e -- --ignored --nocapture`. Each test exists because a
+  pure-argv unit test could not have caught the bug it guards: mounting a
+  symlinked environment path (the ELOOP bug), a moderate real memory
+  allocation (the OOM-kill bug), and the `$HOME`-writability prelude fix,
+  all against a real `msb run`.
 - Reused `enwiro_sdk::config::build_cookbook_config` (the existing
   project-config walker) directly for `isolate`/image resolution, scope
   `"isolation"` -- this is also where the user-level default naturally

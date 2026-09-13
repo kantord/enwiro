@@ -119,8 +119,8 @@ When isolation is configured, the daemon returns an invocation roughly
 equivalent to:
 
 ```sh
-msb run -t \
-  -v <env-path>:<env-path> -w <env-path> \
+msb run -m 4G -t \
+  -v <env-real-path>:<env-real-path> -w <env-real-path> \
   -e ENWIRO_ENV=<env-name> \
   -u <your-uid>:<your-gid> \
   <image> -- <command> [args...]
@@ -129,24 +129,30 @@ msb run -t \
 - **Backend**: microsandbox only, driven as a subprocess to its `msb` CLI --
   no other engine, no runtime choice. Each launch is a real libkrun microVM
   (its own guest kernel), not a shared-kernel container.
-- The project directory is bind-mounted at the same path it has on the host
-  (and used as the working directory), so paths match and file watching/HMR
-  work. Ownership needs no special handling: microsandbox's mounts already
-  present a host-owned directory as owned by the guest's own uid in either
-  direction (verified hands-on: a file the guest creates comes back on the
-  host owned by the real host user, and `git commit` in a bind-mounted repo
-  works with no ownership flags at all).
-- `-u <your-uid>:<your-gid>` is set anyway (Linux only), purely so the process
-  itself doesn't run as root -- hardening, and required by Claude's
-  `--dangerously-skip-permissions`. It has no effect on file ownership, which
-  already works regardless of which uid the guest runs as.
+- **Guest memory is fixed at 4G for every launch.** `msb`'s own default
+  (~517M, verified hands-on) OOM-kills real dev tools with no explanation
+  beyond a bare `Killed`. Unlike the old krun runtime, microsandbox does not
+  appear to return freed guest memory to the host as it's freed (verified: a
+  sandbox that allocated then freed 2G held that RSS on the host afterward),
+  so this is a fixed ceiling rather than a fraction of the host's RAM.
+- The project directory is bind-mounted at its **real, symlink-resolved**
+  path (and used as the working directory) -- not enwiro's own stable
+  per-environment symlink address, if the environment has one. Unlike
+  podman, `msb` refuses to mount a symlinked source at all ("Too many levels
+  of symbolic links"), so the daemon resolves it first; this also happens to
+  be the exact path a git worktree's own internal bookkeeping
+  (`.git/worktrees/<name>/gitdir`) already expects, so one mount serves both.
+- Ownership needs no special handling: microsandbox's mounts already present
+  a host-owned directory as owned by the guest's own uid in either direction
+  (verified hands-on: a file the guest creates comes back on the host owned
+  by the real host user, and `git commit` in a bind-mounted repo works with
+  no ownership flags at all).
+- `-u <your-uid>:<your-gid>` is set anyway (Linux only), purely so the
+  process itself doesn't run as root -- hardening, and required by some
+  tools that refuse to run as root at all (e.g. Claude Code's
+  `--dangerously-skip-permissions`). It has no effect on file ownership,
+  which already works regardless of which uid the guest runs as.
 - `-t` is used when the caller's stdin is a terminal, `--no-tty` otherwise.
-- If the project directory is itself a symlink (enwiro's own per-environment
-  layout uses one, so an environment keeps a stable address across re-cooks),
-  the real path behind it is bind-mounted too, alongside the symlink path.
-  Some tools hard-code the real absolute path into their own metadata - a git
-  worktree's main repo, for instance, references the worktree's real path in
-  its own internal bookkeeping - and need it to resolve inside the sandbox.
 - Cookbooks can also declare that an environment depends on additional host
   paths beyond its own project directory - e.g. a git worktree's main repo,
   which holds the shared object database the worktree's `.git` points into.
@@ -214,46 +220,16 @@ enw wrap bash some-other-env
 To turn isolation off again, remove or set `isolate = false` in the
 project's `.enwiro.toml`.
 
-### Running Claude Code in isolation
+### Credentials and tool-specific setup
 
-Running an agent like Claude Code inside the sandbox was a motivating use case
-for this layer: the agent sees only the environment's project directory, not the
-rest of your machine.
-
-**Authentication, without the credential entering the sandbox.** A naive
-approach would inject your token as a plain environment variable, but anything
-running in the sandbox (including the agent, if it is led astray by a prompt
-injection) could then read and exfiltrate it. Instead, enwiro uses
-microsandbox's own `--secret` mechanism: the real token lives only in the
-`msb` process's own environment on the host, `--secret ...@api.anthropic.com`
-scopes it to that one host, and any attempt to send it elsewhere terminates
-the sandbox (`--on-secret-violation block-and-terminate`). **The real
-credential is never inlined into the sandbox config**, and never appears in
-`msb` argv (visible via `ps`/`msb inspect`). Configure it once:
-
-```sh
-# Mint a long-lived token tied to your subscription, then store it host-side:
-claude setup-token
-mkdir -p ~/.config/enwiro
-printf '%s\n' 'PASTE_THE_TOKEN' > ~/.config/enwiro/claude_oauth_token
-chmod 600 ~/.config/enwiro/claude_oauth_token
-```
-
-With a token configured and an image that ships `claude`, `enw wrap claude
-<env>` authenticates using your subscription -- and so does running `claude`
-from a shell inside the environment (for example after `enw wrap kitty
-<env>`), since the launch prelude renames the secret to the env var `claude`
-itself reads (`CLAUDE_CODE_OAUTH_TOKEN`).
-
-**First-run onboarding is skipped automatically** (see the note below), so the
-session lands straight at the prompt.
-
-This is **experimental and intended for your own, trusted environments only.**
-Known limits: it protects the credential but not Claude's server-side tools
-such as web search (those run on Anthropic's infrastructure and never
-traverse this mechanism), and running an agent against untrusted code in a
-shared kernel is not a strong security boundary even with a real microVM.
-Treat it accordingly.
+Isolation is deliberately tool-agnostic: enwiro does nothing specific for any
+particular agent, CLI, or credential. Whatever a tool needs (an API key, a
+config file, a first-run setup step) is on the image or the tool's own
+config, same as any other BYO dependency -- there is no enwiro-side
+credential-passthrough mechanism today. If you're running an agent like
+Claude Code or another coding tool inside the sandbox, configure its auth the
+way you would in any other fresh environment (baked into the image, or set
+up interactively on first launch).
 
 ## Notes and limits
 
@@ -266,17 +242,6 @@ Treat it accordingly.
 - **Terminal emulators are wrapped specially.** A recognised terminal (currently
   kitty only) runs on the host with the environment's shell wrapped inside it, so
   the terminal needs no display passthrough. This is an experimental pilot.
-- **Claude Code is authenticated via microsandbox's `--secret`** so the
-  credential never enters the sandbox. See [Running Claude Code in
-  isolation](#running-claude-code-in-isolation) above.
-- **First-run onboarding is skipped automatically.** Claude Code has no env var
-  or setting to skip its first-run wizard (theme picker and "trust this folder"
-  prompt); the only lever is a `.claude.json` marking `hasCompletedOnboarding`
-  and the workspace's `hasTrustDialogAccepted`. Rather than make you bake that
-  into every image, the container launch **seeds a default `.claude.json` at
-  start if one is absent** (keyed to the environment's directory; it never
-  overwrites one the image already ships), so `claude` in a fresh container goes
-  straight to the prompt.
 - **`enw wrap` is the only launch path that consults the daemon today.** Other
   ways enwiro starts programs (`enw run` via an adapter, `enw :<gear>` cli
   entries, and the daemon's cook-autorun) still launch on the host and do not yet
