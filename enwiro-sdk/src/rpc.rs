@@ -129,7 +129,7 @@ pub struct LaunchResolveParams {
 /// plus the environment variables the daemon decided the launched process
 /// should carry (`env_vars`, e.g. `ENWIRO_ENV`). The client sets cwd, applies
 /// `env_vars`, and exec-replaces; it does not decide any of this itself. Host
-/// path = the command itself; container path = `<engine> run ... <image> <command> ...`.
+/// path = the command itself; isolated path = `msb run ... <image> -- <command> ...`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LaunchResolveResult {
     pub program: String,

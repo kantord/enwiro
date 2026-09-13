@@ -9,6 +9,8 @@
 //! microsandbox, driven as a subprocess to its `msb` CLI (ADR-0006) -- podman/krun
 //! are gone, along with the OCI-image-presence trigger they used.
 
+#[cfg(feature = "container-wrap")]
+use anyhow::Context;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 use enwiro_sdk::rpc::{LaunchResolveParams, LaunchResolveResult};
 use std::path::Path;
@@ -64,7 +66,7 @@ fn is_terminal(command: &str) -> bool {
 pub fn resolve_launch(
     params: &LaunchResolveParams,
     #[allow(unused_variables)] workspaces_directory: &Path,
-) -> Result<LaunchResolveResult, String> {
+) -> anyhow::Result<LaunchResolveResult> {
     // Terminal template (issue #540): the terminal runs on the host; if the env
     // isolates, its inner command is the isolated invocation for the shell
     // (`kitty msb run ... <image> -- <shell>`), otherwise it uses `$SHELL`.
@@ -164,29 +166,27 @@ struct IsolationPolicy {
 /// fail to find it even when the user's own shell would (same caveat the old
 /// podman-engine lookup had).
 #[cfg(feature = "container-wrap")]
-fn isolation_image(environment_path: &str) -> Result<Option<String>, String> {
+fn isolation_image(environment_path: &str) -> anyhow::Result<Option<String>> {
     let value = enwiro_sdk::config::build_cookbook_config(
         Path::new(environment_path),
         "isolation",
         &["isolate", "image"],
     )
-    .map_err(|e| format!("could not resolve isolation policy: {e:#}"))?;
+    .context("could not resolve isolation policy")?;
     let policy: IsolationPolicy =
-        serde_json::from_value(value).map_err(|e| format!("malformed isolation policy: {e}"))?;
+        serde_json::from_value(value).context("malformed isolation policy")?;
     if !policy.isolate {
         return Ok(None);
     }
-    let image = policy.image.ok_or_else(|| {
+    let image = policy.image.context(
         "project has `isolate = true` but no image/snapshot is configured -- set `image` \
          under [isolation] in .enwiro.toml, or a personal default under [isolation] in \
-         ~/.config/enwiro/isolation.toml"
-            .to_string()
-    })?;
-    if which::which(MSB_BIN).is_err() {
-        return Err(format!(
-            "project has `isolate = true` but the `{MSB_BIN}` CLI is not on PATH"
-        ));
-    }
+         ~/.config/enwiro/isolation.toml",
+    )?;
+    anyhow::ensure!(
+        which::which(MSB_BIN).is_ok(),
+        "project has `isolate = true` but the `{MSB_BIN}` CLI is not on PATH"
+    );
     Ok(Some(image))
 }
 
@@ -204,12 +204,12 @@ fn isolation_image(environment_path: &str) -> Result<Option<String>, String> {
 /// one that works, and is used for the mount, the working directory, and
 /// everything else `build_isolated_argv` does with a path.
 #[cfg(feature = "container-wrap")]
-fn canonical_environment_path(environment_path: &str) -> Result<String, String> {
+fn canonical_environment_path(environment_path: &str) -> anyhow::Result<String> {
     std::fs::canonicalize(environment_path)
-        .map_err(|e| format!("could not resolve environment path {environment_path}: {e}"))?
+        .with_context(|| format!("could not resolve environment path {environment_path}"))?
         .into_os_string()
         .into_string()
-        .map_err(|_| format!("environment path {environment_path} is not valid UTF-8"))
+        .map_err(|_| anyhow::anyhow!("environment path {environment_path} is not valid UTF-8"))
 }
 
 /// The host's effective git identity `(user.name, user.email)` for the
@@ -835,6 +835,7 @@ mod tests {
             Path::new("/nonexistent-workspaces-dir"),
         )
         .unwrap_err();
+        let err = err.to_string();
         assert!(err.contains("isolate"), "{err}");
         assert!(err.contains("image"), "{err}");
     }

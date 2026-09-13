@@ -268,7 +268,8 @@ impl EnwiroRpcServer for DaemonRpc {
         })
         .await
         .map_err(|e| app_err(format!("launch.resolve task failed: {e}")))?;
-        result.map_err(app_err)
+        // `{:#}` prints anyhow's full context chain, not just the top frame.
+        result.map_err(|e| app_err(format!("{e:#}")))
     }
 
     async fn env_list(&self) -> Result<EnvListResult, ErrorObjectOwned> {
