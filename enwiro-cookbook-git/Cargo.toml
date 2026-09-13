@@ -3,7 +3,7 @@ name = "enwiro-cookbook-git"
 version = "0.1.32"
 edition = "2024"
 description = "i3wm cookbook for git"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

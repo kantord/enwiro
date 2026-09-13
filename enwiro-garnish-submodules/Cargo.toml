@@ -3,7 +3,7 @@ name = "enwiro-garnish-submodules"
 version = "0.1.19"
 edition = "2024"
 description = "Garnish that initialises git submodules on env cook"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 # Tags are `<crate>-v<version>` (release-plz's workspace default), which

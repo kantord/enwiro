@@ -3,7 +3,7 @@ name = "enwiro-gui"
 version = "0.1.8"
 edition = "2024"
 description = "Local web GUI for enwiro: a single binary that serves an embedded React SPA to the browser"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 # web/dist is gitignored but must ship in the crates.io tarball so that
 # `cargo install enwiro-gui` needs no JS toolchain: CI builds the SPA right

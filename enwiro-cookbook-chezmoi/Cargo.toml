@@ -3,7 +3,7 @@ name = "enwiro-cookbook-chezmoi"
 version = "0.1.25"
 edition = "2024"
 description = "Chezmoi cookbook for enwiro"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 # Tags are `<crate>-v<version>` (release-plz's workspace default), which

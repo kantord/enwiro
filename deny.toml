@@ -1,0 +1,46 @@
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+ignore = [
+    # transitive via enwiro-gui -> utoipa-axum -> paste; upstream is archived,
+    # no safe upgrade exists (see the advisory for alternatives to migrate to).
+    { id = "RUSTSEC-2024-0436", reason = "no safe upgrade available; revisit if utoipa-axum drops paste" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+
+[bans]
+# 29 duplicate-version chains exist in the current dependency tree (syn,
+# hashbrown, rand, getrandom, etc. pulled in at multiple semver-incompatible
+# versions by transitive deps) — denying would fail CI today without fixing
+# any real issue, since Cargo already isolates them at build time.
+multiple-versions = "warn"
+wildcards = "allow"
+allow-workspace = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

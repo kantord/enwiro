@@ -3,7 +3,7 @@ name = "enwiro-daemon"
 version = "0.0.24"
 edition = "2024"
 description = "Background daemon for enwiro: refreshes the recipe cache and forwards workspace switch events"
-license = "GPL-3.0-or-later"
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 
 # Tags are `<crate>-v<version>` (release-plz's workspace default), which

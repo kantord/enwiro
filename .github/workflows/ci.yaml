@@ -82,8 +82,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: taiki-e/install-action@45472d76f4b8b7996b14d7dcd5f5f35784b9dd1d # cargo-audit
-      - run: cargo audit
+      - uses: taiki-e/install-action@c02248eec042a8a90b2335f60bb37dc287b54068 # cargo-deny
+      - run: cargo deny check
 
   docs:
     runs-on: ubuntu-latest
