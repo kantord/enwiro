@@ -1,37 +1,40 @@
-//! Isolation launch decision (issue #540). Given a resolved environment +
-//! command, decide whether to run on the host or inside a prebuilt OCI image,
-//! and return the final `program` + `args`. The daemon is the single source of
-//! truth for this decision; the `enw` CLI is a thin client that exec-replaces
-//! into whatever `resolve_launch` returns.
+//! Isolation launch decision (issue #540, ADR-0006). Given a resolved environment +
+//! command, decide whether to run on the host or inside a microsandbox microVM, and
+//! return the final `program` + `args`. The daemon is the single source of truth for
+//! this decision; the `enw` CLI is a thin client that exec-replaces into whatever
+//! `resolve_launch` returns.
 //!
-//! The container path is behind the `container-wrap` build feature (off by
-//! default); without it `resolve_launch` always returns the host command.
+//! The isolation path is behind the `container-wrap` build feature (off by default);
+//! without it `resolve_launch` always succeeds with the host command. Backend:
+//! microsandbox, driven as a subprocess to its `msb` CLI (ADR-0006) -- podman/krun
+//! are gone, along with the OCI-image-presence trigger they used.
 
+#[cfg(feature = "container-wrap")]
+use anyhow::Context;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 use enwiro_sdk::rpc::{LaunchResolveParams, LaunchResolveResult};
 use std::path::Path;
 
-/// Prefix for the per-environment OCI image tag. The trigger is purely the
-/// *presence* of an image named `enwiro/<env-name>`; building it is out-of-band.
+/// The microsandbox CLI. The only backend enwiro drives (ADR-0006) -- no
+/// engine choice, no runtime override, unlike the podman/krun era.
 #[cfg(feature = "container-wrap")]
-const CONTAINER_IMAGE_PREFIX: &str = "enwiro/";
+const MSB_BIN: &str = "msb";
 
-/// The only container engine enwiro drives. Podman-only (not Docker) because
-/// `--userns=keep-id` (see `build_container_argv`) has no Docker equivalent, and
-/// rootless Podman's networking has no host-bindable "bridge gateway" the way
-/// Docker's does, so a single supported engine avoids the two runtimes silently
-/// behaving differently under the same code path.
+/// Guest memory for every isolated launch. `msb`'s own default (~517M,
+/// verified hands-on) is too small for real dev tools; see
+/// `build_isolated_argv`'s use of this for the full story on why this is a
+/// fixed ceiling rather than a fraction of the host's RAM.
 #[cfg(feature = "container-wrap")]
-const CONTAINER_ENGINE: &str = "podman";
+const ISOLATED_GUEST_MEMORY: &str = "4G";
 
 /// Terminal emulators enwiro runs as host chrome with a wrapped shell inside
 /// (pilot: kitty only; see the launch-template registry plan). Matched by binary
 /// basename; the terminal itself never needs display passthrough.
 const TERMINAL_BINARIES: &[&str] = &["kitty"];
 
-/// Shell run inside a *containerized* terminal (must exist in the image).
+/// Shell run inside an *isolated terminal* (must exist in the image/snapshot).
 #[cfg(feature = "container-wrap")]
-const TERMINAL_CONTAINER_SHELL: &str = "bash";
+const TERMINAL_ISOLATED_SHELL: &str = "bash";
 
 /// Basename of a command path (everything after the last `/`).
 fn command_basename(command: &str) -> &str {
@@ -44,95 +47,91 @@ fn is_terminal(command: &str) -> bool {
 }
 
 /// Decide how to launch `command` in the environment. Host path returns the
-/// command unchanged; container path returns `engine run ... <image> <command>`.
+/// command unchanged; the isolated path returns `msb run ... <image> -- <command>`.
+///
+/// `Err` means the environment's project declared `isolate = true` but no
+/// image/snapshot could be resolved (or its isolation config is malformed) --
+/// the caller (the daemon's `launch.resolve` RPC handler) turns this into a
+/// `launch.resolve` error, same as any other resolve failure. `enw wrap`
+/// already treats *every* such error the same way: a loud warning, then a
+/// bare, unwrapped host launch (ADR-0006 -- deliberately not a new "refuse to
+/// launch" failure mode; the CLI has exactly one degrade path today and this
+/// reuses it rather than adding a second).
 //
 // TODO(#540): the terminal handling below is a hardcoded pilot (kitty only, via
-// `TERMINAL_BINARIES`) and the container-terminal branch duplicates the generic
-// container branch. Replace both with a general launch-template registry
+// `TERMINAL_BINARIES`) and the isolated-terminal branch duplicates the generic
+// isolated branch. Replace both with a general launch-template registry
 // (binary-name -> strategy) so new terminals and per-app rules don't require
 // editing this function.
 pub fn resolve_launch(
     params: &LaunchResolveParams,
     #[allow(unused_variables)] workspaces_directory: &Path,
-    #[allow(unused_variables)] container_runtime: Option<&str>,
-) -> LaunchResolveResult {
+) -> anyhow::Result<LaunchResolveResult> {
     // Terminal template (issue #540): the terminal runs on the host; if the env
-    // containerizes, its inner command is the container invocation for the shell
-    // (`kitty <engine> run ... <image> <shell>`), otherwise it uses `$SHELL`.
+    // isolates, its inner command is the isolated invocation for the shell
+    // (`kitty msb run ... <image> -- <shell>`), otherwise it uses `$SHELL`.
     if is_terminal(&params.command) {
         #[cfg(feature = "container-wrap")]
         if !params.env_name.is_empty()
-            && let Some(engine) = find_container_engine()
+            && let Some(image) = isolation_image(&params.env_path)?
         {
-            let image = container_image_tag(&params.env_name);
-            if image_exists(engine, &image) {
-                let git_identity = host_git_identity(&params.env_path);
-                let env = ContainerEnv {
-                    image: &image,
-                    environment_path: &params.env_path,
-                    environment_name: &params.env_name,
-                    inject_proxy_shim: claude_oauth_token().is_some(),
-                    git_identity: git_identity
-                        .as_ref()
-                        .map(|(name, email)| (name.as_str(), email.as_str())),
-                    workspaces_directory,
-                    oci_runtime: container_runtime,
-                };
-                return LaunchResolveResult {
-                    program: params.command.clone(),
-                    args: build_terminal_container_args(&params.args, engine, &env),
-                    env_vars: Vec::new(),
-                };
-            }
-        }
-
-        // Host terminal: run it directly (it uses `$SHELL`); the client applies
-        // cwd (= env path) + `ENWIRO_ENV`.
-        return LaunchResolveResult {
-            program: params.command.clone(),
-            args: params.args.clone(),
-            env_vars: launch_env_vars(&params.env_name),
-        };
-    }
-
-    #[cfg(feature = "container-wrap")]
-    if !params.env_name.is_empty()
-        && let Some(engine) = find_container_engine()
-    {
-        let image = container_image_tag(&params.env_name);
-        if image_exists(engine, &image) {
-            // When a Claude token is configured, install the `claude` shim so any
-            // `claude` run *inside* the container (directly or from a shell) routes
-            // through the host proxy. Container-scoped, not command-scoped: the
-            // shim only affects `claude`, so wiring it for every launch is safe.
+            let environment_path = canonical_environment_path(&params.env_path)?;
             let git_identity = host_git_identity(&params.env_path);
-            let env = ContainerEnv {
+            let env = IsolatedEnv {
                 image: &image,
-                environment_path: &params.env_path,
+                environment_path: &environment_path,
                 environment_name: &params.env_name,
-                inject_proxy_shim: claude_oauth_token().is_some(),
                 git_identity: git_identity
                     .as_ref()
                     .map(|(name, email)| (name.as_str(), email.as_str())),
                 workspaces_directory,
-                oci_runtime: container_runtime,
             };
-            return LaunchResolveResult {
-                program: engine.to_string(),
-                args: build_container_argv(&env, &params.command, &params.args, params.interactive),
-                // The container path injects `ENWIRO_ENV` *inside* the
-                // container via `-e` (see `build_container_argv`), so the host
-                // `engine` process needs no extra vars.
+            return Ok(LaunchResolveResult {
+                program: params.command.clone(),
+                args: build_terminal_isolated_args(&params.args, &env),
                 env_vars: Vec::new(),
-            };
+            });
         }
+
+        // Host terminal: run it directly (it uses `$SHELL`); the client applies
+        // cwd (= env path) + `ENWIRO_ENV`.
+        return Ok(LaunchResolveResult {
+            program: params.command.clone(),
+            args: params.args.clone(),
+            env_vars: launch_env_vars(&params.env_name),
+        });
     }
 
-    LaunchResolveResult {
+    #[cfg(feature = "container-wrap")]
+    if !params.env_name.is_empty()
+        && let Some(image) = isolation_image(&params.env_path)?
+    {
+        let environment_path = canonical_environment_path(&params.env_path)?;
+        let git_identity = host_git_identity(&params.env_path);
+        let env = IsolatedEnv {
+            image: &image,
+            environment_path: &environment_path,
+            environment_name: &params.env_name,
+            git_identity: git_identity
+                .as_ref()
+                .map(|(name, email)| (name.as_str(), email.as_str())),
+            workspaces_directory,
+        };
+        return Ok(LaunchResolveResult {
+            program: MSB_BIN.to_string(),
+            args: build_isolated_argv(&env, &params.command, &params.args, params.interactive),
+            // Everything the guest needs is delivered via `-e` inside
+            // `build_isolated_argv`; the `msb` process itself needs nothing
+            // from its own environment.
+            env_vars: Vec::new(),
+        });
+    }
+
+    Ok(LaunchResolveResult {
         program: params.command.clone(),
         args: params.args.clone(),
         env_vars: launch_env_vars(&params.env_name),
-    }
+    })
 }
 
 /// Environment variables the daemon injects on a host-launched process: just
@@ -142,47 +141,75 @@ fn launch_env_vars(environment_name: &str) -> Vec<(String, String)> {
     vec![(ENWIRO_ENV_VAR.to_string(), environment_name.to_string())]
 }
 
-/// The OCI image tag the daemon looks for to containerize a given environment.
-/// The environment name is sanitized first: OCI repository names must be
-/// lowercase and may only contain `[a-z0-9._-]`, but enwiro environment names
-/// commonly don't (e.g. GitHub-issue envs named `<repo>#<n>`), which would
-/// otherwise make the image untaggable and silently fall back to the host path.
+/// A project's isolation policy (ADR-0006): `isolate = true` plus an optional
+/// image/snapshot reference. Read from the `[isolation]` section of
+/// `.enwiro.toml` (project layers, innermost wins), falling back per-key to a
+/// personal default at `~/.config/enwiro/isolation.toml` -- no enwiro-shipped
+/// default exists at either level. `#[serde(default)]` so a section missing
+/// either key (or missing entirely) deserializes to "not isolated".
 #[cfg(feature = "container-wrap")]
-fn container_image_tag(environment_name: &str) -> String {
-    format!(
-        "{CONTAINER_IMAGE_PREFIX}{}",
-        sanitize_image_tag_component(environment_name)
-    )
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct IsolationPolicy {
+    isolate: bool,
+    image: Option<String>,
 }
 
-/// Map `name` into a valid OCI repository-name component: lowercased, with any
-/// run of characters outside `[a-z0-9]` collapsed to a single `-`, and
-/// leading/trailing `-` trimmed (a component must start and end with an
-/// alphanumeric). Deliberately collapses `.`/`_` too, not just clearly-illegal
-/// characters like `#`: Docker's actual grammar only allows a single `.`, one
-/// or two `_`, but any number of `-`, and getting that nuance wrong would
-/// still produce an untaggable image. Using only `-` as a separator sidesteps
-/// the distinction entirely and is always valid.
+/// Resolve whether `environment_path` wants isolation and, if so, the
+/// image/snapshot to boot. `Ok(None)` means "run on the host" (`isolate` is
+/// false or unset anywhere). `Err` means `isolate = true` but no image
+/// resolved from the project or the user's personal default, the isolation
+/// config itself is malformed, or `msb` isn't on the daemon's `PATH`.
 ///
-/// This is a best-effort, lossy mapping, not a collision-free encoding: e.g.
-/// `my#env` and `my.env` both sanitize to `my-env`. That trade-off is accepted
-/// for the common case this unblocks (issue-based envs named `<repo>#<n>`)
-/// over a more complex, reversible scheme.
+/// NOTE: the `msb` check resolves against the *daemon's* `PATH`, not the
+/// calling user's -- a `systemd --user` daemon with a stripped `PATH` may
+/// fail to find it even when the user's own shell would (same caveat the old
+/// podman-engine lookup had).
 #[cfg(feature = "container-wrap")]
-fn sanitize_image_tag_component(name: &str) -> String {
-    let mut sanitized = String::with_capacity(name.len());
-    let mut last_was_dash = false;
-    for ch in name.chars() {
-        let lower = ch.to_ascii_lowercase();
-        if lower.is_ascii_alphanumeric() {
-            sanitized.push(lower);
-            last_was_dash = false;
-        } else if !last_was_dash {
-            sanitized.push('-');
-            last_was_dash = true;
-        }
+fn isolation_image(environment_path: &str) -> anyhow::Result<Option<String>> {
+    let value = enwiro_sdk::config::build_cookbook_config(
+        Path::new(environment_path),
+        "isolation",
+        &["isolate", "image"],
+    )
+    .context("could not resolve isolation policy")?;
+    let policy: IsolationPolicy =
+        serde_json::from_value(value).context("malformed isolation policy")?;
+    if !policy.isolate {
+        return Ok(None);
     }
-    sanitized.trim_matches('-').to_string()
+    let image = policy.image.context(
+        "project has `isolate = true` but no image/snapshot is configured -- set `image` \
+         under [isolation] in .enwiro.toml, or a personal default under [isolation] in \
+         ~/.config/enwiro/isolation.toml",
+    )?;
+    anyhow::ensure!(
+        which::which(MSB_BIN).is_ok(),
+        "project has `isolate = true` but the `{MSB_BIN}` CLI is not on PATH"
+    );
+    Ok(Some(image))
+}
+
+/// Resolve `environment_path` to its real, symlink-free absolute form.
+///
+/// `environment_path` is often enwiro's own stable per-env symlink
+/// (`<workspaces_directory>/<name>/<name>`) -- that indirection is what lets
+/// an env keep the same address across re-cooks even if what a cookbook
+/// produces underneath changes. Podman's bind mounts happily followed a
+/// symlinked source; microsandbox's do not -- verified hands-on, mounting a
+/// symlink itself (not its target) fails with "Too many levels of symbolic
+/// links" (ELOOP), even though the same path resolved to its real target
+/// mounts fine. So the real path isn't an *additional*, best-effort mount
+/// alongside the symlink anymore (as it was under podman) -- it's the *only*
+/// one that works, and is used for the mount, the working directory, and
+/// everything else `build_isolated_argv` does with a path.
+#[cfg(feature = "container-wrap")]
+fn canonical_environment_path(environment_path: &str) -> anyhow::Result<String> {
+    std::fs::canonicalize(environment_path)
+        .with_context(|| format!("could not resolve environment path {environment_path}"))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("environment path {environment_path} is not valid UTF-8"))
 }
 
 /// The host's effective git identity `(user.name, user.email)` for the
@@ -190,9 +217,6 @@ fn sanitize_image_tag_component(name: &str) -> String {
 /// rather than `--global` so conditional includes (`includeIf "gitdir:..."`)
 /// and worktree config yield exactly the identity the user would commit with
 /// on the host for this repo. `None` unless both halves resolve non-empty.
-///
-/// Shares `find_container_engine`'s daemon-`PATH` caveat below: a stripped
-/// `systemd --user` PATH without `git` just skips seeding.
 #[cfg(feature = "container-wrap")]
 fn host_git_identity(environment_path: &str) -> Option<(String, String)> {
     let get = |key: &str| -> Option<String> {
@@ -210,221 +234,118 @@ fn host_git_identity(environment_path: &str) -> Option<(String, String)> {
     Some((get("user.name")?, get("user.email")?))
 }
 
-/// `Some(CONTAINER_ENGINE)` if podman is on PATH, else `None`.
-///
-/// NOTE: this resolves against the *daemon's* `PATH`, not the calling user's. A
-/// `systemd --user` daemon with a stripped `PATH` may fail to find the engine the
-/// user has, so the env silently runs on the host (likewise `image_exists`
-/// probes the daemon's engine context). The robust fix is to thread the caller's
-/// `PATH` through `LaunchResolveParams` and probe with `which::which_in`;
-/// deferred while the isolation layer is experimental.
-#[cfg(feature = "container-wrap")]
-pub(crate) fn find_container_engine() -> Option<&'static str> {
-    which::which(CONTAINER_ENGINE)
-        .is_ok()
-        .then_some(CONTAINER_ENGINE)
-}
-
-/// The parts of a containerized launch that stay constant regardless of what
-/// command actually runs inside it. Bundled so `build_container_argv` and
-/// `build_terminal_container_args` take one narrow, named thing instead of
-/// five loose positional fields that happen to travel together. Every field
-/// is itself `Copy`, so the whole struct is too.
+/// The parts of an isolated launch that stay constant regardless of what
+/// command actually runs inside it. Bundled so `build_isolated_argv` and
+/// `build_terminal_isolated_args` take one narrow, named thing instead of
+/// loose positional fields that happen to travel together. Every field is
+/// itself `Copy`, so the whole struct is too.
 #[cfg(feature = "container-wrap")]
 #[derive(Clone, Copy)]
-struct ContainerEnv<'a> {
+struct IsolatedEnv<'a> {
     image: &'a str,
     environment_path: &'a str,
     environment_name: &'a str,
-    inject_proxy_shim: bool,
     /// The host's effective git `(user.name, user.email)` for this env, or
-    /// `None` when it couldn't be resolved (no seeding then; the container
+    /// `None` when it couldn't be resolved (no seeding then; the sandbox
     /// behaves as if the host had no identity configured either).
     git_identity: Option<(&'a str, &'a str)>,
     workspaces_directory: &'a Path,
-    /// `--runtime` override for a microVM-backed engine (e.g. `krun`, issue
-    /// #540); `None` uses the engine's own default.
-    oci_runtime: Option<&'a str>,
 }
 
-/// Build the args for a *containerized terminal*: the terminal runs on the host
-/// (it is the `program`) with its own `terminal_args` preserved, followed by the
-/// container invocation that runs the env's shell inside the image. The terminal
-/// supplies the pty, so the inner shell is always interactive.
+/// Build the args for an *isolated terminal*: the terminal runs on the host
+/// (it is the `program`) with its own `terminal_args` preserved, followed by
+/// the `msb` invocation that runs the env's shell inside the image. The
+/// terminal supplies the pty, so the inner shell is always interactive.
 #[cfg(feature = "container-wrap")]
-fn build_terminal_container_args(
-    terminal_args: &[String],
-    engine: &str,
-    env: &ContainerEnv,
-) -> Vec<String> {
+fn build_terminal_isolated_args(terminal_args: &[String], env: &IsolatedEnv) -> Vec<String> {
     let mut args = terminal_args.to_vec();
-    args.push(engine.to_string());
-    // The inner command is a shell; the claude shim (if injected) lets `claude`
-    // run from that shell route through the proxy.
-    args.extend(build_container_argv(
-        env,
-        TERMINAL_CONTAINER_SHELL,
-        &[],
-        true,
-    ));
+    args.push(MSB_BIN.to_string());
+    args.extend(build_isolated_argv(env, TERMINAL_ISOLATED_SHELL, &[], true));
     args
 }
 
-/// Ask the engine whether `image` exists locally (`podman image exists`, exit
-/// 0/1). Any spawn error counts as "absent".
+/// `-v` args binding `path` into the sandbox at the identical path on both
+/// sides (no translation).
+///
+/// Known limitation vs. the old podman path: `msb`'s mount flags (`-v`,
+/// `--mount-dir`, ...) are all `SOURCE:DEST[:OPTIONS]` with no escaping, and
+/// `msb` itself refuses a host path containing `:`, `,`, or `;` (verified
+/// hands-on: "bind host path must not contain ',', ':', or ';'"). Podman's
+/// `--mount type=bind,source=,target=` sidestepped this; microsandbox has no
+/// equivalent colon-safe syntax. Accepted (ADR-0006): such paths are rare for
+/// enwiro environment/project directories in practice, and the failure is a
+/// clear `msb` error at launch rather than a silent mis-mount.
 #[cfg(feature = "container-wrap")]
-fn image_exists(engine: &str, image: &str) -> bool {
-    use std::process::{Command, Stdio};
-    Command::new(engine)
-        .args(["image", "exists", image])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+fn mount_arg(path: &str) -> [String; 2] {
+    ["-v".to_string(), format!("{path}:{path}")]
 }
 
-/// `--mount` args that bind `path` into the container at the identical path
-/// on both sides (no translation). Uses `--mount type=bind,source=,target=`
-/// rather than `-v src:dst` so a path containing a colon is not mis-parsed
-/// as the `-v`-syntax field separator.
+/// Assemble the `run ...` args (the `msb` binary itself is the `program`, not
+/// part of this). The env's project dir is bind-mounted at the *same* path it
+/// has on the host, cwd set there, `ENWIRO_ENV` injected; `-t` when the
+/// caller's stdin is a TTY, `--no-tty` otherwise.
+///
+/// Ownership needs no special handling here, unlike podman/krun: verified
+/// hands-on that microsandbox's mounts already present a host-owned directory
+/// as owned by the guest's own effective uid, in *either* direction -- a file
+/// the guest creates (as root, or as an arbitrary non-root `-u`) comes back on
+/// the host owned by the real host user, and `git commit` in a bind-mounted
+/// repo works with no ownership flags at all. So there is no `--userns`/
+/// `--user`-for-ownership dance to port over. `-u` below is set purely for
+/// process hardening (non-root; some tools refuse to run as root at all,
+/// e.g. Claude Code's `--dangerously-skip-permissions`), independent of the
+/// (already-solved) ownership question.
 #[cfg(feature = "container-wrap")]
-fn bind_mount_args(path: &str) -> [String; 2] {
-    [
-        "--mount".to_string(),
-        format!("type=bind,source={path},target={path}"),
-    ]
-}
-
-/// Whether a configured `--runtime` value names `krun` specifically (matched
-/// by basename, since it's typically a full path like `/usr/bin/krun`), as
-/// opposed to any other custom OCI runtime a user might configure.
-#[cfg(feature = "container-wrap")]
-fn is_krun_runtime(runtime: &str) -> bool {
-    Path::new(runtime).file_name() == Some(std::ffi::OsStr::new("krun"))
-}
-
-/// Half the host's physical memory, in MiB, or `None` when it can't be
-/// probed (the launch then falls back to the runtime's own default).
-#[cfg(feature = "container-wrap")]
-fn half_host_memory_mib() -> Option<u64> {
-    // SAFETY: `sysconf` has no preconditions; it returns -1 for names the
-    // platform doesn't support, handled below.
-    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGE_SIZE) };
-    if pages <= 0 || page_size <= 0 {
-        return None;
-    }
-    let bytes = (pages as u64).checked_mul(page_size as u64)?;
-    Some(bytes / 2 / (1024 * 1024))
-}
-
-/// Assemble the `run ...` args (engine excluded; it is the `program`). The env's
-/// project dir is bind-mounted at the *same* path it has on the host, cwd set
-/// there, `ENWIRO_ENV` injected; `-it` when the caller's stdin is a TTY, `-i`
-/// otherwise.
-#[cfg(feature = "container-wrap")]
-fn build_container_argv(
-    env: &ContainerEnv,
+fn build_isolated_argv(
+    env: &IsolatedEnv,
     command: &str,
     child_args: &[String],
     interactive: bool,
 ) -> Vec<String> {
-    let ContainerEnv {
+    let IsolatedEnv {
         image,
         environment_path,
         environment_name,
-        inject_proxy_shim,
         git_identity,
         workspaces_directory,
-        oci_runtime,
     } = *env;
-    // An empty string means "unset", same as the config field being absent --
-    // guards against e.g. `container_runtime = ""` in a config file producing
-    // a broken `--runtime=` argv token instead of just using the default.
-    let oci_runtime = oci_runtime.filter(|r| !r.is_empty());
-    let mut argv = vec!["run".to_string(), "--rm".to_string()];
-    // Global OCI-runtime override (issue #540, e.g. `krun` for microVM
-    // isolation via libkrun) -- a blunt, user-configured toggle applying to
-    // every container launch, not a per-environment/per-app policy (that
-    // stays north-star). `None` uses the engine's own default runtime.
-    if let Some(runtime) = oci_runtime {
-        argv.push(format!("--runtime={runtime}"));
-    }
-    // Size the krun microVM's guest RAM to half the host's: libkrun defaults
-    // to 1 GiB with no swap while still advertising every host CPU, so a
-    // parallel build OOM-kills inside the guest. The generous fixed ceiling
-    // is cheap -- libkrun faults guest memory in lazily and returns freed
-    // pages to the host (virtio-balloon free-page reporting; verified
-    // hands-on: a 16 GiB guest idles at ~0.4 GiB host RSS and drops back
-    // within seconds of the guest freeing 6 GiB), so host usage tracks the
-    // guest's *actual* footprint, almost like a native process. Half the
-    // host keeps the host safe if a guest genuinely peaks. Deliberately a
-    // fixed policy, not a config field, while one number serves everyone.
-    // Krun-only: a plain container shares host RAM natively, and `-m` there
-    // would *add* a cap that doesn't exist today.
-    if oci_runtime.is_some_and(is_krun_runtime)
-        && let Some(mib) = half_host_memory_mib()
-    {
-        argv.push(format!("--memory={mib}m"));
-    }
-    argv.push(if interactive { "-it" } else { "-i" }.to_string());
-    argv.extend(bind_mount_args(environment_path));
-    // `environment_path` is often enwiro's own stable per-env symlink
-    // (`<workspaces_directory>/<name>/<name>`), not the real underlying path --
-    // that indirection is what lets an env keep the same address across
-    // re-cooks even if what a cookbook produces underneath changes. But some
-    // tools hard-code the *real* absolute path into their own metadata (e.g. a
-    // git worktree's main repo references this worktree's own real path in its
-    // reverse `.git/worktrees/<name>/gitdir` pointer), which won't resolve
-    // inside a container that only sees the symlink path. Mount the real path
-    // too, purely additively: the symlink mount above is untouched, so cwd and
-    // every other consumer keep seeing the same stable address as before.
-    if let Ok(real_path) = std::fs::canonicalize(environment_path)
-        && let Some(real_path) = real_path.to_str()
-        && real_path != environment_path
-    {
-        argv.extend(bind_mount_args(real_path));
-    }
+    let mut argv = vec!["run".to_string()];
+    // `msb`'s default guest memory is tiny -- verified hands-on: `free -h`
+    // inside a default-sized sandbox shows ~517M total, and an 800M
+    // allocation fails outright. Real dev tools (a Node/Bun-based CLI, a
+    // Rust build) don't fit; without this flag they get silently SIGKILLed
+    // (OOM), which surfaces to the user as just "Killed" with no other
+    // explanation. Unlike the old krun runtime, microsandbox does not appear
+    // to return freed guest memory to the host as it's freed (verified: RSS
+    // for a sandbox that allocated then freed 2G stayed flat) -- so this is a
+    // fixed, modest ceiling, not "half the host's RAM" the way krun's sizing
+    // was, since that would actually reserve that much per concurrent
+    // sandbox here rather than being effectively free.
+    argv.push("-m".to_string());
+    argv.push(ISOLATED_GUEST_MEMORY.to_string());
+    argv.push(if interactive { "-t" } else { "--no-tty" }.to_string());
+    // `environment_path` arrives here already canonicalized by
+    // `canonical_environment_path` -- not just enwiro's stable per-env
+    // symlink, but the real path a git worktree's own internal bookkeeping
+    // (`.git/worktrees/<name>/gitdir`) references too, so one mount serves
+    // both needs (unlike podman, `msb` can't mount a symlinked source at
+    // all -- see `canonical_environment_path`'s doc comment).
+    argv.extend(mount_arg(environment_path));
     // Cookbooks may declare that this environment depends on additional host
     // paths beyond its own directory to function -- e.g. a git worktree's
     // `.git` is a pointer into a separate main repo holding the shared object
-    // database. The daemon has no idea *why* a path is needed (that's the
-    // cookbook's tool-specific business); it just mounts whatever was
-    // declared, at the same absolute path on both sides (required for tools
-    // like git that hard-code absolute paths into their own metadata).
-    //
-    // Declarations are written under `<workspaces_directory>/<environment_name>`
-    // (see `write_external_paths_if_present` in the host CLI), not under
-    // `environment_path`: an env's actual project location is whatever the
-    // cookbook returned (a bind-mounted clone, a worktree elsewhere, anything),
-    // while enwiro's own per-env metadata always lives in its managed
-    // workspaces directory, one level above the project-pointing symlink.
-    //
-    // Known side effect for git worktrees: mounting the main repo mounts its
-    // whole `.git`, including the object database every branch's commits live
-    // in and the `.git/worktrees/` directory listing every worktree of that
-    // repo. So this isn't scoped to "this worktree": any committed content on
-    // any branch of the repo is already reachable (`git show`/`checkout` any
-    // commit), and `git worktree list` just makes the other worktrees' names
-    // and commit hashes convenient to find (others show `prunable`, since
-    // their real checkout paths aren't mounted -- but their commits are, via
-    // the shared object database). Only *uncommitted* changes sitting in
-    // another worktree's own working directory stay inaccessible. Accepted
-    // for now: scoping `external_paths` down to a single branch's reachable
-    // objects would need cookbook-side git-internals knowledge disproportionate
-    // to the gain, and the underlying repo's access control already governs
-    // who can cook an env from it in the first place.
+    // database. The daemon has no idea *why* a path is needed; it just mounts
+    // whatever was declared, at the same absolute path on both sides.
     let env_dir = workspaces_directory.join(environment_name);
     for path in enwiro_sdk::external_paths::load_external_paths(&env_dir) {
-        argv.extend(bind_mount_args(&path));
+        argv.extend(mount_arg(&path));
     }
     argv.push("-w".to_string());
     argv.push(environment_path.to_string());
     argv.push("-e".to_string());
     argv.push(format!("ENWIRO_ENV={environment_name}"));
     // Host git identity (issue #725): the host's ~/.gitconfig is not mounted,
-    // so a fresh container has no user.name/user.email and every `git commit`
+    // so a fresh sandbox has no user.name/user.email and every `git commit`
     // fails with "Author identity unknown". Delivered as plain env (non-secret)
     // for the launch prelude to seed *global* git config from -- global scope,
     // not GIT_AUTHOR_*/GIT_COMMITTER_* vars, because those would take highest
@@ -436,83 +357,36 @@ fn build_container_argv(
         argv.push("-e".to_string());
         argv.push(format!("ENWIRO_GIT_USER_EMAIL={email}"));
     }
-    // Run as the host user's uid/gid, with `--userns=keep-id` mapping that uid to
-    // itself inside the container's user namespace. This fixes git's "dubious
-    // ownership" error on the bind-mounted project, stops the container from
-    // leaving root-owned files on the host, and drops root (hardening; claude's
-    // `--dangerously-skip-permissions` also requires non-root). `keep-id` means
-    // the uid resolves against the *image's own* `/etc/passwd`, so an image user
-    // matching that uid gets its real home + dotfiles for free, with no need to
-    // derive or override `HOME` ourselves (verified: `enwiro/nanoref`'s `vscode`
-    // user resolves correctly this way).
-    //
-    // Linux only: on macOS the container runs in a VM whose file-sharing layer
-    // maps ownership, and the daemon's uid is meaningless inside that VM.
-    //
-    // Also skipped specifically for `krun` (issue #540): verified hands-on
-    // that this microVM-backed runtime ignores `--userns` entirely and always
-    // runs as uid=0 inside its own guest kernel, so these flags would be
-    // silently inert there, not just redundant. It happens to still solve the
-    // *problem* these flags target (root-owned droppings) a different way --
-    // krun does its own uid-mapping for the bind-mounted share independent of
-    // `--userns` -- so nothing needs to replace them for krun specifically.
-    // Gated on krun by name, not "any configured runtime": an unrelated
-    // custom runtime (e.g. an explicit crun/runc path) still needs and
-    // supports these flags, and dropping them for it would silently reopen
-    // the exact root-owned-files/dubious-ownership problems they prevent.
-    if cfg!(target_os = "linux") && !oci_runtime.is_some_and(is_krun_runtime) {
-        argv.push("--userns=keep-id".to_string());
-        argv.push("--user".to_string());
+    // Non-root hardening (issue #682's original motivation, ownership concern
+    // now moot -- see this function's doc comment). Linux only: unverified
+    // whether `-u` behaves the same under msb's macOS (Apple HVF) backend.
+    if cfg!(target_os = "linux") {
+        argv.push("-u".to_string());
         argv.push(format!("{}:{}", host_uid(), host_gid()));
     }
-    // Credential injection (issue #540): instead of putting the real token in the
-    // container, install a `claude` shim (materialized by the launch prelude into
-    // a PATH dir) that points claude at the host-side auth proxy. The daemon's
-    // proxy (`proxy.rs`) swaps a per-launch capability token for the real
-    // `Authorization` on the host, so the credential never enters the container.
-    //
-    // The capability is minted fresh per launch (not a fixed sentinel): the proxy
-    // rejects any request that doesn't present a token it minted itself, which is
-    // the actual access control (the bridge-gateway bind alone doesn't stop other
-    // local processes from reaching the proxy).
-    //
-    // Delivering it as a shim (not container-wide env) means any `claude` run in
-    // the container, directly or from a shell, is routed, while other processes'
-    // env stays clean. `--add-host` makes `host.containers.internal` resolve to
-    // the host so the shim's base URL is reachable.
-    if inject_proxy_shim {
-        let capability = crate::proxy::mint_capability();
-        argv.push("--add-host".to_string());
-        argv.push("host.containers.internal:host-gateway".to_string());
-        argv.push("-e".to_string());
-        argv.push("ENWIRO_SHIMS=claude".to_string());
-        argv.push("-e".to_string());
-        argv.push(format!(
-            "ENWIRO_SHIM_claude={}",
-            claude_shim_script(&capability)
-        ));
-    }
     argv.push(image.to_string());
-    // Run the container command through a small `sh` prelude that (1) materializes
-    // any enwiro shims into a PATH dir and (2) seeds a default `.claude.json` to
-    // skip claude's first-run wizard, then `exec`s the real command. Doing this at
-    // start (rather than baking into the image) keeps BYO images untouched; the
-    // shims and seed are non-secret and live in the container's ephemeral fs.
+    argv.push("--".to_string());
+    // Run the command through a small `sh` prelude that (1) guarantees a
+    // writable `$HOME` and (2) seeds git identity when unresolvable
+    // otherwise, then `exec`s the real command. Doing this at start (rather
+    // than baking into the image) keeps BYO images untouched; everything
+    // written is non-secret and lives in the sandbox's ephemeral filesystem.
+    //
+    // Credential passthrough for a specific tool (e.g. an agent CLI's own
+    // API auth) is deliberately not enwiro's concern here -- that's on the
+    // image or the tool's own config, same as any other BYO dependency.
     argv.push("sh".to_string());
     argv.push("-c".to_string());
-    argv.push(CONTAINER_PRELUDE_SCRIPT.to_string());
+    argv.push(ISOLATED_PRELUDE_SCRIPT.to_string());
     argv.push("sh".to_string()); // $0 for the exec'd shell
     argv.push(command.to_string());
     argv.extend(child_args.iter().cloned());
     argv
 }
 
-/// Directory the launch prelude writes enwiro shims into, prepended to `PATH`.
-#[cfg(feature = "container-wrap")]
-const SHIM_DIR: &str = "/tmp/enwiro-bin";
-
-/// The daemon's real uid / gid, injected as the container's `--user` so file
-/// ownership on the bind-mounted project matches.
+/// The daemon's real uid / gid, run as inside the sandbox purely for
+/// non-root hardening (ownership of bind-mounted files is unaffected either
+/// way -- see `build_isolated_argv`'s doc comment).
 #[cfg(feature = "container-wrap")]
 fn host_uid() -> u32 {
     // SAFETY: `getuid` always succeeds and has no preconditions.
@@ -524,57 +398,20 @@ fn host_gid() -> u32 {
     unsafe { libc::getgid() }
 }
 
-/// The `claude` shim: a tiny script installed on `PATH` inside the container that
-/// points claude at the host auth proxy, then execs the *real* claude (found by
-/// scanning `PATH`, skipping the shim dir). The proxy base URL and the per-launch
-/// capability are baked in; the real token is never here. The capability goes in
-/// `CLAUDE_CODE_OAUTH_TOKEN` (not `ANTHROPIC_AUTH_TOKEN`) so the CLI stays in
-/// subscription-billing mode rather than switching to API-usage billing. Also
-/// disables claude's self-updater: the container is ephemeral and non-root, so it
-/// has no write access to the image's npm prefix and the update would just fail.
-#[cfg(feature = "container-wrap")]
-fn claude_shim_script(capability: &str) -> String {
-    format!(
-        concat!(
-            "#!/bin/sh\n",
-            "export ANTHROPIC_BASE_URL=http://host.containers.internal:{port}\n",
-            "export CLAUDE_CODE_OAUTH_TOKEN={capability}\n",
-            // The container is ephemeral and non-root, so claude can't self-update
-            // (no write access to the image's npm prefix); skip the failing attempt.
-            "export DISABLE_AUTOUPDATER=1\n",
-            "real=''\n",
-            "oldifs=\"$IFS\"; IFS=:\n",
-            "for dir in $PATH; do\n",
-            "  [ \"$dir\" = {shim_dir} ] && continue\n",
-            "  if [ -x \"$dir/claude\" ]; then real=\"$dir/claude\"; break; fi\n",
-            "done\n",
-            "IFS=\"$oldifs\"\n",
-            "[ -n \"$real\" ] || {{ echo 'enwiro: real claude not found on PATH' >&2; exit 127; }}\n",
-            "exec \"$real\" \"$@\"\n",
-        ),
-        port = crate::proxy::CLAUDE_PROXY_PORT,
-        capability = capability,
-        shim_dir = SHIM_DIR,
-    )
-}
-
-/// `sh -c` launch prelude, run before the container command. Two steps, then
-/// `exec "$@"` (the real command, supplied after the `sh` `$0`):
+/// `sh -c` launch prelude, run before the actual command. Then `exec "$@"`
+/// (the real command, supplied after the `sh` `$0`):
 ///
-/// 1. **Shim materialization.** For each name in `$ENWIRO_SHIMS`, write the shim
-///    script from `$ENWIRO_SHIM_<name>` into [`SHIM_DIR`] and prepend that dir to
-///    `PATH`. The `eval` references the env var by name (it never inlines its
-///    contents), so shim bytes can't inject shell code. This is how `claude` gets
-///    routed through the proxy without setting its env container-wide.
-/// 2. **Onboarding seed.** Write a default `.claude.json` (only when absent) so a
-///    fresh container skips Claude's first-run wizard. Claude has no env/setting
-///    for this (issue anthropics/claude-code#4714), so the file is the only lever.
-///    It marks `hasCompletedOnboarding` (theme + welcome) and, for the working
-///    directory, `hasTrustDialogAccepted` (the "trust this folder" prompt).
-///    Claude's config is `$CLAUDE_CONFIG_DIR/.claude.json` when set, else
-///    `$HOME/.claude.json` (home root, not a `.claude/` subdir). An image that
-///    ships its own `.claude.json` is left untouched.
-/// 3. **Git identity seed** (issue #725). When the daemon passed the host's
+/// 1. **Writable `$HOME`.** A `-u <uid>` with no matching `/etc/passwd`
+///    entry in the image (the common case for a generic image, not just a
+///    bespoke one) leaves `HOME` defaulting to `/` -- verified hands-on, NOT
+///    empty/unset as might be assumed, so a plain `-z "$HOME"` check never
+///    catches it. `/` is unwritable by a non-root uid, so anything a tool
+///    tries to write under `$HOME` (its own config, cache, ...) fails with a
+///    bare "Permission denied". Testing writability directly (rather than
+///    guessing at msb's particular default value) catches this case and any
+///    other unwritable default, while leaving a real, writable,
+///    passwd-matched home untouched.
+/// 2. **Git identity seed** (issue #725). When the daemon passed the host's
 ///    identity (`ENWIRO_GIT_USER_NAME`/`_EMAIL`) and git can't already resolve
 ///    a `user.email` from any config the image ships (system, global, or the
 ///    bind-mounted repo's own -- the workdir is the repo), write it to global
@@ -582,49 +419,18 @@ fn claude_shim_script(capability: &str) -> String {
 ///    `git config --global` rather than `printf`ing a file so git does the
 ///    value escaping, and global scope keeps repo-local config authoritative.
 ///
-/// Everything written here is non-secret and lives in the container's ephemeral
-/// filesystem (gone on `--rm`).
+/// Everything written here is non-secret and lives in the sandbox's
+/// ephemeral filesystem. Deliberately does not do anything tool-specific
+/// (no per-tool onboarding seeds, no credential wiring) -- that's on the
+/// image or the tool's own config.
 #[cfg(feature = "container-wrap")]
-const CONTAINER_PRELUDE_SCRIPT: &str = concat!(
-    r#"[ -n "$HOME" ] && mkdir -p "$HOME"; "#,
-    r#"if [ -n "$ENWIRO_SHIMS" ]; then d=/tmp/enwiro-bin; mkdir -p "$d"; "#,
-    r#"for n in $ENWIRO_SHIMS; do eval "c=\${ENWIRO_SHIM_$n}"; printf '%s' "$c" > "$d/$n" && chmod +x "$d/$n"; done; "#,
-    r#"PATH="$d:$PATH"; export PATH; fi; "#,
-    r#"if [ -n "$CLAUDE_CONFIG_DIR" ]; then f="$CLAUDE_CONFIG_DIR/.claude.json"; else f="$HOME/.claude.json"; fi; "#,
-    r#"[ -f "$f" ] || { mkdir -p "$(dirname "$f")" && "#,
-    r#"printf '{"hasCompletedOnboarding":true,"theme":"dark-ansi","projects":{"%s":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true}}}' "$(pwd)" > "$f"; }; "#,
+const ISOLATED_PRELUDE_SCRIPT: &str = concat!(
+    r#"[ -w "$HOME" ] 2>/dev/null || export HOME=/tmp/enwiro-home; mkdir -p "$HOME"; "#,
     r#"if [ -n "$ENWIRO_GIT_USER_NAME" ] && [ -n "$ENWIRO_GIT_USER_EMAIL" ] && command -v git >/dev/null 2>&1 "#,
     r#"&& ! git config --get user.email >/dev/null 2>&1; then "#,
     r#"git config --global user.name "$ENWIRO_GIT_USER_NAME" && git config --global user.email "$ENWIRO_GIT_USER_EMAIL"; fi; "#,
     r#"exec "$@""#,
 );
-
-/// A cached Claude Code OAuth token to inject into a *claude* launch, or `None`
-/// if none is configured. Sources, first wins: the daemon's
-/// `CLAUDE_CODE_OAUTH_TOKEN` env var, else a single line in
-/// `$XDG_CONFIG_HOME/enwiro/claude_oauth_token` (defaulting to
-/// `~/.config/enwiro/claude_oauth_token`). Mint one with `claude setup-token`.
-///
-/// One cached token is reused across envs (no per-env token proliferation); it
-/// is used by the host-side proxy (`proxy.rs`) for claude launches, never placed
-/// in the container.
-#[cfg(feature = "container-wrap")]
-pub(crate) fn claude_oauth_token() -> Option<String> {
-    if let Some(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .ok()
-        .filter(|token| !token.is_empty())
-    {
-        return Some(token);
-    }
-    let path = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| home::home_dir().map(|home| home.join(".config")))?
-        .join("enwiro")
-        .join("claude_oauth_token");
-    let token = std::fs::read_to_string(path).ok()?;
-    let token = token.trim();
-    (!token.is_empty()).then(|| token.to_string())
-}
 
 #[cfg(test)]
 mod terminal_tests {
@@ -640,8 +446,9 @@ mod terminal_tests {
 
     #[test]
     fn host_terminal_runs_directly_with_enwiro_env() {
-        // No `enwiro/__nope__` image (and/or feature off) → host terminal: run
-        // it directly so it uses `$SHELL`; cwd + ENWIRO_ENV applied by the client.
+        // No isolation policy for this env (and/or feature off) -> host
+        // terminal: run it directly so it uses `$SHELL`; cwd + ENWIRO_ENV
+        // applied by the client.
         let res = resolve_launch(
             &LaunchResolveParams {
                 env_name: "__nope__".to_string(),
@@ -651,8 +458,8 @@ mod terminal_tests {
                 interactive: false,
             },
             Path::new("/nonexistent-workspaces-dir"),
-            None,
-        );
+        )
+        .unwrap();
         assert_eq!(res.program, "kitty");
         assert!(res.args.is_empty());
         assert_eq!(
@@ -666,50 +473,16 @@ mod terminal_tests {
 mod tests {
     use super::*;
 
-    /// A `ContainerEnv` fixture for tests that only care about the command
+    /// An `IsolatedEnv` fixture for tests that only care about the command
     /// being run, not the environment identity around it.
-    fn test_env(inject_proxy_shim: bool) -> ContainerEnv<'static> {
-        ContainerEnv {
-            image: "enwiro/x",
+    fn test_env() -> IsolatedEnv<'static> {
+        IsolatedEnv {
+            image: "my-snapshot",
             environment_path: "/p",
             environment_name: "x",
-            inject_proxy_shim,
             git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
-            oci_runtime: None,
         }
-    }
-
-    #[test]
-    fn image_tag_is_prefixed_env_name() {
-        assert_eq!(container_image_tag("my-proj"), "enwiro/my-proj");
-    }
-
-    // GitHub-issue envs are named `<repo>#<n>`, but `#` is illegal in an OCI
-    // repository name; without sanitizing, the image can never be tagged or
-    // matched, so the container path silently and permanently falls back to
-    // the host for every such env.
-    #[test]
-    fn image_tag_sanitizes_hash_in_issue_style_env_names() {
-        assert_eq!(container_image_tag("headson#513"), "enwiro/headson-513");
-    }
-
-    #[test]
-    fn sanitize_lowercases_and_collapses_runs_of_invalid_chars() {
-        assert_eq!(sanitize_image_tag_component("My Env!!Name"), "my-env-name");
-    }
-
-    #[test]
-    fn sanitize_trims_leading_and_trailing_separators() {
-        assert_eq!(
-            sanitize_image_tag_component("#leading-and-trailing#"),
-            "leading-and-trailing"
-        );
-    }
-
-    #[test]
-    fn sanitize_is_a_no_op_on_an_already_valid_name() {
-        assert_eq!(sanitize_image_tag_component("my-proj"), "my-proj");
     }
 
     // A cookbook-declared external path (e.g. a git worktree's main repo,
@@ -717,11 +490,9 @@ mod tests {
     // mounted alongside the env's own path. The daemon has no idea *why* the
     // path was declared; it just mounts whatever it finds.
     #[test]
-    fn container_argv_mounts_a_declared_external_path() {
+    fn isolated_argv_mounts_a_declared_external_path() {
         let main_repo = tempfile::tempdir().unwrap();
         let env_path = tempfile::tempdir().unwrap();
-        // Deliberately distinct from `env_path` -- see `build_container_argv`'s
-        // doc comment for why declarations live under `workspaces_directory`.
         let workspaces_dir = tempfile::tempdir().unwrap();
         let env_dir = workspaces_dir.path().join("x");
         let data = enwiro_sdk::external_paths::ExternalPathsFileData {
@@ -736,100 +507,89 @@ mod tests {
         )
         .unwrap();
 
-        let env = ContainerEnv {
-            image: "enwiro/x",
+        let env = IsolatedEnv {
+            image: "my-snapshot",
             environment_path: env_path.path().to_str().unwrap(),
             environment_name: "x",
-            inject_proxy_shim: false,
             git_identity: None,
             workspaces_directory: workspaces_dir.path(),
-            oci_runtime: None,
         };
-        let argv = build_container_argv(&env, "bash", &[], true);
+        let argv = build_isolated_argv(&env, "bash", &[], true);
         let expected = format!(
-            "type=bind,source={},target={}",
+            "{}:{}",
             main_repo.path().display(),
             main_repo.path().display()
         );
         assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--mount" && w[1] == expected),
+            argv.windows(2).any(|w| w[0] == "-v" && w[1] == expected),
             "{argv:?}"
         );
     }
 
-    // `environment_path` is often enwiro's own stable per-env symlink, not the
-    // env's real underlying path -- e.g. a git worktree's main repo references
-    // the worktree's own *real* absolute path in its reverse `.git/worktrees/
-    // <name>/gitdir` pointer, which needs to resolve inside the container too.
+    // `msb` refuses to mount a symlinked source at all (verified hands-on:
+    // ELOOP), unlike podman -- so `environment_path` must already be
+    // resolved by the time it reaches `build_isolated_argv`, via
+    // `canonical_environment_path` (tested separately below). This
+    // resolves the same real path a git worktree's own internal bookkeeping
+    // (`.git/worktrees/<name>/gitdir`) references, so one mount serves both
+    // needs -- no more "mount the symlink AND the real path" as under podman.
     #[test]
-    fn container_argv_additionally_mounts_the_real_path_behind_a_symlinked_env_path() {
+    fn canonical_environment_path_resolves_a_symlink_to_its_real_target() {
         let real_target = tempfile::tempdir().unwrap();
         let symlink_parent = tempfile::tempdir().unwrap();
         let symlinked_env_path = symlink_parent.path().join("env-symlink");
         std::os::unix::fs::symlink(real_target.path(), &symlinked_env_path).unwrap();
 
-        let env = ContainerEnv {
-            environment_path: symlinked_env_path.to_str().unwrap(),
-            ..test_env(false)
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
-
-        let symlink_mount = format!(
-            "type=bind,source={},target={}",
-            symlinked_env_path.display(),
-            symlinked_env_path.display()
-        );
-        let real_mount = format!(
-            "type=bind,source={},target={}",
-            real_target.path().display(),
-            real_target.path().display()
-        );
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--mount" && w[1] == symlink_mount),
-            "missing the primary symlink mount: {argv:?}"
-        );
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--mount" && w[1] == real_mount),
-            "missing the additive real-path mount: {argv:?}"
+        let resolved = canonical_environment_path(symlinked_env_path.to_str().unwrap()).unwrap();
+        // `tempdir()` paths can themselves sit behind a symlink (e.g. macOS's
+        // `/tmp` -> `/private/tmp`), so compare against the target's own
+        // canonicalization rather than its raw path.
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(real_target.path())
+                .unwrap()
+                .to_str()
+                .unwrap()
         );
     }
 
     #[test]
-    fn container_argv_mounts_a_non_symlinked_env_path_only_once() {
-        let real_dir = tempfile::tempdir().unwrap();
-        let env = ContainerEnv {
-            environment_path: real_dir.path().to_str().unwrap(),
-            ..test_env(false)
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
+    fn canonical_environment_path_errors_when_it_does_not_exist() {
+        assert!(canonical_environment_path("/nonexistent-enwiro-env-path").is_err());
+    }
 
-        let mount_count = argv.windows(2).filter(|w| w[0] == "--mount").count();
+    #[test]
+    fn isolated_argv_mounts_environment_path_exactly_once() {
+        let real_dir = tempfile::tempdir().unwrap();
+        let env = IsolatedEnv {
+            environment_path: real_dir.path().to_str().unwrap(),
+            ..test_env()
+        };
+        let argv = build_isolated_argv(&env, "bash", &[], true);
+
+        let mount_count = argv.windows(2).filter(|w| w[0] == "-v").count();
         assert_eq!(mount_count, 1, "{argv:?}");
     }
 
     #[test]
-    fn container_argv_mounts_env_path_at_same_path_and_sets_env() {
-        let env = ContainerEnv {
-            image: "enwiro/my-proj",
+    fn isolated_argv_mounts_env_path_at_same_path_and_sets_env() {
+        let env = IsolatedEnv {
+            image: "my-snapshot",
             environment_path: "/home/u/.enwiro_envs/my-proj/my-proj",
             environment_name: "my-proj",
-            inject_proxy_shim: false,
             git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
-            oci_runtime: None,
         };
-        let argv = build_container_argv(&env, "bash", &["-l".to_string()], true);
-        // Before the image: run flags + bind mount + cwd + ENWIRO_ENV (plus
-        // `--user`/HOME on Linux, checked separately).
-        let image_idx = argv.iter().position(|a| a == "enwiro/my-proj").unwrap();
+        let argv = build_isolated_argv(&env, "bash", &["-l".to_string()], true);
+        // Before the image: `run` + memory + tty flag + mount + cwd +
+        // ENWIRO_ENV (plus `-u` on Linux, checked separately).
+        let image_idx = argv.iter().position(|a| a == "my-snapshot").unwrap();
         let head = &argv[..image_idx];
-        assert_eq!(&argv[..3], &["run", "--rm", "-it"]);
+        assert_eq!(&argv[..4], &["run", "-m", "4G", "-t"]);
         assert!(
-            head.windows(2).any(|w| w[0] == "--mount"
-                && w[1] == "type=bind,source=/home/u/.enwiro_envs/my-proj/my-proj,target=/home/u/.enwiro_envs/my-proj/my-proj"),
+            head.windows(2).any(|w| w[0] == "-v"
+                && w[1]
+                    == "/home/u/.enwiro_envs/my-proj/my-proj:/home/u/.enwiro_envs/my-proj/my-proj"),
             "{argv:?}"
         );
         assert!(
@@ -842,158 +602,63 @@ mod tests {
                 .any(|w| w[0] == "-e" && w[1] == "ENWIRO_ENV=my-proj"),
             "{argv:?}"
         );
-        // The command is wrapped `sh -c <prelude> sh <command> <args>`.
-        assert_eq!(&argv[image_idx + 1..image_idx + 3], &["sh", "-c"]);
-        assert_eq!(&argv[image_idx + 4..], &["sh", "bash", "-l"]);
+        // The command is wrapped `-- sh -c <prelude> sh <command> <args>`.
+        assert_eq!(&argv[image_idx + 1..image_idx + 4], &["--", "sh", "-c"]);
+        assert_eq!(&argv[image_idx + 5..], &["sh", "bash", "-l"]);
     }
 
-    // On Linux the container runs as the host uid/gid under `--userns=keep-id`,
-    // so bind-mounted files (owned by that user) are accessed as their owner and
-    // the image's own passwd entry resolves `HOME` correctly (no override needed).
+    // Non-root hardening (issue #682's original motivation) is preserved even
+    // though ownership itself needs no special handling under microsandbox.
     #[test]
     #[cfg(target_os = "linux")]
-    fn container_argv_runs_as_host_uid_on_linux() {
-        let argv = build_container_argv(&test_env(false), "bash", &[], true);
+    fn isolated_argv_runs_as_host_uid_on_linux() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         assert!(
             argv.windows(2)
-                .any(|w| w[0] == "--user" && w[1] == format!("{}:{}", host_uid(), host_gid())),
+                .any(|w| w[0] == "-u" && w[1] == format!("{}:{}", host_uid(), host_gid())),
             "{argv:?}"
         );
-        assert!(argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
     }
 
-    // A microVM-backed runtime (e.g. `krun`) ignores `--userns` entirely and
-    // always runs as uid=0 in its own guest kernel -- verified hands-on -- so
-    // these flags would be silently inert, not just redundant.
     #[test]
-    fn container_argv_skips_userns_keep_id_for_krun() {
-        let env = ContainerEnv {
-            oci_runtime: Some("/usr/bin/krun"),
-            ..test_env(false)
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
-        assert!(!argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
-        assert!(!argv.contains(&"--user".to_string()), "{argv:?}");
+    fn isolated_argv_uses_no_tty_when_not_interactive() {
+        let argv = build_isolated_argv(&test_env(), "echo", &[], false);
+        assert!(argv.contains(&"--no-tty".to_string()));
+        assert!(!argv.contains(&"-t".to_string()));
     }
 
-    // Only krun is verified to ignore --userns; an unrelated custom runtime
-    // (e.g. an explicit crun/runc path) still needs and supports it, so
-    // dropping it there would silently reopen the root-owned-files problem
-    // these flags exist to prevent.
+    // `msb`'s own default guest memory (~517M, verified hands-on) OOM-kills
+    // real dev tools (a Node/Bun-based CLI, a Rust build) with no explanation
+    // beyond a bare "Killed" -- every isolated launch needs a real ceiling.
     #[test]
-    fn container_argv_keeps_userns_keep_id_for_a_non_krun_runtime() {
-        let env = ContainerEnv {
-            oci_runtime: Some("/usr/bin/crun"),
-            ..test_env(false)
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
-        assert!(argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
+    fn isolated_argv_always_sizes_guest_memory() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         assert!(
             argv.windows(2)
-                .any(|w| w[0] == "--user" && w[1] == format!("{}:{}", host_uid(), host_gid())),
+                .any(|w| w[0] == "-m" && w[1] == ISOLATED_GUEST_MEMORY),
             "{argv:?}"
         );
     }
 
-    // An empty string means "unset", matching the config field being absent,
-    // not a literal (broken) `--runtime=` argv token.
+    // The prelude always ends by exec'ing the real command -- no tool-specific
+    // seeding happens (that's on the image or the tool's own config).
     #[test]
-    fn container_argv_treats_empty_runtime_string_as_unset() {
-        let env = ContainerEnv {
-            oci_runtime: Some(""),
-            ..test_env(false)
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
-        assert!(
-            !argv.iter().any(|a| a.starts_with("--runtime=")),
-            "{argv:?}"
-        );
-        assert!(argv.contains(&"--userns=keep-id".to_string()), "{argv:?}");
-    }
-
-    #[test]
-    fn container_argv_passes_runtime_flag_when_configured() {
-        let env = ContainerEnv {
-            oci_runtime: Some("/usr/bin/krun"),
-            ..test_env(false)
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
-        assert!(
-            argv.contains(&"--runtime=/usr/bin/krun".to_string()),
-            "{argv:?}"
-        );
-    }
-
-    // libkrun's default guest RAM is 1 GiB with no swap, so without an
-    // explicit size a parallel build OOM-kills inside the microVM. Cheap to
-    // set generously: guest memory is faulted in lazily and returned on free
-    // (free-page reporting), so the ceiling doesn't reserve host RAM.
-    #[test]
-    fn container_argv_sizes_krun_guest_memory_to_half_the_host() {
-        let env = ContainerEnv {
-            oci_runtime: Some("/usr/bin/krun"),
-            ..test_env(false)
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
-        let expected = format!("--memory={}m", half_host_memory_mib().unwrap());
-        assert!(argv.contains(&expected), "{argv:?}");
-    }
-
-    // A plain container shares host RAM natively; `-m` there would *add* a
-    // cap that doesn't exist today, so the flag stays krun-only.
-    #[test]
-    fn container_argv_sets_no_memory_limit_for_non_krun_launches() {
-        for env in [
-            test_env(false),
-            ContainerEnv {
-                oci_runtime: Some("/usr/bin/crun"),
-                ..test_env(false)
-            },
-        ] {
-            let argv = build_container_argv(&env, "bash", &[], true);
-            assert!(!argv.iter().any(|a| a.starts_with("--memory=")), "{argv:?}");
-        }
-    }
-
-    #[test]
-    fn container_argv_omits_runtime_flag_by_default() {
-        let argv = build_container_argv(&test_env(false), "bash", &[], true);
-        assert!(
-            !argv.iter().any(|a| a.starts_with("--runtime=")),
-            "{argv:?}"
-        );
-    }
-
-    // A default `.claude.json` is seeded only if absent, then the real command
-    // is exec'd, so a fresh container skips Claude's onboarding wizard (theme +
-    // workspace-trust) without baking anything into the image.
-    #[test]
-    fn container_argv_seeds_onboarding_then_execs_command() {
-        let argv = build_container_argv(&test_env(false), "claude", &[], true);
+    fn isolated_argv_prelude_execs_the_command() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         let script = &argv[argv.iter().position(|a| a == "-c").unwrap() + 1];
-        assert!(script.contains("hasCompletedOnboarding"), "{script}");
-        // both onboarding gates: theme/welcome AND per-workspace trust.
-        assert!(script.contains("hasTrustDialogAccepted"), "{script}");
-        // targets the home-root config path by default, keyed to the workdir.
-        assert!(script.contains(r#"f="$HOME/.claude.json""#), "{script}");
-        assert!(script.contains(r#""$(pwd)""#), "{script}");
-        assert!(
-            script.contains(".claude.json") && script.contains("[ -f"),
-            "seeds only when absent: {script}"
-        );
         assert!(script.trim_end().ends_with(r#"exec "$@""#), "{script}");
     }
 
     // Host git identity (issue #725): the host's ~/.gitconfig is not mounted,
-    // so without seeding every `git commit` in a fresh container fails with
+    // so without seeding every `git commit` in a fresh sandbox fails with
     // "Author identity unknown". The daemon passes the identity as env...
     #[test]
-    fn container_argv_passes_git_identity_env_when_known() {
-        let env = ContainerEnv {
+    fn isolated_argv_passes_git_identity_env_when_known() {
+        let env = IsolatedEnv {
             git_identity: Some(("Jane Dev", "jane@dev.example")),
-            ..test_env(false)
+            ..test_env()
         };
-        let argv = build_container_argv(&env, "bash", &[], true);
+        let argv = build_isolated_argv(&env, "bash", &[], true);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "-e" && w[1] == "ENWIRO_GIT_USER_NAME=Jane Dev"),
@@ -1007,8 +672,8 @@ mod tests {
     }
 
     #[test]
-    fn container_argv_omits_git_identity_env_when_unknown() {
-        let argv = build_container_argv(&test_env(false), "bash", &[], true);
+    fn isolated_argv_omits_git_identity_env_when_unknown() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
         assert!(
             !argv
                 .windows(2)
@@ -1023,25 +688,22 @@ mod tests {
     #[test]
     fn prelude_seeds_git_identity_only_when_unresolvable() {
         assert!(
-            CONTAINER_PRELUDE_SCRIPT.contains("! git config --get user.email"),
-            "{CONTAINER_PRELUDE_SCRIPT}"
+            ISOLATED_PRELUDE_SCRIPT.contains("! git config --get user.email"),
+            "{ISOLATED_PRELUDE_SCRIPT}"
         );
-        // Written via `git config --global` (git escapes the values), never a
-        // raw printf of shell-interpolated bytes into the file.
         assert!(
-            CONTAINER_PRELUDE_SCRIPT
+            ISOLATED_PRELUDE_SCRIPT
                 .contains(r#"git config --global user.name "$ENWIRO_GIT_USER_NAME""#),
-            "{CONTAINER_PRELUDE_SCRIPT}"
+            "{ISOLATED_PRELUDE_SCRIPT}"
         );
         assert!(
-            CONTAINER_PRELUDE_SCRIPT
+            ISOLATED_PRELUDE_SCRIPT
                 .contains(r#"git config --global user.email "$ENWIRO_GIT_USER_EMAIL""#),
-            "{CONTAINER_PRELUDE_SCRIPT}"
+            "{ISOLATED_PRELUDE_SCRIPT}"
         );
-        // Skipped entirely on an image without git rather than failing the launch.
         assert!(
-            CONTAINER_PRELUDE_SCRIPT.contains("command -v git"),
-            "{CONTAINER_PRELUDE_SCRIPT}"
+            ISOLATED_PRELUDE_SCRIPT.contains("command -v git"),
+            "{ISOLATED_PRELUDE_SCRIPT}"
         );
     }
 
@@ -1076,166 +738,62 @@ mod tests {
         assert_eq!(host_git_identity("/nonexistent-enwiro-env-path"), None);
     }
 
+    // Isolation is deliberately tool-agnostic: nothing in the argv or prelude
+    // is specific to any particular credential or tool (unlike the pre-ADR-0006
+    // proxy, which was Claude-only).
     #[test]
-    fn container_argv_uses_dash_i_when_not_a_tty() {
-        let argv = build_container_argv(&test_env(false), "echo", &[], false);
-        assert!(argv.contains(&"-i".to_string()));
-        assert!(!argv.contains(&"-it".to_string()));
-    }
-
-    // With the proxy shim enabled, the container gets `--add-host` + the shim
-    // env (`ENWIRO_SHIMS` + `ENWIRO_SHIM_claude`), NOT container-wide `ANTHROPIC_*`
-    // and never a real token. The shim script carries the proxy base URL + a
-    // freshly minted per-launch capability (not a fixed sentinel).
-    #[test]
-    fn container_argv_injects_claude_shim_when_enabled() {
-        let argv = build_container_argv(&test_env(true), "claude", &[], true);
+    fn isolated_argv_and_prelude_have_no_tool_specific_credential_logic() {
+        let argv = build_isolated_argv(&test_env(), "bash", &[], true);
+        assert!(!argv.iter().any(|a| a == "--secret"), "{argv:?}");
         assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--add-host" && w[1] == "host.containers.internal:host-gateway"),
+            !argv.iter().any(|a| a == "--on-secret-violation"),
             "{argv:?}"
         );
         assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "-e" && w[1] == "ENWIRO_SHIMS=claude"),
-            "{argv:?}"
-        );
-        let shim = argv
-            .windows(2)
-            .find(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_SHIM_claude="))
-            .map(|w| w[1].clone())
-            .expect("shim env present");
-        assert!(
-            shim.contains(&format!(
-                "ANTHROPIC_BASE_URL=http://host.containers.internal:{}",
-                crate::proxy::CLAUDE_PROXY_PORT
-            )),
-            "{shim}"
-        );
-        // The capability itself: a 64-char hex string (32 random bytes), not a
-        // fixed/predictable value.
-        let capability = shim
-            .lines()
-            .find_map(|line| line.strip_prefix("export CLAUDE_CODE_OAUTH_TOKEN="))
-            .expect("capability line present");
-        assert_eq!(capability.len(), 64, "{capability}");
-        assert!(
-            capability.chars().all(|c| c.is_ascii_hexdigit()),
-            "{capability}"
-        );
-        // The container is ephemeral/non-root, so claude's self-updater can't
-        // write anywhere and would just fail; the shim disables it.
-        assert!(shim.contains("export DISABLE_AUTOUPDATER=1"), "{shim}");
-        // The proxy vars live only in the shim, never as container-wide env.
-        assert!(
-            !argv
-                .windows(2)
-                .any(|w| w[0] == "-e" && w[1].starts_with("ANTHROPIC_BASE_URL=")),
-            "{argv:?}"
-        );
-        // No real token anywhere.
-        assert!(
-            !argv.iter().any(|a| a.contains("ANTHROPIC_AUTH_TOKEN")),
-            "{argv:?}"
+            !ISOLATED_PRELUDE_SCRIPT.contains("CLAUDE"),
+            "{ISOLATED_PRELUDE_SCRIPT}"
         );
     }
 
-    // Each launch mints its own capability, not a shared/fixed one: two calls
-    // must not produce the same value.
+    // A path containing a colon can't be mounted at all (verified hands-on:
+    // `msb` itself refuses it) -- documented as a known limitation rather than
+    // silently mis-mounted, so at minimum this doesn't regress into producing
+    // an argv that *looks* fine but breaks at `msb`'s own argument parsing in
+    // a different way (e.g. splitting mid-path).
     #[test]
-    fn container_argv_mints_a_distinct_capability_per_call() {
-        let extract_capability = |argv: &[String]| -> String {
-            argv.windows(2)
-                .find(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_SHIM_claude="))
-                .unwrap()[1]
-                .lines()
-                .find_map(|line| line.strip_prefix("export CLAUDE_CODE_OAUTH_TOKEN="))
-                .unwrap()
-                .to_string()
-        };
-        let first = extract_capability(&build_container_argv(&test_env(true), "claude", &[], true));
-        let second =
-            extract_capability(&build_container_argv(&test_env(true), "claude", &[], true));
-        assert_ne!(first, second);
-    }
-
-    // Without the proxy shim (no token configured), no shim env or `--add-host`
-    // is added. (The prelude script always mentions `ENWIRO_SHIM` as the reader,
-    // so check for the `-e` injection specifically, not the substring.)
-    #[test]
-    fn container_argv_no_proxy_when_disabled() {
-        let argv = build_container_argv(&test_env(false), "bash", &[], true);
-        assert!(
-            !argv
-                .windows(2)
-                .any(|w| w[0] == "-e" && w[1].starts_with("ENWIRO_SHIM")),
-            "{argv:?}"
-        );
-        assert!(!argv.iter().any(|a| a == "--add-host"), "{argv:?}");
-    }
-
-    // A path containing a colon must not be split by the engine: `--mount` keeps
-    // it intact as `source=`/`target=`, where `-v src:dst` would mis-split it.
-    #[test]
-    fn container_argv_mount_survives_colon_in_path() {
+    fn mount_arg_keeps_path_intact_for_msb_to_validate() {
         let colon_path = "/home/u/.enwiro_envs/proj:1/proj:1";
-        let env = ContainerEnv {
-            image: "enwiro/x",
-            environment_path: colon_path,
-            environment_name: "x",
-            inject_proxy_shim: false,
-            git_identity: None,
-            workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
-            oci_runtime: None,
-        };
-        let argv = build_container_argv(&env, "bash", &[], true);
-        // The path appears verbatim inside a single `--mount` value...
-        let mount_idx = argv
-            .iter()
-            .position(|a| a == "--mount")
-            .expect("has --mount");
-        let mount_val = &argv[mount_idx + 1];
         assert_eq!(
-            mount_val,
-            &format!("type=bind,source={colon_path},target={colon_path}")
-        );
-        // ...and never as a bare `src:dst` `-v` value (which the engine would
-        // mis-split on the colon).
-        assert!(!argv.iter().any(|a| a == "-v"));
-        assert!(
-            !argv
-                .iter()
-                .any(|a| a.contains(&format!("{colon_path}:{colon_path}")))
+            mount_arg(colon_path),
+            ["-v".to_string(), format!("{colon_path}:{colon_path}")]
         );
     }
 
     // A containerized terminal must preserve the terminal's own args
-    // (e.g. `kitty --session foo`), not just run the inner container shell.
+    // (e.g. `kitty --session foo`), not just run the inner sandbox shell.
     #[test]
-    fn terminal_container_args_preserve_terminal_args() {
+    fn terminal_isolated_args_preserve_terminal_args() {
         let terminal_args = vec!["--session".to_string(), "foo".to_string()];
-        let env = ContainerEnv {
-            image: "enwiro/my-proj",
+        let env = IsolatedEnv {
+            image: "my-snapshot",
             environment_path: "/p",
             environment_name: "my-proj",
-            inject_proxy_shim: false,
             git_identity: None,
             workspaces_directory: Path::new("/nonexistent-workspaces-dir"),
-            oci_runtime: None,
         };
-        let args = build_terminal_container_args(&terminal_args, "podman", &env);
+        let args = build_terminal_isolated_args(&terminal_args, &env);
         // The terminal's own args come first (kitty parses them), then the
-        // container invocation for the inner shell.
+        // `msb` invocation for the inner shell.
         assert_eq!(&args[0], "--session");
         assert_eq!(&args[1], "foo");
-        assert_eq!(&args[2], "podman");
+        assert_eq!(&args[2], MSB_BIN);
         assert_eq!(&args[3], "run");
         assert!(args.iter().any(|a| a == "bash"));
     }
 
     #[test]
-    fn host_path_returns_command_unchanged_when_no_image() {
-        // No `enwiro/__nope__` image exists → host path.
+    fn host_path_returns_command_unchanged_when_not_isolated() {
+        // No `.enwiro.toml` isolation policy for this env -> host path.
         let res = resolve_launch(
             &LaunchResolveParams {
                 env_name: "__nope__".to_string(),
@@ -1245,14 +803,41 @@ mod tests {
                 interactive: false,
             },
             Path::new("/nonexistent-workspaces-dir"),
-            None,
-        );
+        )
+        .unwrap();
         assert_eq!(res.program, "echo");
         assert_eq!(res.args, vec!["hi".to_string()]);
         assert_eq!(
             res.env_vars,
             vec![("ENWIRO_ENV".to_string(), "__nope__".to_string())]
         );
+    }
+
+    // `isolate = true` with no image resolvable anywhere is an error, not a
+    // silent host fallback -- the caller turns this into the same
+    // `launch.resolve` failure path a down daemon already has.
+    #[test]
+    fn isolate_true_without_an_image_is_an_error() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".enwiro.toml"),
+            "[isolation]\nisolate = true\n",
+        )
+        .unwrap();
+        let err = resolve_launch(
+            &LaunchResolveParams {
+                env_name: "x".to_string(),
+                env_path: project.path().to_str().unwrap().to_string(),
+                command: "bash".to_string(),
+                args: vec![],
+                interactive: false,
+            },
+            Path::new("/nonexistent-workspaces-dir"),
+        )
+        .unwrap_err();
+        let err = err.to_string();
+        assert!(err.contains("isolate"), "{err}");
+        assert!(err.contains("image"), "{err}");
     }
 
     #[test]

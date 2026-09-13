@@ -41,7 +41,6 @@ async fn spawn_server(tempdir: &TempDir) -> std::path::PathBuf {
             socket_path_clone,
             active_env,
             std::path::PathBuf::from("/tmp"),
-            None,
         )
         .await;
     });
@@ -150,7 +149,6 @@ async fn env_current_returns_state_when_set() {
             socket_path_clone,
             active_env_clone,
             std::path::PathBuf::from("/tmp"),
-            None,
         )
         .await;
     });
