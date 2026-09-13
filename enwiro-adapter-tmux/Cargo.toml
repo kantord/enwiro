@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-adapter-tmux"
-version = "0.1.23"
+version = "0.1.24"
 edition = "2024"
 description = "tmux adapter for enwiro"
 license = "MIT OR Apache-2.0"

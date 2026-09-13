@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.12.1...enwiro-sdk-v0.12.2) - 2026-09-13
+
+### Added
+
+- containerization improvements ([#794](https://github.com/kantord/enwiro/pull/794))
+
+### Fixed
+
+- *(deps)* update rust crate dirs to v7 ([#817](https://github.com/kantord/enwiro/pull/817))
+
+### Other
+
+- relicense to MIT OR Apache-2.0, add cargo-deny ([#630](https://github.com/kantord/enwiro/pull/630)) ([#829](https://github.com/kantord/enwiro/pull/829))
+- *(deps)* update rust crate rstest to v0.27.0 ([#814](https://github.com/kantord/enwiro/pull/814))
+
 ## [0.12.1](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.12.0...enwiro-sdk-v0.12.1) - 2026-09-11
 
 ### Added

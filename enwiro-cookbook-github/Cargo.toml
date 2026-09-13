@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-cookbook-github"
-version = "0.1.29"
+version = "0.1.30"
 edition = "2024"
 description = "GitHub PR cookbook for enwiro"
 license = "MIT OR Apache-2.0"

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.63](https://github.com/kantord/enwiro/compare/enwiro-v0.3.62...enwiro-v0.3.63) - 2026-09-13
+
+### Fixed
+
+- *(deps)* update rust crate dirs to v7 ([#817](https://github.com/kantord/enwiro/pull/817))
+- show possible status commands in enw mark ([#808](https://github.com/kantord/enwiro/pull/808))
+
+### Other
+
+- relicense to MIT OR Apache-2.0, add cargo-deny ([#630](https://github.com/kantord/enwiro/pull/630)) ([#829](https://github.com/kantord/enwiro/pull/829))
+- *(deps)* update rust crate rstest to v0.27.0 ([#814](https://github.com/kantord/enwiro/pull/814))
+
 ## [0.3.62](https://github.com/kantord/enwiro/compare/enwiro-v0.3.61...enwiro-v0.3.62) - 2026-09-11
 
 ### Added
