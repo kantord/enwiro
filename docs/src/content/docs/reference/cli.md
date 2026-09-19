@@ -28,6 +28,7 @@ This document contains the help content for the `enw` command-line program.
 * [`enw rm`↴](#enw-rm)
 * [`enw run`↴](#enw-run)
 * [`enw shell`↴](#enw-shell)
+* [`enw stale`↴](#enw-stale)
 * [`enw wrap`↴](#enw-wrap)
 
 ## `enw`
@@ -47,6 +48,7 @@ This document contains the help content for the `enw` command-line program.
 * `rm` — Remove an environment
 * `run` — Run a command via the active environment's adapter
 * `shell` — Run your shell inside the current environment, waiting while it is being prepared. Intended as a terminal emulator's configured shell: with no environment it degrades to the plain shell.
+* `stale` — List environments that have not been used in a while
 * `wrap` — Run an application/command inside an environment
 
 ###### **Options:**
@@ -265,6 +267,23 @@ Run your shell inside the current environment, waiting while it is being prepare
 * `--timeout <TIMEOUT>` — Seconds to wait for an environment that is still being prepared before falling back to a plain shell. 0 waits forever
 
   Default value: `30`
+
+
+
+## `enw stale`
+
+List environments that have not been used in a while
+
+**Usage:** `enw stale [OPTIONS]`
+
+###### **Options:**
+
+* `--days <DAYS>` — Consider an environment stale after this many days without activity
+
+  Default value: `30`
+* `--json` — Output in JSON lines format
+* `--rm` — Remove the listed environments whose status is `done` (merged/closed). Other stale environments (active, waiting, ready, or unknown status) are left untouched even though they are listed
+* `-y`, `--yes` — Skip the confirmation prompt when removing with --rm
 
 
 

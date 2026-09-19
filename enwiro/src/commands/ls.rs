@@ -2,7 +2,6 @@ use anyhow::{Context, anyhow};
 use console::{Term, style, truncate_str};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::Path;
 
 use crate::context::CommandContext;
 use crate::environments::Environment;
@@ -91,7 +90,7 @@ pub fn status_label(status: Option<&Status>) -> &'static str {
     }
 }
 
-fn colorize_status(label: &str) -> String {
+pub(crate) fn colorize_status(label: &str) -> String {
     match label {
         "active" => style(label).green().to_string(),
         "waiting" => style(label).yellow().to_string(),
@@ -306,29 +305,8 @@ fn write_envs<W: Write>(
 ) -> anyhow::Result<HashSet<String>> {
     let mut envs: Vec<Environment> = context.get_all_environments()?.into_values().collect();
 
-    let mut meta_map: HashMap<String, EnvStats> = HashMap::new();
-    for env in &envs {
-        let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
-        let meta = crate::usage_stats::load_env_meta(&env_dir);
-        if !meta.signals.activation_buffer.is_empty()
-            || meta.description.is_some()
-            || meta.status.is_some()
-            || meta.cookbook.is_some()
-        {
-            meta_map.insert(env.name.clone(), meta);
-        }
-    }
-    let legacy_stats = crate::usage_stats::load_stats_default();
-    for env in &envs {
-        if !meta_map.contains_key(&env.name)
-            && let Some(s) = legacy_stats.envs.get(&env.name)
-        {
-            meta_map.insert(env.name.clone(), s.clone());
-        }
-    }
-    for env in &envs {
-        meta_map.entry(env.name.clone()).or_default();
-    }
+    let meta_map: HashMap<String, EnvStats> =
+        crate::usage_stats::collect_env_meta_map(&context.config.workspaces_directory, &envs);
 
     if let Some(filter) = status_filter {
         envs.retain(|env| {

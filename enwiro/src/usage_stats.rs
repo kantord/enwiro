@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
+use crate::environments::Environment;
+
 pub use enwiro_daemon::meta::{
     DescriptionSource, EnvStats, load_env_meta, now_timestamp, record_activation_per_env,
     record_cook_metadata_per_env, record_prep_per_env, save_env_meta,
@@ -58,6 +60,42 @@ fn record_activation_to(path: &Path, env_name: &str) {
     if let Err(e) = save_stats(path, &stats) {
         tracing::warn!(error = %e, "Could not save usage stats");
     }
+}
+
+/// Resolve per-environment metadata for a set of environments: the
+/// per-env `meta.json` (new format) if it carries any recorded data, else
+/// the legacy centralized `usage-stats.json` entry, else an empty default
+/// so every environment gets an entry. Shared by `ls` and `stale`, which
+/// both need "what do we know about this env's usage" from the same two
+/// sources.
+pub fn collect_env_meta_map(
+    workspaces_directory: &str,
+    envs: &[Environment],
+) -> HashMap<String, EnvStats> {
+    let mut meta_map: HashMap<String, EnvStats> = HashMap::new();
+    for env in envs {
+        let env_dir = Path::new(workspaces_directory).join(&env.name);
+        let meta = load_env_meta(&env_dir);
+        if !meta.signals.activation_buffer.is_empty()
+            || meta.description.is_some()
+            || meta.status.is_some()
+            || meta.cookbook.is_some()
+        {
+            meta_map.insert(env.name.clone(), meta);
+        }
+    }
+    let legacy_stats = load_stats_default();
+    for env in envs {
+        if !meta_map.contains_key(&env.name)
+            && let Some(s) = legacy_stats.envs.get(&env.name)
+        {
+            meta_map.insert(env.name.clone(), s.clone());
+        }
+    }
+    for env in envs {
+        meta_map.entry(env.name.clone()).or_default();
+    }
+    meta_map
 }
 
 #[cfg(test)]
