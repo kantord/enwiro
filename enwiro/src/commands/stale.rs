@@ -167,6 +167,22 @@ fn stale_prune<W: Write>(
         .collect();
 
     if done_names.is_empty() {
+        if entries.is_empty() {
+            writeln!(
+                context.writer,
+                "No stale environments found (nothing idle for {} days).",
+                args.days
+            )
+            .context("Could not write to output")?;
+        } else {
+            writeln!(
+                context.writer,
+                "{} stale environment(s) found, but none are `done` - nothing to prune. \
+                 Run `enw stale ls` to see them.",
+                entries.len()
+            )
+            .context("Could not write to output")?;
+        }
         return Ok(());
     }
 
@@ -592,6 +608,53 @@ mod tests {
             temp_dir.path().join("old-active").exists(),
             "prune must only remove environments whose status is done, \
              not merely stale ones"
+        );
+    }
+
+    #[rstest]
+    fn test_stale_prune_reports_when_nothing_is_stale(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+
+        stale(&mut context_object, prune(30, true)).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("No stale environments found"),
+            "prune must say something even when there's nothing stale, got: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_stale_prune_reports_when_stale_but_none_are_done(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("old-active");
+
+        let now = crate::usage_stats::now_timestamp();
+        write_meta(
+            &temp_dir.path().join("old-active"),
+            &EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now - 60 * SECONDS_PER_DAY, 1.0)],
+                    ..Default::default()
+                },
+                status: Some(Status::Cooked {
+                    phase: Some(enwiro_daemon::meta::CookedPhase::Active),
+                    detail: None,
+                }),
+                ..Default::default()
+            },
+        );
+
+        stale(&mut context_object, prune(30, true)).unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("1 stale environment(s) found") && output.contains("enw stale ls"),
+            "prune must explain why nothing was removed, got: {output}"
         );
     }
 

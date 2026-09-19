@@ -1,4 +1,6 @@
-//! Shared git2 helpers for cookbooks (behind the `git` feature).
+//! Shared git helpers for cookbooks (behind the `git` feature) - most via
+//! git2, `remove_worktree` by shelling out to the `git` binary instead
+//! (see its own doc comment for why).
 //!
 //! Single source of truth for "what is this repo's remote default branch" -
 //! the git and github cookbooks both fork new branches from it and must

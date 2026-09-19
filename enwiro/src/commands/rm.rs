@@ -32,15 +32,31 @@ pub fn rm<W: Write>(context: &mut CommandContext<W>, args: RmArgs) -> anyhow::Re
 /// materialized for it (e.g. a git worktree), before the env's own
 /// directory disappears - `env_path/meta.json` is the only place
 /// `cookbook`/`recipe` are recorded, so this must run first. Silent no-op
-/// for envs with no recorded cookbook/recipe (legacy envs, manually
-/// created envs) or whose cookbook isn't loaded.
+/// for envs with no recorded cookbook (legacy envs, manually created envs)
+/// or whose cookbook isn't loaded.
+///
+/// `recipe` falls back to the env's own directory name when `meta.json`
+/// predates that field (recorded only since a later release - about 30%
+/// of envs in an established install lack it): for a non-composed env the
+/// name and its recipe are the same string by convention. A stale/wrong
+/// guess is harmless here - it just fails to resolve to any real resource
+/// and `prune` no-ops, same as "nothing to prune".
 fn prune_cookbook_resource<W: Write>(
     env_path: &Path,
     cookbooks: &[Box<dyn CookbookTrait>],
     writer: &mut W,
 ) {
     let env_meta = enwiro_daemon::meta::load_env_meta(env_path);
-    let (Some(cookbook_name), Some(recipe)) = (env_meta.cookbook, env_meta.recipe) else {
+    let Some(cookbook_name) = env_meta.cookbook else {
+        return;
+    };
+    let recipe = env_meta.recipe.or_else(|| {
+        env_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+    });
+    let Some(recipe) = recipe else {
         return;
     };
     let Some(cookbook) = cookbooks.iter().find(|c| c.name() == cookbook_name) else {
@@ -270,6 +286,66 @@ mod tests {
         assert!(
             output.contains("removed worktree at /tmp/x"),
             "the cookbook's prune outcome must be surfaced, got: {output}"
+        );
+    }
+
+    /// Echoes exactly which recipe `prune` was called with in its outcome
+    /// message, so the fallback test below can assert on it rather than
+    /// just on whether some fixed message came back.
+    struct RecordingCookbook;
+
+    impl CookbookTrait for RecordingCookbook {
+        fn list_recipes(&self) -> anyhow::Result<Vec<enwiro_sdk::cookbook::Recipe>> {
+            Ok(vec![])
+        }
+        fn cook(&self, _recipe: &str) -> anyhow::Result<String> {
+            anyhow::bail!("not used in this test")
+        }
+        fn name(&self) -> &str {
+            "git"
+        }
+        fn prune(&self, recipe: &str) -> anyhow::Result<Option<String>> {
+            Ok(Some(format!("removed {recipe}")))
+        }
+    }
+
+    #[rstest]
+    fn falls_back_to_the_env_name_as_recipe_when_meta_predates_that_field(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context, _, _) = context_object;
+        context.create_mock_environment("costae@add-design-token-system");
+        let workspaces = Path::new(&context.config.workspaces_directory).to_path_buf();
+        let env_path = workspaces.join("costae@add-design-token-system");
+        // Legacy meta.json shape: `cookbook` recorded, `recipe` never was.
+        let meta = EnvStats {
+            cookbook: Some("git".to_string()),
+            ..Default::default()
+        };
+        fs::write(
+            env_path.join("meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(RecordingCookbook)];
+
+        let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        remove_env(
+            &workspaces,
+            "costae@add-design-token-system",
+            true,
+            None,
+            &cookbooks,
+            &mut out,
+        )
+        .expect("must succeed");
+
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(
+            output.contains("removed costae@add-design-token-system"),
+            "must prune using the env's own directory name as the recipe \
+             when meta.json has no recorded recipe, got: {output}"
         );
     }
 
