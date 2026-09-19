@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, bail};
 use std::io::Write;
 use std::path::Path;
 
@@ -57,11 +57,15 @@ fn last_signal_timestamp(meta: &EnvStats) -> Option<i64> {
         .max()
 }
 
-/// When an environment has no recorded usage signal, its directory's mtime
-/// stands in for "last touched" - close enough to creation time for a
-/// never-activated env, and it also picks up direct filesystem edits.
+/// When an environment has no recorded usage signal, its own mtime stands
+/// in for "last touched" - close enough to creation time for a
+/// never-activated env. `symlink_metadata` (not `metadata`) matters here:
+/// a legacy env is a bare symlink at `env_dir` itself (see
+/// `Environment::get_all`), and following it would report the mtime of
+/// whatever project directory it happens to point at instead of the
+/// env's own history.
 fn directory_mtime(env_dir: &Path) -> Option<i64> {
-    let modified = std::fs::metadata(env_dir).ok()?.modified().ok()?;
+    let modified = std::fs::symlink_metadata(env_dir).ok()?.modified().ok()?;
     let seconds = modified
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -74,8 +78,14 @@ pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyh
     let meta_map =
         crate::usage_stats::collect_env_meta_map(&context.config.workspaces_directory, &envs);
 
+    if args.days < 0 {
+        bail!("--days must be zero or positive, got {}", args.days);
+    }
     let now = crate::usage_stats::now_timestamp();
-    let threshold_seconds = args.days * SECONDS_PER_DAY;
+    let threshold_seconds = args
+        .days
+        .checked_mul(SECONDS_PER_DAY)
+        .context("--days value is too large")?;
 
     let mut entries: Vec<StaleEntry> = envs
         .iter()
@@ -126,21 +136,64 @@ pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyh
     }
 
     if args.rm {
-        let workspaces_directory = Path::new(&context.config.workspaces_directory).to_path_buf();
-        let active_env = std::env::var(ENWIRO_ENV_VAR).ok();
-        for entry in &entries {
-            if !matches!(entry.status, Some(Status::Done { .. })) {
-                continue;
+        let done_names: Vec<&str> = entries
+            .iter()
+            .filter(|e| matches!(e.status, Some(Status::Done { .. })))
+            .map(|e| e.name.as_str())
+            .collect();
+
+        if !done_names.is_empty() {
+            if !args.yes {
+                writeln!(
+                    context.writer,
+                    "\nThe following {} done environment(s) will be removed:",
+                    done_names.len()
+                )
+                .context("Could not write to output")?;
+                for name in &done_names {
+                    writeln!(context.writer, "  {name}").context("Could not write to output")?;
+                }
+                match crate::confirm::confirm("Remove them?") {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        writeln!(context.writer, "Aborted.")
+                            .context("Could not write to output")?;
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        writeln!(context.writer, "{err}").context("Could not write to output")?;
+                        return Ok(());
+                    }
+                }
             }
-            if let Err(err) = remove_env(
-                &workspaces_directory,
-                &entry.name,
-                args.yes,
-                active_env.as_deref(),
-                &mut context.writer,
-            ) {
-                writeln!(context.writer, "Could not remove '{}': {err}", entry.name)
+
+            let workspaces_directory =
+                Path::new(&context.config.workspaces_directory).to_path_buf();
+            let active_env = std::env::var(ENWIRO_ENV_VAR).ok();
+            for name in done_names {
+                if active_env.as_deref() == Some(name) {
+                    writeln!(
+                        context.writer,
+                        "Skipping '{name}': it is the currently active environment"
+                    )
                     .context("Could not write to output")?;
+                    continue;
+                }
+                // The confirmation above already covered the whole batch, so
+                // `remove_env` is told `yes: true` here to skip its own
+                // per-item prompt.
+                match remove_env(
+                    &workspaces_directory,
+                    name,
+                    true,
+                    active_env.as_deref(),
+                    &mut context.writer,
+                ) {
+                    Ok(()) => writeln!(context.writer, "Removed '{name}'")
+                        .context("Could not write to output")?,
+                    Err(err) => writeln!(context.writer, "Could not remove '{name}': {err}")
+                        .context("Could not write to output")?,
+                }
             }
         }
     }
@@ -603,6 +656,198 @@ mod tests {
         assert!(
             output.contains("-y"),
             "should hint at -y when it can't prompt, got: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_stale_rm_prints_preview_and_confirmation_error(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("old-done");
+
+        let now = crate::usage_stats::now_timestamp();
+        write_meta(
+            &temp_dir.path().join("old-done"),
+            &EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now - 60 * SECONDS_PER_DAY, 1.0)],
+                    ..Default::default()
+                },
+                status: Some(Status::Done { outcome: None }),
+                ..Default::default()
+            },
+        );
+
+        stale(
+            &mut context_object,
+            StaleArgs {
+                days: 30,
+                json: false,
+                rm: true,
+                yes: false,
+            },
+        )
+        .unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("will be removed") && output.contains("old-done"),
+            "should preview what --rm is about to remove before prompting, got: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_stale_rm_reports_each_removal(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("done-a");
+        context_object.create_mock_environment("done-b");
+
+        let now = crate::usage_stats::now_timestamp();
+        for name in ["done-a", "done-b"] {
+            write_meta(
+                &temp_dir.path().join(name),
+                &EnvStats {
+                    signals: UserIntentSignals {
+                        activation_buffer: vec![(now - 60 * SECONDS_PER_DAY, 1.0)],
+                        ..Default::default()
+                    },
+                    status: Some(Status::Done { outcome: None }),
+                    ..Default::default()
+                },
+            );
+        }
+
+        stale(
+            &mut context_object,
+            StaleArgs {
+                days: 30,
+                json: false,
+                rm: true,
+                yes: true,
+            },
+        )
+        .unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            output.contains("Removed 'done-a'") && output.contains("Removed 'done-b'"),
+            "successful removals must be reported, got: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_stale_rm_skips_active_env_with_a_neutral_message(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("active-done");
+
+        let now = crate::usage_stats::now_timestamp();
+        write_meta(
+            &temp_dir.path().join("active-done"),
+            &EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now - 60 * SECONDS_PER_DAY, 1.0)],
+                    ..Default::default()
+                },
+                status: Some(Status::Done { outcome: None }),
+                ..Default::default()
+            },
+        );
+
+        let prior = std::env::var(ENWIRO_ENV_VAR).ok();
+        // SAFETY: serial within this file; no parallel readers of ENWIRO_ENV.
+        unsafe {
+            std::env::set_var(ENWIRO_ENV_VAR, "active-done");
+        }
+        let result = stale(
+            &mut context_object,
+            StaleArgs {
+                days: 30,
+                json: false,
+                rm: true,
+                yes: true,
+            },
+        );
+        unsafe {
+            match &prior {
+                Some(v) => std::env::set_var(ENWIRO_ENV_VAR, v),
+                None => std::env::remove_var(ENWIRO_ENV_VAR),
+            }
+        }
+        result.unwrap();
+
+        assert!(
+            temp_dir.path().join("active-done").exists(),
+            "active env must survive --rm"
+        );
+        let output = context_object.get_output();
+        assert!(
+            output.contains("Skipping 'active-done'") && !output.contains("Could not remove"),
+            "active-env skip must read as expected behavior, not an error, got: {output}"
+        );
+    }
+
+    #[rstest]
+    fn test_stale_rejects_negative_days(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context_object, _, _) = context_object;
+
+        let result = stale(
+            &mut context_object,
+            StaleArgs {
+                days: -1,
+                json: false,
+                rm: false,
+                yes: false,
+            },
+        );
+
+        assert!(result.is_err(), "negative --days must be rejected");
+    }
+
+    #[rstest]
+    fn test_stale_falls_back_to_symlink_mtime_not_target_mtime_for_legacy_envs(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        let workspaces = temp_dir.path();
+
+        let target = workspaces.join("ancient-target");
+        std::fs::create_dir(&target).unwrap();
+        let ancient_time = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(
+                (crate::usage_stats::now_timestamp() - 200 * SECONDS_PER_DAY) as u64,
+            );
+        std::fs::File::open(&target)
+            .unwrap()
+            .set_modified(ancient_time)
+            .unwrap();
+
+        // A legacy env is a bare symlink at `workspaces/<name>`, created
+        // just now - its own mtime is recent even though its target is
+        // ancient.
+        std::os::unix::fs::symlink(&target, workspaces.join("legacy-fresh")).unwrap();
+
+        stale(
+            &mut context_object,
+            StaleArgs {
+                days: 30,
+                json: false,
+                rm: false,
+                yes: false,
+            },
+        )
+        .unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            !output.contains("legacy-fresh"),
+            "a freshly-linked legacy env must not inherit its ancient target's mtime, got: {output}"
         );
     }
 }
