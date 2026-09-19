@@ -2,11 +2,10 @@ use anyhow::{Context, bail};
 use std::io::Write;
 use std::path::Path;
 
-use crate::commands::ls::{colorize_status, status_label};
 use crate::commands::rm::remove_env;
 use crate::context::CommandContext;
 use crate::environments::Environment;
-use crate::usage_stats::EnvStats;
+use crate::status_display::{colorize_status, status_label};
 use enwiro_daemon::meta::Status;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 
@@ -43,18 +42,6 @@ struct StaleEntry {
     status: Option<Status>,
     last_used: i64,
     days_idle: i64,
-}
-
-/// Most recent timestamp across every recorded usage signal, or `None` if
-/// the environment has never recorded one.
-fn last_signal_timestamp(meta: &EnvStats) -> Option<i64> {
-    meta.signals
-        .activation_buffer
-        .iter()
-        .chain(meta.signals.switch_buffer.iter())
-        .chain(meta.signals.prep_buffer.iter())
-        .map(|(timestamp, _)| *timestamp)
-        .max()
 }
 
 /// When an environment has no recorded usage signal, its own mtime stands
@@ -95,7 +82,10 @@ pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyh
                 return None;
             }
             let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
-            let last_used = last_signal_timestamp(meta).or_else(|| directory_mtime(&env_dir))?;
+            let last_used = meta
+                .signals
+                .most_recent()
+                .or_else(|| directory_mtime(&env_dir))?;
             if now - last_used < threshold_seconds {
                 return None;
             }
@@ -207,6 +197,7 @@ mod tests {
     use crate::test_utils::test_utilities::{
         AdapterLog, FakeContext, NotificationLog, context_object,
     };
+    use crate::usage_stats::EnvStats;
     use enwiro_daemon::meta::UserIntentSignals;
     use rstest::rstest;
 

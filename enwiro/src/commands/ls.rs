@@ -5,6 +5,7 @@ use std::io::Write;
 
 use crate::context::CommandContext;
 use crate::environments::Environment;
+use crate::status_display::{colorize_status, status_label};
 use crate::usage_stats::EnvStats;
 use enwiro_daemon::meta::{CookedPhase, Status};
 use enwiro_sdk::client::{CachedRecipe, EnvScores};
@@ -71,34 +72,6 @@ struct EnvEntry {
     status: Option<Status>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scores: Option<EnvScores>,
-}
-
-pub fn status_label(status: Option<&Status>) -> &'static str {
-    match status {
-        Some(Status::Cooked {
-            phase: Some(CookedPhase::Active),
-            ..
-        }) => "active",
-        Some(Status::Cooked {
-            phase: Some(CookedPhase::Waiting),
-            ..
-        }) => "waiting",
-        Some(Status::Cooked { phase: None, .. }) => "ready",
-        Some(Status::Done { .. }) => "done",
-        Some(Status::Evergreen) => "evergreen",
-        Some(Status::Uncooked) | None => "-",
-    }
-}
-
-pub(crate) fn colorize_status(label: &str) -> String {
-    match label {
-        "active" => style(label).green().to_string(),
-        "waiting" => style(label).yellow().to_string(),
-        "ready" => style(label).cyan().to_string(),
-        "done" => style(label).dim().to_string(),
-        "evergreen" => style(label).blue().to_string(),
-        _ => style(label).dim().to_string(),
-    }
 }
 
 fn matches_filter(status: Option<&Status>, filter: &StatusFilter) -> bool {
