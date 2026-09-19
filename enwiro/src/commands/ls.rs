@@ -2,10 +2,10 @@ use anyhow::{Context, anyhow};
 use console::{Term, style, truncate_str};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::path::Path;
 
 use crate::context::CommandContext;
 use crate::environments::Environment;
+use crate::status_display::{colorize_status, status_label};
 use crate::usage_stats::EnvStats;
 use enwiro_daemon::meta::{CookedPhase, Status};
 use enwiro_sdk::client::{CachedRecipe, EnvScores};
@@ -72,34 +72,6 @@ struct EnvEntry {
     status: Option<Status>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scores: Option<EnvScores>,
-}
-
-pub fn status_label(status: Option<&Status>) -> &'static str {
-    match status {
-        Some(Status::Cooked {
-            phase: Some(CookedPhase::Active),
-            ..
-        }) => "active",
-        Some(Status::Cooked {
-            phase: Some(CookedPhase::Waiting),
-            ..
-        }) => "waiting",
-        Some(Status::Cooked { phase: None, .. }) => "ready",
-        Some(Status::Done { .. }) => "done",
-        Some(Status::Evergreen) => "evergreen",
-        Some(Status::Uncooked) | None => "-",
-    }
-}
-
-fn colorize_status(label: &str) -> String {
-    match label {
-        "active" => style(label).green().to_string(),
-        "waiting" => style(label).yellow().to_string(),
-        "ready" => style(label).cyan().to_string(),
-        "done" => style(label).dim().to_string(),
-        "evergreen" => style(label).blue().to_string(),
-        _ => style(label).dim().to_string(),
-    }
 }
 
 fn matches_filter(status: Option<&Status>, filter: &StatusFilter) -> bool {
@@ -306,29 +278,8 @@ fn write_envs<W: Write>(
 ) -> anyhow::Result<HashSet<String>> {
     let mut envs: Vec<Environment> = context.get_all_environments()?.into_values().collect();
 
-    let mut meta_map: HashMap<String, EnvStats> = HashMap::new();
-    for env in &envs {
-        let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
-        let meta = crate::usage_stats::load_env_meta(&env_dir);
-        if !meta.signals.activation_buffer.is_empty()
-            || meta.description.is_some()
-            || meta.status.is_some()
-            || meta.cookbook.is_some()
-        {
-            meta_map.insert(env.name.clone(), meta);
-        }
-    }
-    let legacy_stats = crate::usage_stats::load_stats_default();
-    for env in &envs {
-        if !meta_map.contains_key(&env.name)
-            && let Some(s) = legacy_stats.envs.get(&env.name)
-        {
-            meta_map.insert(env.name.clone(), s.clone());
-        }
-    }
-    for env in &envs {
-        meta_map.entry(env.name.clone()).or_default();
-    }
+    let meta_map: HashMap<String, EnvStats> =
+        crate::usage_stats::collect_env_meta_map(&context.config.workspaces_directory, &envs);
 
     if let Some(filter) = status_filter {
         envs.retain(|env| {

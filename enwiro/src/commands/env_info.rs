@@ -5,9 +5,9 @@ use std::path::Path;
 use anyhow::Context;
 use clap::Args;
 
-use crate::commands::ls::status_label;
 use crate::context::CommandContext;
 use crate::environments::Environment;
+use crate::status_display::status_label;
 use crate::usage_stats::load_env_meta;
 use enwiro_sdk::gear::{Gear, LoadedGear};
 

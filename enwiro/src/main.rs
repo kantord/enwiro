@@ -3,6 +3,7 @@ mod confirm;
 mod context;
 mod environments;
 mod notifier;
+mod status_display;
 mod test_utils;
 mod usage_stats;
 
@@ -22,6 +23,7 @@ use commands::run::{RunArgs, run};
 use commands::run_gear;
 use commands::run_gear::{ENV_FLAG, LONG_YES_FLAG, SHORT_YES_FLAG};
 use commands::shell::{ShellArgs, shell};
+use commands::stale::{StaleArgs, stale};
 use commands::wrap::{WrapArgs, wrap};
 use context::CommandContext;
 use enwiro_daemon::ConfigurationValues;
@@ -61,6 +63,7 @@ enum EnwiroCli {
     Rm(RmArgs),
     Run(RunArgs),
     Shell(ShellArgs),
+    Stale(StaleArgs),
     Wrap(WrapArgs),
 }
 
@@ -165,6 +168,7 @@ fn main() -> anyhow::Result<()> {
         EnwiroCli::Rm(args) => rm(&mut context_object, args),
         EnwiroCli::Run(args) => run(&mut context_object, args),
         EnwiroCli::Shell(args) => shell(&mut context_object, args),
+        EnwiroCli::Stale(args) => stale(&mut context_object, args),
         EnwiroCli::Wrap(args) => wrap(&mut context_object, args),
     };
 

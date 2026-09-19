@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
+use crate::environments::Environment;
+
 pub use enwiro_daemon::meta::{
     DescriptionSource, EnvStats, load_env_meta, now_timestamp, record_activation_per_env,
     record_cook_metadata_per_env, record_prep_per_env, save_env_meta,
@@ -60,6 +62,70 @@ fn record_activation_to(path: &Path, env_name: &str) {
     }
 }
 
+/// Resolve per-environment metadata for a set of environments: the
+/// per-env `meta.json` (new format) if it carries any recorded data, else
+/// the legacy centralized `usage-stats.json` entry, else an empty default
+/// so every environment gets an entry. Shared by `ls` and `stale`, which
+/// both need "what do we know about this env's usage" from the same two
+/// sources.
+///
+/// "Carries any recorded data" checks `most_recent()` (all three signal
+/// buffers), not just `activation_buffer` - an env that has only ever been
+/// `enw prep`'d has real data in `prep_buffer` alone, and dropping it here
+/// would make every caller think the env was never touched.
+pub fn collect_env_meta_map(
+    workspaces_directory: &str,
+    envs: &[Environment],
+) -> HashMap<String, EnvStats> {
+    let mut meta_map: HashMap<String, EnvStats> = HashMap::new();
+    for env in envs {
+        let env_dir = Path::new(workspaces_directory).join(&env.name);
+        let meta = load_env_meta(&env_dir);
+        if meta.signals.most_recent().is_some()
+            || meta.description.is_some()
+            || meta.status.is_some()
+            || meta.cookbook.is_some()
+        {
+            meta_map.insert(env.name.clone(), meta);
+        }
+    }
+    let legacy_stats = load_stats_default();
+    for env in envs {
+        if !meta_map.contains_key(&env.name)
+            && let Some(s) = legacy_stats.envs.get(&env.name)
+        {
+            meta_map.insert(env.name.clone(), s.clone());
+        }
+    }
+    for env in envs {
+        meta_map.entry(env.name.clone()).or_default();
+    }
+    meta_map
+}
+
+/// When was `env_name` last touched, by any means: its recorded usage
+/// signals, or - if it has none - its own on-disk mtime as a stand-in for
+/// when it was created. The single source of truth for "last touched",
+/// shared by every caller that needs it (just `stale` today) instead of
+/// each one combining a meta lookup with its own mtime fallback.
+///
+/// `symlink_metadata` (not `metadata`) matters here: a legacy env is a
+/// bare symlink at `workspaces_directory/<env_name>` itself (see
+/// `Environment::get_all`), and following it would report the mtime of
+/// whatever project directory it happens to point at instead of the env's
+/// own history.
+pub fn last_touched(workspaces_directory: &str, env_name: &str, meta: &EnvStats) -> Option<i64> {
+    meta.signals.most_recent().or_else(|| {
+        let env_dir = Path::new(workspaces_directory).join(env_name);
+        let modified = fs::symlink_metadata(&env_dir).ok()?.modified().ok()?;
+        let seconds = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        i64::try_from(seconds).ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +176,66 @@ mod tests {
     fn test_load_missing_file_returns_empty() {
         let stats = load_stats(Path::new("/nonexistent/path/stats.json"));
         assert!(stats.envs.is_empty());
+    }
+
+    #[test]
+    fn collect_env_meta_map_keeps_envs_with_only_prep_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspaces = dir.path();
+        let env_dir = workspaces.join("prep-only");
+        fs::create_dir(&env_dir).unwrap();
+        save_env_meta(
+            &env_dir,
+            &EnvStats {
+                signals: UserIntentSignals {
+                    prep_buffer: vec![(now_timestamp(), 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let envs = vec![Environment {
+            path: env_dir.to_str().unwrap().to_string(),
+            name: "prep-only".to_string(),
+        }];
+        let meta_map = collect_env_meta_map(workspaces.to_str().unwrap(), &envs);
+
+        assert!(
+            !meta_map["prep-only"].signals.prep_buffer.is_empty(),
+            "an env whose only recorded signal is prep_buffer must keep its real \
+             data, not fall through to a blank default"
+        );
+    }
+
+    #[test]
+    fn last_touched_prefers_recorded_signals_over_own_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = EnvStats {
+            signals: UserIntentSignals {
+                switch_buffer: vec![(12345, 1.0)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(
+            last_touched(dir.path().to_str().unwrap(), "no-such-dir", &meta),
+            Some(12345),
+            "a recorded signal must win even if the env directory doesn't exist"
+        );
+    }
+
+    #[test]
+    fn last_touched_falls_back_to_own_mtime_without_signals() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("env")).unwrap();
+
+        assert!(
+            last_touched(dir.path().to_str().unwrap(), "env", &EnvStats::default()).is_some(),
+            "with no recorded signal, the env's own mtime must still resolve"
+        );
     }
 
     #[test]
