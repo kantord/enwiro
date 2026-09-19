@@ -13,28 +13,50 @@ const DEFAULT_STALE_DAYS: i64 = 30;
 const SECONDS_PER_DAY: i64 = 86_400;
 
 #[derive(clap::Args)]
-#[command(
-    author,
-    version,
-    about = "List environments that have not been used in a while",
-    long_about = "List environments that have not been used in a while.\n\n\
-                  Environments with an `evergreen` status are never listed, \
-                  regardless of --days - that status exists specifically to \
-                  mark environments meant to persist indefinitely."
-)]
+#[command(about = "List or remove environments that have not been used in a while")]
 pub struct StaleArgs {
+    #[command(subcommand)]
+    pub command: StaleCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub enum StaleCommand {
+    /// List environments that have not been used in a while
+    #[command(
+        long_about = "List environments that have not been used in a while.\n\n\
+                      Environments with an `evergreen` status are never listed, \
+                      regardless of --days - that status exists specifically to \
+                      mark environments meant to persist indefinitely."
+    )]
+    Ls(StaleLsArgs),
+    /// Remove done, stale environments and prune their cookbook resources
+    #[command(
+        long_about = "Remove environments that are both stale and whose status is \
+                      `done` (merged/closed). Other stale environments (active, \
+                      waiting, ready, or unknown status) are left untouched. Each \
+                      removed environment's owning cookbook is given a chance to \
+                      clean up whatever it materialized for it (e.g. a git \
+                      worktree)."
+    )]
+    Prune(StalePruneArgs),
+}
+
+#[derive(clap::Args)]
+pub struct StaleLsArgs {
     /// Consider an environment stale after this many days without activity
     #[arg(long, default_value_t = DEFAULT_STALE_DAYS)]
     pub days: i64,
     /// Output in JSON lines format
-    #[arg(long, conflicts_with = "rm")]
-    pub json: bool,
-    /// Remove the listed environments whose status is `done` (merged/closed).
-    /// Other stale environments (active, waiting, ready, or unknown status)
-    /// are left untouched even though they are listed.
     #[arg(long)]
-    pub rm: bool,
-    /// Skip the confirmation prompt when removing with --rm
+    pub json: bool,
+}
+
+#[derive(clap::Args)]
+pub struct StalePruneArgs {
+    /// Consider an environment stale after this many days without activity
+    #[arg(long, default_value_t = DEFAULT_STALE_DAYS)]
+    pub days: i64,
+    /// Skip the confirmation prompt
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
 }
@@ -48,19 +70,24 @@ struct StaleEntry {
     days_idle: i64,
 }
 
-pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyhow::Result<()> {
+/// Every non-evergreen environment idle for at least `days`, sorted
+/// most-idle first. Shared by `ls` (which shows all of them) and `prune`
+/// (which only acts on the `done` subset).
+fn compute_stale_entries<W: Write>(
+    context: &CommandContext<W>,
+    days: i64,
+) -> anyhow::Result<Vec<StaleEntry>> {
+    if days < 0 {
+        bail!("--days must be zero or positive, got {days}");
+    }
+    let threshold_seconds = days
+        .checked_mul(SECONDS_PER_DAY)
+        .context("--days value is too large")?;
+
     let envs: Vec<Environment> = context.get_all_environments()?.into_values().collect();
     let meta_map =
         crate::usage_stats::collect_env_meta_map(&context.config.workspaces_directory, &envs);
-
-    if args.days < 0 {
-        bail!("--days must be zero or positive, got {}", args.days);
-    }
     let now = crate::usage_stats::now_timestamp();
-    let threshold_seconds = args
-        .days
-        .checked_mul(SECONDS_PER_DAY)
-        .context("--days value is too large")?;
 
     let mut entries: Vec<StaleEntry> = envs
         .iter()
@@ -87,10 +114,22 @@ pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyh
         .collect();
 
     entries.sort_by_key(|entry| entry.last_used);
+    Ok(entries)
+}
+
+pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyhow::Result<()> {
+    match args.command {
+        StaleCommand::Ls(args) => stale_ls(context, args),
+        StaleCommand::Prune(args) => stale_prune(context, args),
+    }
+}
+
+fn stale_ls<W: Write>(context: &mut CommandContext<W>, args: StaleLsArgs) -> anyhow::Result<()> {
+    let entries = compute_stale_entries(context, args.days)?;
 
     if args.json {
         for entry in &entries {
-            let line = serde_json::to_string(entry).unwrap();
+            let line = serde_json::to_string(&entry).unwrap();
             writeln!(context.writer, "{}", line).context("Could not write to output")?;
         }
     } else {
@@ -113,66 +152,74 @@ pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyh
         }
     }
 
-    if args.rm {
-        let done_names: Vec<&str> = entries
-            .iter()
-            .filter(|e| matches!(e.status, Some(Status::Done { .. })))
-            .map(|e| e.name.as_str())
-            .collect();
+    Ok(())
+}
 
-        if !done_names.is_empty() {
-            if !args.yes {
-                writeln!(
-                    context.writer,
-                    "\nThe following {} done environment(s) will be removed:",
-                    done_names.len()
-                )
-                .context("Could not write to output")?;
-                for name in &done_names {
-                    writeln!(context.writer, "  {name}").context("Could not write to output")?;
-                }
-                match crate::confirm::confirm("Remove them?") {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        writeln!(context.writer, "Aborted.")
-                            .context("Could not write to output")?;
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        writeln!(context.writer, "{err}").context("Could not write to output")?;
-                        return Ok(());
-                    }
-                }
-            }
+fn stale_prune<W: Write>(
+    context: &mut CommandContext<W>,
+    args: StalePruneArgs,
+) -> anyhow::Result<()> {
+    let entries = compute_stale_entries(context, args.days)?;
+    let done_names: Vec<&str> = entries
+        .iter()
+        .filter(|e| matches!(e.status, Some(Status::Done { .. })))
+        .map(|e| e.name.as_str())
+        .collect();
 
-            let workspaces_directory =
-                Path::new(&context.config.workspaces_directory).to_path_buf();
-            let active_env = std::env::var(ENWIRO_ENV_VAR).ok();
-            for name in done_names {
-                if active_env.as_deref() == Some(name) {
-                    writeln!(
-                        context.writer,
-                        "Skipping '{name}': it is the currently active environment"
-                    )
-                    .context("Could not write to output")?;
-                    continue;
-                }
-                // The confirmation above already covered the whole batch, so
-                // `remove_env` is told `yes: true` here to skip its own
-                // per-item prompt.
-                match remove_env(
-                    &workspaces_directory,
-                    name,
-                    true,
-                    active_env.as_deref(),
-                    &mut context.writer,
-                ) {
-                    Ok(()) => writeln!(context.writer, "Removed '{name}'")
-                        .context("Could not write to output")?,
-                    Err(err) => writeln!(context.writer, "Could not remove '{name}': {err}")
-                        .context("Could not write to output")?,
-                }
+    if done_names.is_empty() {
+        return Ok(());
+    }
+
+    if !args.yes {
+        writeln!(
+            context.writer,
+            "The following {} done environment(s) will be removed:",
+            done_names.len()
+        )
+        .context("Could not write to output")?;
+        for name in &done_names {
+            writeln!(context.writer, "  {name}").context("Could not write to output")?;
+        }
+        match crate::confirm::confirm("Remove them?") {
+            Ok(true) => {}
+            Ok(false) => {
+                writeln!(context.writer, "Aborted.").context("Could not write to output")?;
+                return Ok(());
             }
+            Err(err) => {
+                writeln!(context.writer, "{err}").context("Could not write to output")?;
+                return Ok(());
+            }
+        }
+    }
+
+    let workspaces_directory = Path::new(&context.config.workspaces_directory).to_path_buf();
+    let active_env = std::env::var(ENWIRO_ENV_VAR).ok();
+    for name in done_names {
+        if active_env.as_deref() == Some(name) {
+            writeln!(
+                context.writer,
+                "Skipping '{name}': it is the currently active environment"
+            )
+            .context("Could not write to output")?;
+            continue;
+        }
+        // The confirmation above already covered the whole batch, so
+        // `remove_env` is told `yes: true` here to skip its own per-item
+        // prompt.
+        match remove_env(
+            &workspaces_directory,
+            name,
+            true,
+            active_env.as_deref(),
+            &context.cookbooks,
+            &mut context.writer,
+        ) {
+            Ok(()) => {
+                writeln!(context.writer, "Removed '{name}'").context("Could not write to output")?
+            }
+            Err(err) => writeln!(context.writer, "Could not remove '{name}': {err}")
+                .context("Could not write to output")?,
         }
     }
 
@@ -197,6 +244,18 @@ mod tests {
         .unwrap();
     }
 
+    fn ls(days: i64, json: bool) -> StaleArgs {
+        StaleArgs {
+            command: StaleCommand::Ls(StaleLsArgs { days, json }),
+        }
+    }
+
+    fn prune(days: i64, yes: bool) -> StaleArgs {
+        StaleArgs {
+            command: StaleCommand::Prune(StalePruneArgs { days, yes }),
+        }
+    }
+
     #[rstest]
     fn test_stale_excludes_recently_used_environments(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
@@ -216,16 +275,7 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(output.is_empty(), "expected no stale envs, got: {output}");
@@ -251,16 +301,7 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(output.contains("old-env"));
@@ -287,28 +328,10 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
         assert!(context_object.get_output().is_empty());
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 5,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(5, false)).unwrap();
         assert!(context_object.get_output().contains("ten-days-idle"));
     }
 
@@ -333,16 +356,7 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(
@@ -365,16 +379,7 @@ mod tests {
         let file = std::fs::File::open(temp_dir.path().join("never-activated")).unwrap();
         file.set_modified(old_time).unwrap();
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(output.contains("never-activated"), "got: {output}");
@@ -409,16 +414,7 @@ mod tests {
             .set_modified(ancient)
             .unwrap();
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(
@@ -452,16 +448,7 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(
@@ -494,16 +481,7 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: true,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, true)).unwrap();
 
         let output = context_object.get_output();
         let entry: serde_json::Value =
@@ -544,16 +522,7 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         let idle_40_pos = output.find("idle-40").unwrap();
@@ -565,7 +534,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_stale_rm_removes_done_environments(
+    fn test_stale_prune_removes_done_environments(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -586,25 +555,16 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: true,
-                yes: true,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, prune(30, true)).unwrap();
 
         assert!(
             !temp_dir.path().join("old-done").exists(),
-            "done + stale env should be removed by --rm"
+            "done + stale env should be removed by prune"
         );
     }
 
     #[rstest]
-    fn test_stale_rm_leaves_non_done_environments(
+    fn test_stale_prune_leaves_non_done_environments(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -626,26 +586,17 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: true,
-                yes: true,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, prune(30, true)).unwrap();
 
         assert!(
             temp_dir.path().join("old-active").exists(),
-            "--rm must only remove environments whose status is done, \
+            "prune must only remove environments whose status is done, \
              not merely stale ones"
         );
     }
 
     #[rstest]
-    fn test_stale_rm_without_yes_does_not_remove(
+    fn test_stale_prune_without_yes_does_not_remove(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -664,16 +615,7 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: true,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, prune(30, false)).unwrap();
 
         assert!(
             temp_dir.path().join("old-done").exists(),
@@ -687,7 +629,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_stale_rm_prints_preview_and_confirmation_error(
+    fn test_stale_prune_prints_preview_and_confirmation_error(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -706,26 +648,17 @@ mod tests {
             },
         );
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: true,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, prune(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(
             output.contains("will be removed") && output.contains("old-done"),
-            "should preview what --rm is about to remove before prompting, got: {output}"
+            "should preview what prune is about to remove before prompting, got: {output}"
         );
     }
 
     #[rstest]
-    fn test_stale_rm_reports_each_removal(
+    fn test_stale_prune_reports_each_removal(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -747,16 +680,7 @@ mod tests {
             );
         }
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: true,
-                yes: true,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, prune(30, true)).unwrap();
 
         let output = context_object.get_output();
         assert!(
@@ -766,7 +690,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_stale_rm_skips_active_env_with_a_neutral_message(
+    fn test_stale_prune_skips_active_env_with_a_neutral_message(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (temp_dir, mut context_object, _, _) = context_object;
@@ -790,15 +714,7 @@ mod tests {
         unsafe {
             std::env::set_var(ENWIRO_ENV_VAR, "active-done");
         }
-        let result = stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: true,
-                yes: true,
-            },
-        );
+        let result = stale(&mut context_object, prune(30, true));
         unsafe {
             match &prior {
                 Some(v) => std::env::set_var(ENWIRO_ENV_VAR, v),
@@ -809,7 +725,7 @@ mod tests {
 
         assert!(
             temp_dir.path().join("active-done").exists(),
-            "active env must survive --rm"
+            "active env must survive prune"
         );
         let output = context_object.get_output();
         assert!(
@@ -824,15 +740,7 @@ mod tests {
     ) {
         let (_temp_dir, mut context_object, _, _) = context_object;
 
-        let result = stale(
-            &mut context_object,
-            StaleArgs {
-                days: -1,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        );
+        let result = stale(&mut context_object, ls(-1, false));
 
         assert!(result.is_err(), "negative --days must be rejected");
     }
@@ -860,16 +768,7 @@ mod tests {
         // ancient.
         std::os::unix::fs::symlink(&target, workspaces.join("legacy-fresh")).unwrap();
 
-        stale(
-            &mut context_object,
-            StaleArgs {
-                days: 30,
-                json: false,
-                rm: false,
-                yes: false,
-            },
-        )
-        .unwrap();
+        stale(&mut context_object, ls(30, false)).unwrap();
 
         let output = context_object.get_output();
         assert!(

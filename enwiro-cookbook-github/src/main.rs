@@ -8,6 +8,7 @@ use anyhow::Context;
 use clap::Parser;
 use enwiro_sdk::cli::{CookArgs, CookbookCore};
 use enwiro_sdk::cookbook::CookbookCapability;
+use enwiro_sdk::git::remove_worktree;
 use enwiro_sdk::metadata::DeclaredCapabilities;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 use serde_derive::{Deserialize, Serialize};
@@ -56,6 +57,7 @@ enum EnwiroCookbookGithub {
     Gear(GearArgs),
     ExternalPaths(ExternalPathsArgs),
     Describe(DescribeArgs),
+    Prune(PruneArgs),
     Listen,
 }
 
@@ -71,6 +73,11 @@ pub struct ExternalPathsArgs {
 
 #[derive(clap::Args)]
 pub struct DescribeArgs {
+    recipe_name: String,
+}
+
+#[derive(clap::Args)]
+pub struct PruneArgs {
     recipe_name: String,
 }
 
@@ -922,6 +929,46 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     }
 }
 
+/// Resolve `recipe_name`'s worktree path the same deterministic way `cook`
+/// does, without ever creating anything, and remove it if it exists.
+/// A PR and an issue share one number sequence per repo, so at most one of
+/// the two candidate paths can ever exist. Recipes whose repo can't be
+/// resolved (unknown, or no local clone) have nothing this cookbook can
+/// safely prune.
+fn prune_recipe(config: &ConfigurationValues, recipe_name: &str) -> anyhow::Result<Option<String>> {
+    let Ok((repo_str, number, _is_fix_ci_variant)) = parse_recipe_name(recipe_name) else {
+        return Ok(None);
+    };
+    let Ok(repo_config) = resolve_repo_config(repo_str) else {
+        return Ok(None);
+    };
+    prune_worktree(config, &repo_config, repo_str, number)
+}
+
+/// A PR and an issue share one number sequence per repo, so at most one of
+/// the two candidate paths can ever exist.
+fn prune_worktree(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    repo_str: &str,
+    number: u64,
+) -> anyhow::Result<Option<String>> {
+    for prefix in ["pr", "issue"] {
+        let wt_path = worktree_path(config, repo_config, repo_str, prefix, number)?;
+        if wt_path.exists() {
+            return Ok(Some(remove_worktree(&repo_config.local_path, &wt_path)?));
+        }
+    }
+    Ok(None)
+}
+
+fn prune(config: &ConfigurationValues, args: PruneArgs) -> anyhow::Result<()> {
+    if let Some(outcome) = prune_recipe(config, &args.recipe_name)? {
+        println!("{}", serde_json::to_string(&outcome)?);
+    }
+    Ok(())
+}
+
 /// Per-kind constants for the gear emitter. `worktree_subdir` doubles as
 /// the gear name in the emitted schema (e.g. `pr` worktrees → `"pr"` gear,
 /// `issue` worktrees → `"issue"` gear). `url_subdir` is the GitHub URL
@@ -1571,6 +1618,103 @@ mod tests {
         assert!(reject_fix_ci_on_issue(false, 42).is_ok());
     }
 
+    fn repo_with_commit(repo_path: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(repo_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        {
+            let tree_id = repo.index().unwrap().write_tree().unwrap();
+            let tree = repo.find_tree(tree_id).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                .unwrap();
+        }
+        repo
+    }
+
+    fn add_worktree(repo: &git2::Repository, branch_name: &str, wt_name: &str, wt_path: &Path) {
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        let branch = repo.branch(branch_name, &head, false).unwrap();
+        let reference = branch.into_reference();
+        std::fs::create_dir_all(wt_path.parent().unwrap()).unwrap();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(&reference));
+        repo.worktree(wt_name, wt_path, Some(&opts)).unwrap();
+    }
+
+    #[test]
+    fn test_prune_worktree_is_none_when_never_cooked() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        std::fs::create_dir(&repo_path).unwrap();
+        repo_with_commit(&repo_path);
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+        };
+        let repo_config = RepoConfig {
+            repo: "kantord/my-project".to_string(),
+            local_path: repo_path,
+        };
+
+        assert_eq!(
+            prune_worktree(&config, &repo_config, "my-project", 42).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_prune_worktree_removes_a_cooked_pr_worktree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        std::fs::create_dir(&repo_path).unwrap();
+        let repo = repo_with_commit(&repo_path);
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+        };
+        let repo_config = RepoConfig {
+            repo: "kantord/my-project".to_string(),
+            local_path: repo_path,
+        };
+        let wt_path = worktree_path(&config, &repo_config, "my-project", "pr", 42).unwrap();
+        add_worktree(&repo, "pr-42", "enwiro-pr-42", &wt_path);
+        assert!(wt_path.exists());
+
+        let outcome = prune_worktree(&config, &repo_config, "my-project", 42).unwrap();
+
+        assert!(
+            outcome.is_some_and(|o| o.contains("removed worktree")),
+            "expected a removal outcome"
+        );
+        assert!(!wt_path.exists(), "worktree directory must be gone");
+    }
+
+    #[test]
+    fn test_prune_worktree_keeps_a_dirty_cooked_issue_worktree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        std::fs::create_dir(&repo_path).unwrap();
+        let repo = repo_with_commit(&repo_path);
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+        };
+        let repo_config = RepoConfig {
+            repo: "kantord/my-project".to_string(),
+            local_path: repo_path,
+        };
+        let wt_path = worktree_path(&config, &repo_config, "my-project", "issue", 7).unwrap();
+        add_worktree(&repo, "issue-7", "enwiro-issue-7", &wt_path);
+        std::fs::write(wt_path.join("uncommitted.txt"), b"work in progress").unwrap();
+
+        let outcome = prune_worktree(&config, &repo_config, "my-project", 7).unwrap();
+
+        assert!(
+            outcome.is_some_and(|o| o.contains("kept worktree")),
+            "expected a kept outcome for a dirty worktree"
+        );
+        assert!(wt_path.exists(), "dirty worktree must survive");
+    }
+
     #[test]
     fn test_cook_creates_worktree_for_pr() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2182,6 +2326,10 @@ fn main() -> anyhow::Result<()> {
         }
         EnwiroCookbookGithub::Describe(args) => {
             describe(args)?;
+        }
+        EnwiroCookbookGithub::Prune(args) => {
+            let config = read_config()?;
+            prune(&config, args)?;
         }
         EnwiroCookbookGithub::Core(CookbookCore::Metadata) => {
             println!(

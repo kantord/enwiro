@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use enwiro_sdk::client::CookbookTrait;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 
 use crate::CommandContext;
@@ -22,8 +23,38 @@ pub fn rm<W: Write>(context: &mut CommandContext<W>, args: RmArgs) -> anyhow::Re
         &args.name,
         args.yes,
         std::env::var(ENWIRO_ENV_VAR).ok().as_deref(),
+        &context.cookbooks,
         &mut context.writer,
     )
+}
+
+/// Best-effort: ask the env's owning cookbook to tear down whatever it
+/// materialized for it (e.g. a git worktree), before the env's own
+/// directory disappears - `env_path/meta.json` is the only place
+/// `cookbook`/`recipe` are recorded, so this must run first. Silent no-op
+/// for envs with no recorded cookbook/recipe (legacy envs, manually
+/// created envs) or whose cookbook isn't loaded.
+fn prune_cookbook_resource<W: Write>(
+    env_path: &Path,
+    cookbooks: &[Box<dyn CookbookTrait>],
+    writer: &mut W,
+) {
+    let env_meta = enwiro_daemon::meta::load_env_meta(env_path);
+    let (Some(cookbook_name), Some(recipe)) = (env_meta.cookbook, env_meta.recipe) else {
+        return;
+    };
+    let Some(cookbook) = cookbooks.iter().find(|c| c.name() == cookbook_name) else {
+        return;
+    };
+    match cookbook.prune(&recipe) {
+        Ok(Some(message)) => {
+            let _ = writeln!(writer, "{message}");
+        }
+        Ok(None) => {}
+        Err(err) => {
+            let _ = writeln!(writer, "Could not prune '{recipe}': {err}");
+        }
+    }
 }
 
 pub(crate) fn remove_env<W: Write>(
@@ -31,6 +62,7 @@ pub(crate) fn remove_env<W: Write>(
     name: &str,
     yes: bool,
     active_env: Option<&str>,
+    cookbooks: &[Box<dyn CookbookTrait>],
     writer: &mut W,
 ) -> anyhow::Result<()> {
     if active_env == Some(name) {
@@ -48,6 +80,8 @@ pub(crate) fn remove_env<W: Write>(
         writeln!(writer, "Aborted.").context("Could not write to output")?;
         return Ok(());
     }
+
+    prune_cookbook_resource(&env_path, cookbooks, writer);
 
     if meta.file_type().is_symlink() {
         fs::remove_file(&env_path).with_context(|| format!("Could not remove env '{name}'"))?;
@@ -67,8 +101,22 @@ mod tests {
     use std::io::Cursor;
 
     use crate::test_utils::test_utilities::{
-        AdapterLog, FakeContext, NotificationLog, context_object,
+        AdapterLog, FailingCookbook, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
+    use enwiro_daemon::meta::EnvStats;
+
+    fn write_meta_with_recipe(env_dir: &Path, cookbook: &str, recipe: &str) {
+        let meta = EnvStats {
+            cookbook: Some(cookbook.to_string()),
+            recipe: Some(recipe.to_string()),
+            ..Default::default()
+        };
+        fs::write(
+            env_dir.join("meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+    }
 
     #[rstest]
     fn errors_when_env_does_not_exist(
@@ -78,7 +126,8 @@ mod tests {
         let workspaces = Path::new(&context.config.workspaces_directory).to_path_buf();
         let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
 
-        let err = remove_env(&workspaces, "ghost", true, None, &mut out).expect_err("must error");
+        let err =
+            remove_env(&workspaces, "ghost", true, None, &[], &mut out).expect_err("must error");
         assert!(
             err.to_string().contains("\"ghost\""),
             "error must name the env: {err}"
@@ -96,7 +145,7 @@ mod tests {
         assert!(env_path.exists());
 
         let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        remove_env(&workspaces, "foo", true, None, &mut out).expect("must succeed");
+        remove_env(&workspaces, "foo", true, None, &[], &mut out).expect("must succeed");
 
         assert!(!env_path.exists(), "env dir must be gone");
     }
@@ -120,7 +169,7 @@ mod tests {
         fs::write(env_dir.join("meta.json"), b"{}").unwrap();
 
         let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        remove_env(&workspaces, "foo", true, None, &mut out).expect("must succeed");
+        remove_env(&workspaces, "foo", true, None, &[], &mut out).expect("must succeed");
 
         assert!(!env_dir.exists(), "env dir must be gone");
         assert!(
@@ -149,7 +198,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &env_path).unwrap();
 
         let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        remove_env(&workspaces, "legacy", true, None, &mut out).expect("must succeed");
+        remove_env(&workspaces, "legacy", true, None, &[], &mut out).expect("must succeed");
 
         assert!(!env_path.exists(), "symlink must be gone");
         assert!(target.exists(), "symlink target must survive");
@@ -166,7 +215,8 @@ mod tests {
         let env_path = workspaces.join("foo");
 
         let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        let err = remove_env(&workspaces, "foo", false, None, &mut out).expect_err("must refuse");
+        let err =
+            remove_env(&workspaces, "foo", false, None, &[], &mut out).expect_err("must refuse");
         assert!(err.to_string().contains("-y"), "error must hint -y: {err}");
         assert!(env_path.exists(), "env must NOT be deleted");
     }
@@ -186,6 +236,7 @@ mod tests {
             "active-env",
             true,
             Some("active-env"),
+            &[],
             &mut out,
         )
         .expect_err("must refuse");
@@ -195,5 +246,56 @@ mod tests {
             "error must name the env: {err}"
         );
         assert!(env_path.exists(), "env must NOT be deleted");
+    }
+
+    #[rstest]
+    fn prunes_the_owning_cookbooks_resource_before_removing(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context, _, _) = context_object;
+        context.create_mock_environment("foo");
+        let workspaces = Path::new(&context.config.workspaces_directory).to_path_buf();
+        let env_path = workspaces.join("foo");
+        write_meta_with_recipe(&env_path, "git", "repo@branch");
+
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(
+            FakeCookbook::new("git", vec![], vec![]).with_prune("removed worktree at /tmp/x"),
+        )];
+
+        let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        remove_env(&workspaces, "foo", true, None, &cookbooks, &mut out).expect("must succeed");
+
+        assert!(!env_path.exists(), "env dir must still be gone");
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(
+            output.contains("removed worktree at /tmp/x"),
+            "the cookbook's prune outcome must be surfaced, got: {output}"
+        );
+    }
+
+    #[rstest]
+    fn skips_pruning_for_an_env_with_no_recorded_cookbook(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (_temp_dir, mut context, _, _) = context_object;
+        context.create_mock_environment("foo");
+        let workspaces = Path::new(&context.config.workspaces_directory).to_path_buf();
+
+        // A cookbook whose `prune` always errors - proves the
+        // no-cookbook-recorded case never reaches it (an error would
+        // otherwise surface as a "Could not prune" line, checked below).
+        let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(FailingCookbook {
+            cookbook_name: enwiro_sdk::plugin::PluginName::new("git").unwrap(),
+        })];
+
+        let mut out: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        remove_env(&workspaces, "foo", true, None, &cookbooks, &mut out).expect("must succeed");
+
+        assert!(!workspaces.join("foo").exists());
+        let output = String::from_utf8(out.into_inner()).unwrap();
+        assert!(
+            !output.contains("Could not prune"),
+            "an env with no recorded cookbook/recipe must never invoke prune, got: {output}"
+        );
     }
 }

@@ -29,6 +29,8 @@ This document contains the help content for the `enw` command-line program.
 * [`enw run`↴](#enw-run)
 * [`enw shell`↴](#enw-shell)
 * [`enw stale`↴](#enw-stale)
+* [`enw stale ls`↴](#enw-stale-ls)
+* [`enw stale prune`↴](#enw-stale-prune)
 * [`enw wrap`↴](#enw-wrap)
 
 ## `enw`
@@ -48,7 +50,7 @@ This document contains the help content for the `enw` command-line program.
 * `rm` — Remove an environment
 * `run` — Run a command via the active environment's adapter
 * `shell` — Run your shell inside the current environment, waiting while it is being prepared. Intended as a terminal emulator's configured shell: with no environment it degrades to the plain shell.
-* `stale` — List environments that have not been used in a while
+* `stale` — List or remove environments that have not been used in a while
 * `wrap` — Run an application/command inside an environment
 
 ###### **Options:**
@@ -272,11 +274,24 @@ Run your shell inside the current environment, waiting while it is being prepare
 
 ## `enw stale`
 
+List or remove environments that have not been used in a while
+
+**Usage:** `enw stale <COMMAND>`
+
+###### **Subcommands:**
+
+* `ls` — List environments that have not been used in a while
+* `prune` — Remove done, stale environments and prune their cookbook resources
+
+
+
+## `enw stale ls`
+
 List environments that have not been used in a while.
 
 Environments with an `evergreen` status are never listed, regardless of --days - that status exists specifically to mark environments meant to persist indefinitely.
 
-**Usage:** `enw stale [OPTIONS]`
+**Usage:** `enw stale ls [OPTIONS]`
 
 ###### **Options:**
 
@@ -284,8 +299,21 @@ Environments with an `evergreen` status are never listed, regardless of --days -
 
   Default value: `30`
 * `--json` — Output in JSON lines format
-* `--rm` — Remove the listed environments whose status is `done` (merged/closed). Other stale environments (active, waiting, ready, or unknown status) are left untouched even though they are listed
-* `-y`, `--yes` — Skip the confirmation prompt when removing with --rm
+
+
+
+## `enw stale prune`
+
+Remove environments that are both stale and whose status is `done` (merged/closed). Other stale environments (active, waiting, ready, or unknown status) are left untouched. Each removed environment's owning cookbook is given a chance to clean up whatever it materialized for it (e.g. a git worktree).
+
+**Usage:** `enw stale prune [OPTIONS]`
+
+###### **Options:**
+
+* `--days <DAYS>` — Consider an environment stale after this many days without activity
+
+  Default value: `30`
+* `-y`, `--yes` — Skip the confirmation prompt
 
 
 

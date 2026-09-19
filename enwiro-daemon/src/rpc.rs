@@ -318,7 +318,7 @@ impl EnwiroRpcServer for DaemonRpc {
 /// path in `enwiro_sdk::client`. `cook` deliberately has no cap: cloning
 /// a large repo can take minutes.
 fn best_effort_op_timeout(op: &str) -> Option<std::time::Duration> {
-    matches!(op, "gear" | "external-paths").then(|| std::time::Duration::from_secs(10))
+    matches!(op, "gear" | "external-paths" | "prune").then(|| std::time::Duration::from_secs(10))
 }
 
 /// Output of a single cookbook subprocess invocation; carries enough
@@ -518,6 +518,7 @@ mod tests {
     fn best_effort_ops_get_a_timeout() {
         assert!(best_effort_op_timeout("gear").is_some());
         assert!(best_effort_op_timeout("external-paths").is_some());
+        assert!(best_effort_op_timeout("prune").is_some());
     }
 
     #[test]

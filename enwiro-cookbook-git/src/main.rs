@@ -8,6 +8,7 @@ use anyhow::Context;
 use clap::Parser;
 use enwiro_sdk::cli::{CookArgs, CookbookCore};
 use enwiro_sdk::cookbook::CookbookCapability;
+use enwiro_sdk::git::remove_worktree;
 use enwiro_sdk::metadata::DeclaredCapabilities;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
 use git2::Repository;
@@ -271,6 +272,7 @@ enum EnwiroCookbookGit {
     #[command(flatten)]
     Core(CookbookCore),
     ExternalPaths(ExternalPathsArgs),
+    Prune(PruneArgs),
     Listen,
 }
 
@@ -278,6 +280,11 @@ const LISTEN_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(clap::Args)]
 pub struct ExternalPathsArgs {
+    recipe_name: String,
+}
+
+#[derive(clap::Args)]
+pub struct PruneArgs {
     recipe_name: String,
 }
 
@@ -662,6 +669,40 @@ fn external_paths(config: &ConfigurationValues, args: ExternalPathsArgs) -> anyh
     Ok(())
 }
 
+/// Resolve `recipe_name`'s worktree path the same deterministic way `cook`
+/// does, without ever creating anything, and remove it if it exists.
+/// Base-repo recipes (no `@branch`) and recipes whose base repo can't be
+/// found (moved, or no longer matched by `repo_globs`) have nothing this
+/// cookbook can safely prune.
+fn prune_recipe(config: &ConfigurationValues, recipe_name: &str) -> anyhow::Result<Option<String>> {
+    let Some((repo_name, branch_name)) = recipe_name.split_once('@') else {
+        return Ok(None);
+    };
+    let recipes = build_repository_hashmap(config)?;
+    let Some(RecipeInfo::ExistingRepo { repo, .. }) = recipes.get(repo_name) else {
+        return Ok(None);
+    };
+    let repo_path = repo
+        .workdir()
+        .context("Could not get working directory of repo")?
+        .canonicalize()
+        .context("Could not canonicalize repo path")?;
+
+    let (_, wt_path) = branch_worktree_layout(config, &repo_path, branch_name, false)?;
+    if !wt_path.exists() {
+        return Ok(None);
+    }
+
+    Ok(Some(remove_worktree(&repo_path, &wt_path)?))
+}
+
+fn prune(config: &ConfigurationValues, args: PruneArgs) -> anyhow::Result<()> {
+    if let Some(outcome) = prune_recipe(config, &args.recipe_name)? {
+        println!("{}", serde_json::to_string(&outcome)?);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +864,90 @@ mod tests {
             "Expected 'my-project@feature-x' in keys: {:?}",
             recipes.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_prune_recipe_is_none_for_base_repo_recipe() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        create_repo_with_commit(&repo_path);
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+
+        assert_eq!(prune_recipe(&config, "my-project").unwrap(), None);
+    }
+
+    #[test]
+    fn test_prune_recipe_is_none_when_never_cooked() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = create_repo_with_commit(&repo_path);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-x", &head, false).unwrap();
+
+        let config = config_for_glob(tmp.path().join("*").to_str().unwrap());
+
+        assert_eq!(
+            prune_recipe(&config, "my-project@feature-x").unwrap(),
+            None,
+            "nothing was ever cooked, so there's nothing to prune"
+        );
+    }
+
+    #[test]
+    fn test_prune_recipe_removes_a_cooked_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = create_repo_with_commit(&repo_path);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-x", &head, false).unwrap();
+
+        let wt_dir = tmp.path().join("worktrees");
+        let config = config_with_worktree_dir(
+            tmp.path().join("*").to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+        );
+
+        let wt_path = resolve_recipe_path(&config, "my-project@feature-x").unwrap();
+        assert!(wt_path.exists());
+
+        let outcome = prune_recipe(&config, "my-project@feature-x").unwrap();
+
+        assert!(
+            outcome.is_some_and(|o| o.contains("removed worktree")),
+            "expected a removal outcome"
+        );
+        assert!(!wt_path.exists(), "worktree directory must be gone");
+    }
+
+    #[test]
+    fn test_prune_recipe_keeps_a_dirty_cooked_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        fs::create_dir(&repo_path).unwrap();
+        let repo = create_repo_with_commit(&repo_path);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature-x", &head, false).unwrap();
+
+        let wt_dir = tmp.path().join("worktrees");
+        let config = config_with_worktree_dir(
+            tmp.path().join("*").to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+        );
+
+        let wt_path = resolve_recipe_path(&config, "my-project@feature-x").unwrap();
+        fs::write(wt_path.join("uncommitted.txt"), b"work in progress").unwrap();
+
+        let outcome = prune_recipe(&config, "my-project@feature-x").unwrap();
+
+        assert!(
+            outcome.is_some_and(|o| o.contains("kept worktree")),
+            "expected a kept outcome for a dirty worktree"
+        );
+        assert!(wt_path.exists(), "dirty worktree must survive");
     }
 
     #[test]
@@ -1703,6 +1828,10 @@ fn main() -> anyhow::Result<()> {
         EnwiroCookbookGit::ExternalPaths(args) => {
             let config = read_config()?;
             external_paths(&config, args)?;
+        }
+        EnwiroCookbookGit::Prune(args) => {
+            let config = read_config()?;
+            prune(&config, args)?;
         }
         EnwiroCookbookGit::Core(CookbookCore::Metadata) => {
             println!(
