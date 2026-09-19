@@ -272,7 +272,9 @@ Run your shell inside the current environment, waiting while it is being prepare
 
 ## `enw stale`
 
-List environments that have not been used in a while
+List environments that have not been used in a while.
+
+Environments with an `evergreen` status are never listed, regardless of --days - that status exists specifically to mark environments meant to persist indefinitely.
 
 **Usage:** `enw stale [OPTIONS]`
 

@@ -16,7 +16,11 @@ const SECONDS_PER_DAY: i64 = 86_400;
 #[command(
     author,
     version,
-    about = "List environments that have not been used in a while"
+    about = "List environments that have not been used in a while",
+    long_about = "List environments that have not been used in a while.\n\n\
+                  Environments with an `evergreen` status are never listed, \
+                  regardless of --days - that status exists specifically to \
+                  mark environments meant to persist indefinitely."
 )]
 pub struct StaleArgs {
     /// Consider an environment stale after this many days without activity
