@@ -44,22 +44,6 @@ struct StaleEntry {
     days_idle: i64,
 }
 
-/// When an environment has no recorded usage signal, its own mtime stands
-/// in for "last touched" - close enough to creation time for a
-/// never-activated env. `symlink_metadata` (not `metadata`) matters here:
-/// a legacy env is a bare symlink at `env_dir` itself (see
-/// `Environment::get_all`), and following it would report the mtime of
-/// whatever project directory it happens to point at instead of the
-/// env's own history.
-fn directory_mtime(env_dir: &Path) -> Option<i64> {
-    let modified = std::fs::symlink_metadata(env_dir).ok()?.modified().ok()?;
-    let seconds = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    i64::try_from(seconds).ok()
-}
-
 pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyhow::Result<()> {
     let envs: Vec<Environment> = context.get_all_environments()?.into_values().collect();
     let meta_map =
@@ -81,11 +65,11 @@ pub fn stale<W: Write>(context: &mut CommandContext<W>, args: StaleArgs) -> anyh
             if matches!(meta.status, Some(Status::Evergreen)) {
                 return None;
             }
-            let env_dir = Path::new(&context.config.workspaces_directory).join(&env.name);
-            let last_used = meta
-                .signals
-                .most_recent()
-                .or_else(|| directory_mtime(&env_dir))?;
+            let last_used = crate::usage_stats::last_touched(
+                &context.config.workspaces_directory,
+                &env.name,
+                meta,
+            )?;
             if now - last_used < threshold_seconds {
                 return None;
             }
@@ -390,6 +374,54 @@ mod tests {
 
         let output = context_object.get_output();
         assert!(output.contains("never-activated"), "got: {output}");
+    }
+
+    #[rstest]
+    fn test_stale_does_not_misjudge_prep_only_environments_as_ancient(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("prep-only");
+
+        let now = crate::usage_stats::now_timestamp();
+        write_meta(
+            &temp_dir.path().join("prep-only"),
+            &EnvStats {
+                signals: UserIntentSignals {
+                    prep_buffer: vec![(now, 1.0)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        // Writing meta.json above just bumped the directory's own mtime;
+        // set it far in the past so the only way this test can pass is by
+        // actually reading prep_buffer, not by coincidentally falling back
+        // to a fresh directory mtime.
+        let ancient = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs((now - 200 * SECONDS_PER_DAY) as u64);
+        std::fs::File::open(temp_dir.path().join("prep-only"))
+            .unwrap()
+            .set_modified(ancient)
+            .unwrap();
+
+        stale(
+            &mut context_object,
+            StaleArgs {
+                days: 30,
+                json: false,
+                rm: false,
+                yes: false,
+            },
+        )
+        .unwrap();
+
+        let output = context_object.get_output();
+        assert!(
+            !output.contains("prep-only"),
+            "an env whose only activity is prep_buffer must be judged by that \
+             recent signal, not by an unrelated ancient directory mtime, got: {output}"
+        );
     }
 
     #[rstest]
