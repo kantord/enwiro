@@ -110,6 +110,15 @@ pub trait CookbookTrait {
     fn describe(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
         Ok(None)
     }
+    /// Tear down whatever this cookbook materialized on disk for `recipe`,
+    /// if anything - e.g. a git worktree. Called once per environment
+    /// removal (`enw rm`, `enw stale prune`), symmetric with `cook`: the
+    /// host never learns what existed or how it was cleaned up, just an
+    /// optional human-readable outcome message. A cookbook with nothing to
+    /// tear down (or that doesn't implement pruning) returns `Ok(None)`.
+    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// Sort cookbooks by priority (lower first), then alphabetically by name.
@@ -553,6 +562,16 @@ impl CookbookTrait for RpcCookbookClient {
             "describe",
         ))
     }
+
+    /// Best-effort `prune <recipe>` via the daemon -- see
+    /// [`best_effort_json_via_rpc`] for the shared failure contract.
+    fn prune(&self, recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(best_effort_json_via_rpc(
+            self.invoke("prune", vec![recipe.to_string()]),
+            self.plugin.name.as_str(),
+            "prune",
+        ))
+    }
 }
 
 impl CookbookTrait for CookbookClient {
@@ -644,6 +663,18 @@ impl CookbookTrait for CookbookClient {
             self.plugin.name.as_str(),
             recipe,
             "describe",
+        ))
+    }
+
+    /// Invoke the cookbook binary's optional `prune <recipe>` subcommand --
+    /// see [`best_effort_json_via_subprocess`] for the shared failure
+    /// contract.
+    fn prune(&self, recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(best_effort_json_via_subprocess(
+            self.spawn_with_payload_timeout(&["prune", recipe], BEST_EFFORT_SUBCOMMAND_TIMEOUT),
+            self.plugin.name.as_str(),
+            recipe,
+            "prune",
         ))
     }
 }

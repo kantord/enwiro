@@ -16,6 +16,7 @@ pub struct FakeCookbook {
     pub priority: u32,
     pub gear_json: Option<serde_json::Value>,
     pub describe_result: Option<String>,
+    pub prune_result: Option<String>,
 }
 
 impl FakeCookbook {
@@ -30,6 +31,7 @@ impl FakeCookbook {
             priority: 50,
             gear_json: None,
             describe_result: None,
+            prune_result: None,
         }
     }
 
@@ -40,6 +42,11 @@ impl FakeCookbook {
 
     pub fn with_describe(mut self, description: &str) -> Self {
         self.describe_result = Some(description.to_string());
+        self
+    }
+
+    pub fn with_prune(mut self, outcome: &str) -> Self {
+        self.prune_result = Some(outcome.to_string());
         self
     }
 
@@ -64,6 +71,7 @@ impl FakeCookbook {
             priority: 50,
             gear_json: None,
             describe_result: None,
+            prune_result: None,
         }
     }
 
@@ -107,6 +115,10 @@ impl CookbookTrait for FakeCookbook {
     fn describe(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
         Ok(self.describe_result.clone())
     }
+
+    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+        Ok(self.prune_result.clone())
+    }
 }
 
 pub struct FailingCookbook {
@@ -124,5 +136,9 @@ impl CookbookTrait for FailingCookbook {
 
     fn name(&self) -> &str {
         self.cookbook_name.as_str()
+    }
+
+    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+        anyhow::bail!("simulated failure")
     }
 }

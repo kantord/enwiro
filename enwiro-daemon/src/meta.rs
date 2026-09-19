@@ -19,6 +19,28 @@ pub struct UserIntentSignals {
     pub prep_buffer: Vec<(i64, f64)>,
 }
 
+/// Most recent timestamp in a single signal buffer, or `None` if it never
+/// recorded one.
+fn latest_timestamp(buffer: &[(i64, f64)]) -> Option<i64> {
+    buffer.iter().map(|&(ts, _)| ts).max()
+}
+
+impl UserIntentSignals {
+    /// Most recent timestamp across every signal buffer - "has anything at
+    /// all touched this environment, and when". `None` if none of the
+    /// buffers has ever recorded an event.
+    pub fn most_recent(&self) -> Option<i64> {
+        [
+            latest_timestamp(&self.activation_buffer),
+            latest_timestamp(&self.switch_buffer),
+            latest_timestamp(&self.prep_buffer),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvStats {
     #[serde(flatten, default)]
@@ -211,13 +233,8 @@ pub fn record_switch_per_env(env_dir: &Path, timestamp: i64) {
     }
     let mut meta = load_env_meta(env_dir);
 
-    let last_activation_ts = meta
-        .signals
-        .activation_buffer
-        .iter()
-        .map(|&(ts, _)| ts)
-        .max();
-    let last_switch_ts = meta.signals.switch_buffer.iter().map(|&(ts, _)| ts).max();
+    let last_activation_ts = latest_timestamp(&meta.signals.activation_buffer);
+    let last_switch_ts = latest_timestamp(&meta.signals.switch_buffer);
     let last_signal_ts = [last_activation_ts, last_switch_ts]
         .into_iter()
         .flatten()
