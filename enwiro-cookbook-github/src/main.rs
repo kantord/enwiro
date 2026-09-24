@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,6 +24,20 @@ pub struct ConfigurationValues {
 pub struct RepoConfig {
     pub repo: String,
     pub local_path: PathBuf,
+}
+
+impl RepoConfig {
+    /// The repo name without its owner: the canonical recipe name prefix.
+    fn short_name(&self) -> &str {
+        self.repo
+            .rsplit_once('/')
+            .map_or(&self.repo, |(_, name)| name)
+    }
+
+    /// The local clone's folder name, as the git cookbook names the repo.
+    fn folder_name(&self) -> Option<String> {
+        git_repo_display_name(&self.local_path)
+    }
 }
 
 /// Minimal representation of the git cookbook's configuration.
@@ -502,16 +516,17 @@ fn list_recipes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// One claim per configured repo covering every `repo#<number>` name.
+/// One claim per repo alias (see `aliases`) covering every `alias#<number>`
+/// name.
 /// The searches behind `collect_recipes` are scoped (assigned issues, open
 /// PRs), but `cook` probes the forge for what a number is - so any issue or
 /// PR is cookable, not just the listed ones. Emitted unanchored; the daemon
 /// anchors them (see `enwiro_sdk::recipe_pattern`).
 ///
-/// Each claim also carries a URL rule mapping the repo's PR/issue pages
-/// (including subpages such as `/pull/42/files`) to the claimed name, so the
-/// browser extension can activate straight from a GitHub page. Claims are
-/// deduplicated by short name to match `cook`'s resolution; when two
+/// Each short-name claim also carries a URL rule mapping the repo's PR/issue
+/// pages (including subpages such as `/pull/42/files`) to the claimed name,
+/// so the browser extension can activate straight from a GitHub page. Claims
+/// are deduplicated by alias to match `cook`'s resolution; when two
 /// configured repos share a short name, the URL rule points at the
 /// lexicographically first full name.
 fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
@@ -524,9 +539,15 @@ fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
             .entry(extract_short_repo_name(full_name.clone()))
             .or_insert(full_name);
     }
-    full_by_short
+    let names: BTreeSet<String> = aliases(repos).into_iter().map(|(name, _)| name).collect();
+    names
         .into_iter()
-        .map(|(short_name, full_name)| {
+        .map(|name| {
+            // Only the canonical short name feeds the browser extension;
+            // folder and `owner/repo` aliases are for typing.
+            let url = full_by_short
+                .get(&name)
+                .map(|full_name| github_url_rule(&name, full_name));
             RecipeItem::Pattern(PatternRecipe {
                 // [0-9]{1,19}, not \d+: the regex crate's \d is Unicode and
                 // unbounded, which would claim names whose number
@@ -535,13 +556,13 @@ fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
                 // not-yet-listed numbers too, e.g. `repo#42@fix-ci`.
                 pattern: format!(
                     "{}#(?P<number>[0-9]{{1,19}})(?:@{FIX_CI_VARIANT})?",
-                    enwiro_sdk::recipe_pattern::escape(&short_name)
+                    enwiro_sdk::recipe_pattern::escape(&name)
                 ),
                 description: Some(format!(
                     "Work on PR or issue #{{number}} in {}",
-                    enwiro_sdk::recipe_pattern::escape_template(&short_name)
+                    enwiro_sdk::recipe_pattern::escape_template(&name)
                 )),
-                url: Some(github_url_rule(&short_name, &full_name)),
+                url,
             })
         })
         .collect()
@@ -687,28 +708,64 @@ fn forge_item_is_done(repo: &str, kind: &str, number: u64) -> bool {
     }
 }
 
-fn resolve_repo_config(repo_str: &str) -> anyhow::Result<RepoConfig> {
-    let repos = discover_github_repos()?;
-    let matching: Vec<_> = repos
-        .into_iter()
-        .filter(|r| {
-            r.repo
-                .rsplit_once('/')
-                .map(|(_, name)| name)
-                .unwrap_or(&r.repo)
-                == repo_str
-        })
+/// Every recipe-name prefix that refers to a configured repo, as
+/// `(alias, repo index)`: its short name, its local folder name (what the
+/// git cookbook calls it) and its full `owner/repo`. Short names are always
+/// kept, so a shared one stays an "ambiguous" cook-time error rather than
+/// a claim that silently disappears. The other aliases are skipped when
+/// they would shadow some repo's short name, and a full name is skipped
+/// when env-name flattening (`/` to `-`) would land it on another alias.
+/// Claims and resolution both come from here, so they cannot disagree.
+fn aliases(repos: &[RepoConfig]) -> Vec<(String, usize)> {
+    let shorts: BTreeSet<&str> = repos.iter().map(RepoConfig::short_name).collect();
+    let folders: Vec<Option<String>> = repos.iter().map(RepoConfig::folder_name).collect();
+    let flat_taken: BTreeSet<&str> = shorts
+        .iter()
+        .copied()
+        .chain(folders.iter().flatten().map(String::as_str))
         .collect();
+
+    let mut result: Vec<(String, usize)> = Vec::new();
+    for (index, repo) in repos.iter().enumerate() {
+        let folder = folders[index]
+            .clone()
+            .filter(|folder| !shorts.contains(folder.as_str()));
+        let full = Some(repo.repo.clone())
+            .filter(|full| !flat_taken.contains(full.replace('/', "-").as_str()));
+        for name in std::iter::once(repo.short_name().to_string())
+            .chain(folder)
+            .chain(full)
+        {
+            if !result.contains(&(name.clone(), index)) {
+                result.push((name, index));
+            }
+        }
+    }
+    result
+}
+
+fn resolve_in<'a>(repos: &'a [RepoConfig], name: &str) -> anyhow::Result<&'a RepoConfig> {
+    let mut matching: Vec<usize> = aliases(repos)
+        .into_iter()
+        .filter(|(alias, _)| alias == name)
+        .map(|(_, index)| index)
+        .collect();
+    matching.dedup();
     anyhow::ensure!(
         matching.len() <= 1,
         "Ambiguous repo name '{}': matches {} configured repos. Use a more specific name.",
-        repo_str,
+        name,
         matching.len()
     );
-    let repo_config = matching
-        .into_iter()
-        .next()
-        .with_context(|| format!("No configured repo matching '{}'", repo_str))?;
+    matching
+        .first()
+        .map(|&index| &repos[index])
+        .with_context(|| format!("No configured repo matching '{}'", name))
+}
+
+fn resolve_repo_config(repo_str: &str) -> anyhow::Result<RepoConfig> {
+    let repos = discover_github_repos()?;
+    let repo_config = resolve_in(&repos, repo_str)?.clone();
     anyhow::ensure!(
         repo_config.local_path.exists(),
         "Local clone not found at {}. Please clone the repo first.",
@@ -875,6 +932,9 @@ fn reject_fix_ci_on_issue(is_fix_ci_variant: bool, number: u64) -> anyhow::Resul
 fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     let (repo_str, number, is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
+    // Whichever alias was typed, paths use the canonical short name so every
+    // alias shares one worktree.
+    let repo_str = repo_config.short_name();
 
     // Check if a worktree already exists for either PR or issue
     let pr_wt_path = worktree_path(config, &repo_config, repo_str, "pr", number)?;
@@ -942,7 +1002,7 @@ fn prune_recipe(config: &ConfigurationValues, recipe_name: &str) -> anyhow::Resu
     let Ok(repo_config) = resolve_repo_config(repo_str) else {
         return Ok(None);
     };
-    prune_worktree(config, &repo_config, repo_str, number)
+    prune_worktree(config, &repo_config, repo_config.short_name(), number)
 }
 
 /// A PR and an issue share one number sequence per repo, so at most one of
@@ -1041,7 +1101,7 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
     gear_with_writer(
         config,
         &repo_config,
-        repo_str,
+        repo_config.short_name(),
         number,
         &mut std::io::stdout(),
     )
@@ -1175,6 +1235,148 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn repo(full: &str, path: &str) -> RepoConfig {
+        RepoConfig {
+            repo: full.to_string(),
+            local_path: PathBuf::from(path),
+        }
+    }
+
+    fn alias_names(repos: &[RepoConfig]) -> Vec<String> {
+        aliases(repos).into_iter().map(|(name, _)| name).collect()
+    }
+
+    #[test]
+    fn test_aliases_include_short_folder_and_full_name() {
+        let repos = vec![repo("kantord/enwiro", "/home/me/repos/enwiro-work")];
+        assert_eq!(
+            alias_names(&repos),
+            vec!["enwiro", "enwiro-work", "kantord/enwiro"]
+        );
+    }
+
+    #[test]
+    fn test_aliases_do_not_repeat_a_folder_equal_to_the_short_name() {
+        let repos = vec![repo("kantord/enwiro", "/home/me/repos/enwiro")];
+        assert_eq!(alias_names(&repos), vec!["enwiro", "kantord/enwiro"]);
+    }
+
+    #[test]
+    fn test_aliases_skip_a_folder_equal_to_another_repos_short_name() {
+        let repos = vec![
+            repo("x/bar", "/home/me/repos/foo"),
+            repo("y/foo", "/home/me/repos/foo-clone"),
+        ];
+        let names = alias_names(&repos);
+        assert!(names.contains(&"bar".to_string()));
+        assert_eq!(
+            names.iter().filter(|n| n.as_str() == "foo").count(),
+            1,
+            "`foo` stays the short name of y/foo only"
+        );
+        assert_eq!(resolve_in(&repos, "foo").unwrap().repo, "y/foo");
+    }
+
+    #[test]
+    fn test_aliases_skip_a_full_name_that_flattens_onto_another_alias() {
+        // Env names flatten `/` to `-`, so `a/b#1` and `a-b#1` would share
+        // one env directory.
+        let repos = vec![repo("a/b", "/repos/b"), repo("z/a-b", "/repos/a-b")];
+        let names = alias_names(&repos);
+        assert!(!names.contains(&"a/b".to_string()));
+        assert!(names.contains(&"z/a-b".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_in_matches_short_folder_and_full_name() {
+        let repos = vec![repo("kantord/enwiro", "/home/me/repos/enwiro-work")];
+        for name in ["enwiro", "enwiro-work", "kantord/enwiro"] {
+            assert_eq!(resolve_in(&repos, name).unwrap().repo, "kantord/enwiro");
+        }
+    }
+
+    #[test]
+    fn test_resolve_in_rejects_unknown_names() {
+        let repos = vec![repo("kantord/enwiro", "/home/me/repos/enwiro")];
+        let err = resolve_in(&repos, "nope").unwrap_err().to_string();
+        assert!(err.contains("No configured repo matching 'nope'"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_in_errors_when_a_folder_alias_is_shared() {
+        let repos = vec![repo("x/one", "/work/app"), repo("y/two", "/oss/app")];
+        let err = resolve_in(&repos, "app").unwrap_err().to_string();
+        assert!(err.contains("Ambiguous repo name 'app'"), "{err}");
+        // The full name is the way out.
+        assert_eq!(resolve_in(&repos, "y/two").unwrap().repo, "y/two");
+    }
+
+    #[test]
+    fn test_resolve_in_errors_when_a_short_name_is_shared() {
+        let repos = vec![
+            repo("kantord/tool", "/a/tool"),
+            repo("acme/tool", "/b/tool"),
+        ];
+        let err = resolve_in(&repos, "tool").unwrap_err().to_string();
+        assert!(err.contains("Ambiguous repo name 'tool'"), "{err}");
+        assert_eq!(resolve_in(&repos, "acme/tool").unwrap().repo, "acme/tool");
+    }
+
+    #[test]
+    fn test_alias_and_short_name_share_one_worktree_path() {
+        let repos = vec![repo("kantord/enwiro", "/home/me/repos/enwiro-work")];
+        let config = ConfigurationValues {
+            worktree_dir: Some("/wt".to_string()),
+        };
+        let paths: Vec<PathBuf> = ["enwiro", "enwiro-work", "kantord/enwiro"]
+            .into_iter()
+            .map(|name| {
+                let repo_config = resolve_in(&repos, name).unwrap();
+                worktree_path(&config, repo_config, repo_config.short_name(), "pr", 849).unwrap()
+            })
+            .collect();
+        assert_eq!(paths[0], paths[1]);
+        assert_eq!(paths[0], paths[2]);
+    }
+
+    #[test]
+    fn test_item_pattern_recipes_claim_aliases_without_url_rule() {
+        let repos = vec![repo("kantord/enwiro", "/home/me/repos/enwiro-work")];
+        let items = item_pattern_recipes(&repos);
+
+        let claim = |name: &str| -> &PatternRecipe {
+            items
+                .iter()
+                .find_map(|item| match item {
+                    RecipeItem::Pattern(p)
+                        if enwiro_sdk::recipe_pattern::match_name(
+                            &enwiro_sdk::recipe_pattern::anchor(&p.pattern),
+                            None,
+                            name,
+                        )
+                        .is_some() =>
+                    {
+                        Some(p)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no claim covers {name}"))
+        };
+
+        assert!(claim("enwiro#849").url.is_some());
+        assert!(claim("enwiro-work#849").url.is_none());
+        assert!(claim("kantord/enwiro#849").url.is_none());
+        // The fix-ci variant is claimed for aliases too.
+        claim("enwiro-work#849@fix-ci");
+        for item in &items {
+            let RecipeItem::Pattern(p) = item else {
+                panic!("expected only pattern items");
+            };
+            enwiro_sdk::recipe_pattern::validate(&p.pattern, p.description.as_deref())
+                .expect("emitted pattern must pass daemon validation");
+        }
+    }
+
     #[test]
     fn test_item_pattern_recipes_claim_any_number_per_repo() {
         let repos = vec![
@@ -1190,12 +1392,15 @@ mod tests {
 
         let items = item_pattern_recipes(&repos);
 
+        // Alias claims (folder, `owner/repo`) are covered by their own test;
+        // the canonical short-name claims are the ones with a URL rule.
         let patterns: Vec<&PatternRecipe> = items
             .iter()
             .map(|item| match item {
                 RecipeItem::Pattern(p) => p,
                 RecipeItem::Concrete(_) => panic!("expected only pattern items"),
             })
+            .filter(|p| p.url.is_some())
             .collect();
         assert_eq!(patterns.len(), 2);
 
@@ -1290,11 +1495,19 @@ mod tests {
         ];
 
         let items = item_pattern_recipes(&repos);
-        assert_eq!(items.len(), 1, "claims stay deduplicated by short name");
-        let RecipeItem::Pattern(pattern) = &items[0] else {
-            panic!("expected a pattern item");
-        };
-        let rule = pattern.url.as_ref().unwrap();
+        let canonical: Vec<&PatternRecipe> = items
+            .iter()
+            .filter_map(|item| match item {
+                RecipeItem::Pattern(p) if p.url.is_some() => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            canonical.len(),
+            1,
+            "short-name claims stay deduplicated by short name"
+        );
+        let rule = canonical[0].url.as_ref().unwrap();
         assert!(rule.pattern.contains("github.com/acme/tool"));
     }
 
