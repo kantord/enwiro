@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-garnish-submodules"
-version = "0.1.20"
+version = "0.1.21"
 edition = "2024"
 description = "Garnish that initialises git submodules on env cook"
 license = "MIT OR Apache-2.0"

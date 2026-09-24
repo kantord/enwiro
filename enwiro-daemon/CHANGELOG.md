@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.26](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.25...enwiro-daemon-v0.0.26) - 2026-09-24
+
+### Added
+
+- add `enw stale` ([#839](https://github.com/kantord/enwiro/pull/839))
+
 ## [0.0.25](https://github.com/kantord/enwiro/compare/enwiro-daemon-v0.0.24...enwiro-daemon-v0.0.25) - 2026-09-13
 
 ### Added
