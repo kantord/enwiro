@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-gui"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 description = "Local web GUI for enwiro: a single binary that serves an embedded React SPA to the browser"
 license = "MIT OR Apache-2.0"
