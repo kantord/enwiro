@@ -56,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: taiki-e/install-action@cb30b4c9cca98bbd320daf128741850f83d8a99f # just
+      - uses: taiki-e/install-action@040dca98aa7ebdea5d29fa0979fa5a7663be20bd # just
       - name: Build
         run: cargo build ${{ matrix.cargo_args }}
       - name: Test
@@ -82,7 +82,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: taiki-e/install-action@6a0cb247e1ded000e6ae26346b5ab63b08c98e6a # cargo-deny
+      - uses: taiki-e/install-action@caf6763a71f372082d0927c4ad43f42b97d889bf # cargo-deny
       - run: cargo deny check
 
   docs:
