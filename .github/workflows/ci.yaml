@@ -116,7 +116,13 @@ jobs:
       - name: Biome check (format + lint, repo-wide)
         run: pnpm exec biome check
       - name: Audit dependencies
-        run: pnpm audit --audit-level high
+        run: |
+          # Temporary: braces has no patch (GHSA-vfj7-8cjw-p6xm). Ignore expires 2026-10-18.
+          if [[ "$(date +%F)" < "2026-10-18" ]]; then
+            pnpm audit --audit-level high --ignore GHSA-vfj7-8cjw-p6xm
+          else
+            pnpm audit --audit-level high
+          fi
       - name: Type-check (tsc)
         run: pnpm --filter ./enwiro-gui/web exec tsc -b
       - name: Build frontend
