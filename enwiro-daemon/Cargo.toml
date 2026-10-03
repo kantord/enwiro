@@ -30,23 +30,23 @@ path = "src/main.rs"
 container-wrap = ["dep:which"]
 
 [dependencies]
-anyhow = "1"
-async-trait = "0.1"
-chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "serde", "clock"] }
 dirs = "7"
 enwiro-sdk.workspace = true
-futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
 home.workspace = true
-jsonrpsee = { version = "=0.26", default-features = false, features = ["server-core", "macros"] }
-libc = "0.2"
+jsonrpsee = { version = "=0.26.1", default-features = false, features = ["server-core", "macros"] }
+libc = "0.2.189"
 optative-process-pool = "0.0.9"
-serde = { version = "1.0.197", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 system-idle-time = "1.0.4"
-tokio = { version = "1.37.0", default-features = false, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
-tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
+tokio = { version = "1.53.1", default-features = false, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
+tokio-util = { version = "0.7.19", default-features = false, features = ["codec"] }
 tracing.workspace = true
-which = { version = "8", optional = true }
+which = { version = "8.0.6", optional = true }
 
 [dev-dependencies]
 proptest = "=1.11.0"

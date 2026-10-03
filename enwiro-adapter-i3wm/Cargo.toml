@@ -20,19 +20,19 @@ algorithm = "minisign"
 pubkey = "RWQowPNA2jR6/GBAZNkd5d6by7LwOPBdEwK1NptQjAPGrB8UhUUHHP8T"
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4.5.4", features = ["derive"] }
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
 enwiro-sdk = { workspace = true, features = ["cli"] }
 i3ipc-types = "0.16.0"
-optative = "0.1.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = "1.37.0"
+optative = "0.1.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = "1.53.1"
 tokio-i3ipc = "0.16.0"
-tokio-stream = "0.1"
-toml = "1.0"
+tokio-stream = "0.1.19"
+toml = "1.1.6"
 tracing.workspace = true
-which = "8"
+which = "8.0.6"
 
 [dev-dependencies]
 proptest = "=1.11.0"
