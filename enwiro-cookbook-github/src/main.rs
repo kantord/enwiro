@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 use clap::Parser;
 use enwiro_sdk::cli::{CookArgs, CookbookCore};
-use enwiro_sdk::cookbook::CookbookCapability;
+use enwiro_sdk::cookbook::{CookbookCapability, PruneOutcome};
 use enwiro_sdk::git::remove_worktree;
 use enwiro_sdk::metadata::DeclaredCapabilities;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
@@ -995,7 +995,10 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
 /// the two candidate paths can ever exist. Recipes whose repo can't be
 /// resolved (unknown, or no local clone) have nothing this cookbook can
 /// safely prune.
-fn prune_recipe(config: &ConfigurationValues, recipe_name: &str) -> anyhow::Result<Option<String>> {
+fn prune_recipe(
+    config: &ConfigurationValues,
+    recipe_name: &str,
+) -> anyhow::Result<Option<PruneOutcome>> {
     let Ok((repo_str, number, _is_fix_ci_variant)) = parse_recipe_name(recipe_name) else {
         return Ok(None);
     };
@@ -1012,7 +1015,7 @@ fn prune_worktree(
     repo_config: &RepoConfig,
     repo_str: &str,
     number: u64,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<PruneOutcome>> {
     for prefix in ["pr", "issue"] {
         let wt_path = worktree_path(config, repo_config, repo_str, prefix, number)?;
         if wt_path.exists() {
@@ -1894,10 +1897,7 @@ mod tests {
 
         let outcome = prune_worktree(&config, &repo_config, "my-project", 42).unwrap();
 
-        assert!(
-            outcome.is_some_and(|o| o.contains("removed worktree")),
-            "expected a removal outcome"
-        );
+        assert_eq!(outcome, Some(PruneOutcome::Removed));
         assert!(!wt_path.exists(), "worktree directory must be gone");
     }
 
@@ -1922,8 +1922,8 @@ mod tests {
         let outcome = prune_worktree(&config, &repo_config, "my-project", 7).unwrap();
 
         assert!(
-            outcome.is_some_and(|o| o.contains("kept worktree")),
-            "expected a kept outcome for a dirty worktree"
+            matches!(outcome, Some(PruneOutcome::Kept { .. })),
+            "expected a kept outcome for a dirty worktree, got: {outcome:?}"
         );
         assert!(wt_path.exists(), "dirty worktree must survive");
     }

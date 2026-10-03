@@ -167,6 +167,45 @@ exists (e.g., a previously cloned repo), just print the existing path.
 Exit with code 0 on success. On failure, exit non-zero and write an error
 message to stderr.
 
+### `prune <recipe_name>`
+
+```
+enwiro-cookbook-yourname prune my-project
+```
+
+Tear down whatever `cook` materialized for the recipe (a worktree, a clone, a
+scratch directory). This subcommand is **optional**: implement it only if
+your cookbook creates something on disk that should go away with its
+environment. Enwiro calls it when an environment is removed (`enw rm`,
+`enw stale prune`), before the environment itself is deleted, and gives it
+10 seconds.
+
+Print a JSON object to stdout and exit 0:
+
+```json
+{"status": "removed"}
+```
+
+Everything is gone.
+
+```json
+{"status": "kept", "reason": "uncommitted changes in /path/wt - commit or discard them, or run: git -C '/path/repo' worktree remove --force '/path/wt'"}
+```
+
+You could not (or must not) remove it. Enwiro keeps the environment, so the
+user can run the removal again once they have dealt with it. Enwiro prints
+`reason` verbatim on one line, and knows nothing about what it means, so say
+which resource is affected and, if there is one, how the user can fix it.
+Use `kept` for expected refusals such as unsaved work; never delete data the
+user has not agreed to lose.
+
+If there is nothing to tear down (the resource is already gone, or the
+recipe is not one your cookbook materialized), print nothing and exit 0.
+
+Make `prune` safe to repeat: after the user fixes the problem you reported,
+the next call must succeed. Exit non-zero only when the cleanup itself failed
+unexpectedly; enwiro then reports that failure to the user.
+
 ### `metadata`
 
 ```

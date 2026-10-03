@@ -7,7 +7,7 @@ use std::{
 use anyhow::Context;
 use clap::Parser;
 use enwiro_sdk::cli::{CookArgs, CookbookCore};
-use enwiro_sdk::cookbook::CookbookCapability;
+use enwiro_sdk::cookbook::{CookbookCapability, PruneOutcome};
 use enwiro_sdk::git::remove_worktree;
 use enwiro_sdk::metadata::DeclaredCapabilities;
 use enwiro_sdk::{CookbookMetadata, CookbookPayload, PatternRecipe, Recipe, RecipeItem};
@@ -674,7 +674,10 @@ fn external_paths(config: &ConfigurationValues, args: ExternalPathsArgs) -> anyh
 /// Base-repo recipes (no `@branch`) and recipes whose base repo can't be
 /// found (moved, or no longer matched by `repo_globs`) have nothing this
 /// cookbook can safely prune.
-fn prune_recipe(config: &ConfigurationValues, recipe_name: &str) -> anyhow::Result<Option<String>> {
+fn prune_recipe(
+    config: &ConfigurationValues,
+    recipe_name: &str,
+) -> anyhow::Result<Option<PruneOutcome>> {
     let Some((repo_name, branch_name)) = recipe_name.split_once('@') else {
         return Ok(None);
     };
@@ -916,10 +919,7 @@ mod tests {
 
         let outcome = prune_recipe(&config, "my-project@feature-x").unwrap();
 
-        assert!(
-            outcome.is_some_and(|o| o.contains("removed worktree")),
-            "expected a removal outcome"
-        );
+        assert_eq!(outcome, Some(PruneOutcome::Removed));
         assert!(!wt_path.exists(), "worktree directory must be gone");
     }
 
@@ -944,8 +944,8 @@ mod tests {
         let outcome = prune_recipe(&config, "my-project@feature-x").unwrap();
 
         assert!(
-            outcome.is_some_and(|o| o.contains("kept worktree")),
-            "expected a kept outcome for a dirty worktree"
+            matches!(outcome, Some(PruneOutcome::Kept { .. })),
+            "expected a kept outcome for a dirty worktree, got: {outcome:?}"
         );
         assert!(wt_path.exists(), "dirty worktree must survive");
     }

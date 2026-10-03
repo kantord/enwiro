@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use crate::client::CookbookTrait;
-use crate::cookbook::Recipe;
+use crate::cookbook::{PruneOutcome, Recipe};
 use crate::plugin::PluginName;
 
 pub struct FakeCookbook {
@@ -16,7 +16,7 @@ pub struct FakeCookbook {
     pub priority: u32,
     pub gear_json: Option<serde_json::Value>,
     pub describe_result: Option<String>,
-    pub prune_result: Option<String>,
+    pub prune_result: Option<PruneOutcome>,
 }
 
 impl FakeCookbook {
@@ -45,8 +45,8 @@ impl FakeCookbook {
         self
     }
 
-    pub fn with_prune(mut self, outcome: &str) -> Self {
-        self.prune_result = Some(outcome.to_string());
+    pub fn with_prune(mut self, outcome: PruneOutcome) -> Self {
+        self.prune_result = Some(outcome);
         self
     }
 
@@ -116,7 +116,7 @@ impl CookbookTrait for FakeCookbook {
         Ok(self.describe_result.clone())
     }
 
-    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
         Ok(self.prune_result.clone())
     }
 }
@@ -138,7 +138,7 @@ impl CookbookTrait for FailingCookbook {
         self.cookbook_name.as_str()
     }
 
-    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
         anyhow::bail!("simulated failure")
     }
 }

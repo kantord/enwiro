@@ -225,6 +225,7 @@ pub mod test_utilities {
             cookbooks: vec![],
             cache_dir: Some(temp_dir.path().join("daemon")),
             global_env: None,
+            exit_failure: false,
         };
         (temp_dir, context, activated, notifications)
     }
