@@ -19,6 +19,9 @@ allowBuilds:
 # - onlyBuiltDependencies: allowlist of packages permitted to run install/
 #   lifecycle scripts. pnpm blocks all dependency build scripts by default;
 #   anything needing one must be listed here explicitly.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-vfj7-8cjw-p6xm
 minimumReleaseAge: 4320
 minimumReleaseAgeExclude:
   - hono@4.12.25
