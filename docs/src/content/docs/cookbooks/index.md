@@ -20,8 +20,11 @@ can activate in enwiro comes from a cookbook.
 
 - **github** - Surfaces open pull requests in your repositories, and issues
   assigned to you, as `repo#123` recipes - each becoming its own
-  environment when you activate it. Requires an authenticated
-  [`gh`](https://cli.github.com/) CLI.
+  environment when you activate it. A CI run can also be opened as
+  `repo.gha@run-<id>`: a new branch `fix-ci-<id>` at the commit the run
+  executed against (the browser extension derives the name from the run's
+  Actions page). Requires an authenticated [`gh`](https://cli.github.com/)
+  CLI.
 
 - **chezmoi** - Exposes your [chezmoi](https://www.chezmoi.io/) dotfiles
   source directory as a permanent `chezmoi` environment (it is always
