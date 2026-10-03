@@ -222,6 +222,22 @@ fn parse_recipe_name(name: &str) -> anyhow::Result<(&str, u64, bool)> {
     Ok((repo, number, is_fix_ci_variant))
 }
 
+/// Separator of a CI-run recipe name (#861): `repo.gha@run-<id>`. Not
+/// `repo@...`, which the git cookbook's branch claim (`repo@.+`) would
+/// shadow, and not `repo#...`, which names PRs and issues.
+const RUN_SEPARATOR: &str = ".gha@run-";
+
+/// Parse a CI-run recipe name like "repo.gha@run-123" into ("repo", 123).
+/// `None` for any other name, so callers can fall through to
+/// `parse_recipe_name`.
+fn parse_run_recipe_name(name: &str) -> Option<(&str, u64)> {
+    let (repo, run_id) = name.rsplit_once(RUN_SEPARATOR)?;
+    if repo.is_empty() || !run_id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some((repo, run_id.parse().ok()?))
+}
+
 /// Build a GitHub search query string.
 /// `type_filter` controls the item type, e.g.:
 /// - `"is:pr is:open"` for pull requests
@@ -516,6 +532,22 @@ fn list_recipes() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Short repo name to the full `owner/repo` its URL rules point at. When
+/// several configured repos share a short name, the lexicographically first
+/// full name wins.
+fn canonical_full_names(repos: &[RepoConfig]) -> BTreeMap<String, String> {
+    let mut full_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
+    full_names.sort();
+    full_names.dedup();
+    let mut full_by_short: BTreeMap<String, String> = BTreeMap::new();
+    for full_name in full_names {
+        full_by_short
+            .entry(extract_short_repo_name(full_name.clone()))
+            .or_insert(full_name);
+    }
+    full_by_short
+}
+
 /// One claim per repo alias (see `aliases`) covering every `alias#<number>`
 /// name.
 /// The searches behind `collect_recipes` are scoped (assigned issues, open
@@ -530,15 +562,7 @@ fn list_recipes() -> anyhow::Result<()> {
 /// configured repos share a short name, the URL rule points at the
 /// lexicographically first full name.
 fn item_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
-    let mut full_names: Vec<String> = repos.iter().map(|r| r.repo.clone()).collect();
-    full_names.sort();
-    full_names.dedup();
-    let mut full_by_short: BTreeMap<String, String> = BTreeMap::new();
-    for full_name in full_names {
-        full_by_short
-            .entry(extract_short_repo_name(full_name.clone()))
-            .or_insert(full_name);
-    }
+    let full_by_short = canonical_full_names(repos);
     let names: BTreeSet<String> = aliases(repos).into_iter().map(|(name, _)| name).collect();
     names
         .into_iter()
@@ -587,6 +611,52 @@ fn github_url_rule(short_name: &str, full_name: &str) -> enwiro_sdk::url_rule::U
     }
 }
 
+/// The claims for CI-run recipes (#861), one per alias like
+/// `item_pattern_recipes`. Runs are never listed: the browser extension
+/// derives the name from an Actions page URL and the user can type it.
+fn run_pattern_recipes(repos: &[RepoConfig]) -> Vec<RecipeItem> {
+    let full_by_short = canonical_full_names(repos);
+    let names: BTreeSet<String> = aliases(repos).into_iter().map(|(name, _)| name).collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let url = full_by_short
+                .get(&name)
+                .map(|full_name| github_run_url_rule(&name, full_name));
+            RecipeItem::Pattern(PatternRecipe {
+                // [0-9]{1,19} for the same reason as the item claim: the
+                // u64 parse must accept everything the claim covers.
+                pattern: format!(
+                    "{}{}(?P<run_id>[0-9]{{1,19}})",
+                    enwiro_sdk::recipe_pattern::escape(&name),
+                    enwiro_sdk::recipe_pattern::escape(RUN_SEPARATOR)
+                ),
+                description: Some(format!(
+                    "Work on a fix for CI run {{run_id}} in {}",
+                    enwiro_sdk::recipe_pattern::escape_template(&name)
+                )),
+                url,
+            })
+        })
+        .collect()
+}
+
+/// The URL rule routing a repo's Actions run pages (including `/job/<id>`
+/// and other subpages) to its `repo.gha@run-<id>` recipe.
+fn github_run_url_rule(short_name: &str, full_name: &str) -> enwiro_sdk::url_rule::UrlRule {
+    enwiro_sdk::url_rule::UrlRule {
+        pattern: format!(
+            "https://github.com/{}/actions/runs/:run_id([0-9]+){{/*}}?",
+            full_name
+        ),
+        recipe: format!(
+            "{}{}{{run_id}}",
+            enwiro_sdk::recipe_pattern::escape_template(short_name),
+            enwiro_sdk::recipe_pattern::escape_template(RUN_SEPARATOR)
+        ),
+    }
+}
+
 fn collect_recipe_items() -> Vec<RecipeItem> {
     let mut items: Vec<RecipeItem> = collect_recipes()
         .into_iter()
@@ -594,6 +664,7 @@ fn collect_recipe_items() -> Vec<RecipeItem> {
         .collect();
     if let Ok(repos) = discover_github_repos() {
         items.extend(item_pattern_recipes(&repos));
+        items.extend(run_pattern_recipes(&repos));
     }
     items
 }
@@ -919,6 +990,99 @@ fn cook_issue(
     print_worktree_path(&wt_path)
 }
 
+/// The fields of a workflow run this cookbook needs, from
+/// `gh api repos/{repo}/actions/runs/{id}`.
+#[derive(Debug, PartialEq, Eq)]
+struct RunInfo {
+    head_sha: String,
+    head_branch: Option<String>,
+    name: Option<String>,
+}
+
+fn parse_run_response(json: &[u8]) -> anyhow::Result<RunInfo> {
+    let value: serde_json::Value =
+        serde_json::from_slice(json).context("gh api produced invalid JSON")?;
+    let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(String::from);
+    Ok(RunInfo {
+        head_sha: text("head_sha").context("gh api response had no string 'head_sha'")?,
+        head_branch: text("head_branch"),
+        name: text("name"),
+    })
+}
+
+fn fetch_run(repo: &str, run_id: u64) -> anyhow::Result<RunInfo> {
+    let output = Command::new("gh")
+        .args(["api", &format!("repos/{repo}/actions/runs/{run_id}")])
+        .output()
+        .context(
+            "Failed to run gh CLI. Is it installed and authenticated? \
+             (https://cli.github.com/, then run: gh auth login)",
+        )?;
+    anyhow::ensure!(
+        output.status.success(),
+        "gh api failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_run_response(&output.stdout)
+}
+
+/// Create a worktree on a new branch `fix-ci-<run_id>` at the commit a CI
+/// run executed against (#861), so a failure on e.g. main can be reproduced
+/// and fixed in its own environment. The branch is created at the run's
+/// `head_sha`, not the branch tip, which may have moved on. No PR routing:
+/// deduplicating against an existing PR workspace is a core concern.
+fn cook_run(config: &ConfigurationValues, repo_str: &str, run_id: u64) -> anyhow::Result<()> {
+    let repo_config = resolve_repo_config(repo_str)?;
+    let repo_str = repo_config.short_name();
+    let wt_path = worktree_path(config, &repo_config, repo_str, "run", run_id)?;
+    if wt_path.exists() {
+        return print_worktree_path(&wt_path);
+    }
+
+    let run = fetch_run(&repo_config.repo, run_id)?;
+    let local_path_str = repo_config
+        .local_path
+        .to_str()
+        .context("Could not convert local path to string")?;
+    let fetch_output = Command::new("git")
+        .args(["-C", local_path_str, "fetch", "origin", &run.head_sha])
+        .output()
+        .context("Failed to run git fetch")?;
+    anyhow::ensure!(
+        fetch_output.status.success(),
+        "Failed to fetch commit {} of run {} from {}: {}",
+        run.head_sha,
+        run_id,
+        repo_config.repo,
+        String::from_utf8_lossy(&fetch_output.stderr).trim()
+    );
+
+    std::fs::create_dir_all(wt_path.parent().unwrap())
+        .context("Could not create worktree directory")?;
+    let repo = git2::Repository::open(&repo_config.local_path)
+        .context("Could not open repository for worktree creation")?;
+    let commit = repo
+        .find_commit(git2::Oid::from_str(&run.head_sha).context("Invalid head_sha")?)
+        .with_context(|| format!("Commit {} is missing after fetch", run.head_sha))?;
+
+    let branch_name = format!("fix-ci-{run_id}");
+    let branch = match repo.find_branch(&branch_name, git2::BranchType::Local) {
+        Ok(existing) => existing,
+        Err(_) => repo
+            .branch(&branch_name, &commit, false)
+            .with_context(|| format!("Could not create branch {branch_name}"))?,
+    };
+    let reference = branch.into_reference();
+
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&reference));
+    repo.worktree(&format!("enwiro-run-{run_id}"), &wt_path, Some(&opts))
+        .with_context(|| format!("Could not create worktree for run {run_id}"))?;
+
+    tracing::debug!(path = %wt_path.display(), run = run_id, "Created worktree for CI run");
+    print_worktree_path(&wt_path)
+}
+
 /// A goal-variant number resolved to an issue, not a PR - the variant only
 /// makes sense for PRs (#756).
 fn reject_fix_ci_on_issue(is_fix_ci_variant: bool, number: u64) -> anyhow::Result<()> {
@@ -930,6 +1094,9 @@ fn reject_fix_ci_on_issue(is_fix_ci_variant: bool, number: u64) -> anyhow::Resul
 }
 
 fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
+    if let Some((repo_str, run_id)) = parse_run_recipe_name(&args.recipe_name) {
+        return cook_run(config, repo_str, run_id);
+    }
     let (repo_str, number, is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
     // Whichever alias was typed, paths use the canonical short name so every
@@ -999,6 +1166,23 @@ fn prune_recipe(
     config: &ConfigurationValues,
     recipe_name: &str,
 ) -> anyhow::Result<Option<PruneOutcome>> {
+    if let Some((repo_str, run_id)) = parse_run_recipe_name(recipe_name) {
+        let Ok(repo_config) = resolve_repo_config(repo_str) else {
+            return Ok(None);
+        };
+        let wt_path = worktree_path(
+            config,
+            &repo_config,
+            repo_config.short_name(),
+            "run",
+            run_id,
+        )?;
+        return if wt_path.exists() {
+            Ok(Some(remove_worktree(&repo_config.local_path, &wt_path)?))
+        } else {
+            Ok(None)
+        };
+    }
     let Ok((repo_str, number, _is_fix_ci_variant)) = parse_recipe_name(recipe_name) else {
         return Ok(None);
     };
@@ -1098,7 +1282,28 @@ fn gear_with_writer<W: Write>(
     anyhow::bail!("No worktree found for {}#{}", repo_str, number)
 }
 
+const RUN_KIND: GearKind = GearKind {
+    worktree_subdir: "run",
+    description_prefix: "CI run",
+    page_description: "Open the run page",
+    url_subdir: "actions/runs",
+};
+
 fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
+    if let Some((repo_str, run_id)) = parse_run_recipe_name(&args.recipe_name) {
+        let repo_config = resolve_repo_config(repo_str)?;
+        let path = worktree_path(
+            config,
+            &repo_config,
+            repo_config.short_name(),
+            "run",
+            run_id,
+        )?;
+        anyhow::ensure!(path.exists(), "No worktree found for run {run_id}");
+        let file = build_gear_file_for_kind(&RUN_KIND, &repo_config.repo, run_id);
+        serde_json::to_writer(std::io::stdout(), &file)?;
+        return Ok(());
+    }
     let (repo_str, number, _is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
     gear_with_writer(
@@ -1119,7 +1324,10 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
 /// cookbook, there's no "base repo" recipe here to special-case: every PR
 /// and issue recipe is a worktree.
 fn resolve_external_paths(recipe_name: &str) -> anyhow::Result<Vec<String>> {
-    let (repo_str, _number, _is_fix_ci_variant) = parse_recipe_name(recipe_name)?;
+    let repo_str = match parse_run_recipe_name(recipe_name) {
+        Some((repo_str, _run_id)) => repo_str,
+        None => parse_recipe_name(recipe_name)?.0,
+    };
     let repo_config = resolve_repo_config(repo_str)?;
     Ok(vec![
         repo_config
@@ -1173,7 +1381,22 @@ fn resolve_description(repo: &str, number: u64) -> anyhow::Result<String> {
     parse_describe_response(&output.stdout)
 }
 
+/// A run's description, e.g. `[CI run] CI on main`.
+fn run_description(run: &RunInfo) -> String {
+    let name = sanitize_title(run.name.as_deref().unwrap_or("workflow"));
+    match &run.head_branch {
+        Some(branch) => format!("[CI run] {} on {}", name, sanitize_title(branch)),
+        None => format!("[CI run] {}", name),
+    }
+}
+
 fn describe(args: DescribeArgs) -> anyhow::Result<()> {
+    if let Some((repo_str, run_id)) = parse_run_recipe_name(&args.recipe_name) {
+        let repo_config = resolve_repo_config(repo_str)?;
+        let run = fetch_run(&repo_config.repo, run_id)?;
+        println!("{}", serde_json::to_string(&run_description(&run))?);
+        return Ok(());
+    }
     let (repo_str, number, _is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
     let repo_config = resolve_repo_config(repo_str)?;
     let description = resolve_description(&repo_config.repo, number)?;
@@ -1512,6 +1735,165 @@ mod tests {
         );
         let rule = canonical[0].url.as_ref().unwrap();
         assert!(rule.pattern.contains("github.com/acme/tool"));
+    }
+
+    #[test]
+    fn test_parse_run_recipe_name_examples() {
+        assert_eq!(
+            parse_run_recipe_name("enwiro.gha@run-9876543210"),
+            Some(("enwiro", 9876543210))
+        );
+        assert_eq!(
+            parse_run_recipe_name("next.js.gha@run-5"),
+            Some(("next.js", 5))
+        );
+        assert_eq!(
+            parse_run_recipe_name("owner/repo.gha@run-5"),
+            Some(("owner/repo", 5))
+        );
+    }
+
+    #[test]
+    fn test_parse_run_recipe_name_rejects_other_names() {
+        for name in [
+            "enwiro#42",
+            "enwiro#42@fix-ci",
+            "enwiro@run-5",
+            "enwiro.gha@run-",
+            "enwiro.gha@run-abc",
+            "enwiro.gha@run-+5",
+            "enwiro.gha@run-5@fix-ci",
+            ".gha@run-5",
+        ] {
+            assert_eq!(parse_run_recipe_name(name), None, "{name}");
+        }
+    }
+
+    fn run_claims(repos: &[RepoConfig]) -> Vec<PatternRecipe> {
+        run_pattern_recipes(repos)
+            .into_iter()
+            .map(|item| match item {
+                RecipeItem::Pattern(p) => p,
+                RecipeItem::Concrete(_) => panic!("expected only pattern items"),
+            })
+            .collect()
+    }
+
+    fn claims_name(claim: &PatternRecipe, name: &str) -> bool {
+        enwiro_sdk::recipe_pattern::match_name(
+            &enwiro_sdk::recipe_pattern::anchor(&claim.pattern),
+            None,
+            name,
+        )
+        .is_some()
+    }
+
+    #[test]
+    fn test_run_pattern_recipes_claim_every_alias_but_only_short_name_has_url_rule() {
+        let repos = vec![repo("kantord/enwiro", "/home/me/repos/enwiro-work")];
+        let claims = run_claims(&repos);
+
+        let claim_for = |name: &str| {
+            claims
+                .iter()
+                .find(|c| claims_name(c, name))
+                .unwrap_or_else(|| panic!("no claim covers {name}"))
+        };
+        assert!(claim_for("enwiro.gha@run-123").url.is_some());
+        assert!(claim_for("enwiro-work.gha@run-123").url.is_none());
+        assert!(claim_for("kantord/enwiro.gha@run-123").url.is_none());
+        for claim in &claims {
+            enwiro_sdk::recipe_pattern::validate(&claim.pattern, claim.description.as_deref())
+                .expect("emitted pattern must pass daemon validation");
+        }
+    }
+
+    #[test]
+    fn test_run_claim_is_exact_and_leaves_branch_and_item_names_alone() {
+        let repos = vec![repo("vercel/next.js", "/tmp/next.js")];
+        let claims = run_claims(&repos);
+        let claim = claims.iter().find(|c| c.url.is_some()).unwrap();
+
+        assert!(claims_name(claim, "next.js.gha@run-1"));
+        assert!(claims_name(claim, "next.js.gha@run-1234567890123456789"));
+        assert!(!claims_name(claim, "next-js.gha@run-1"));
+        assert!(!claims_name(claim, "next.js.gha@run-abc"));
+        assert!(!claims_name(claim, "next.js.gha@run-12345678901234567890"));
+        assert!(!claims_name(claim, "next.js@run-1"));
+        assert!(!claims_name(claim, "next.js#1"));
+
+        // Item claims must not cover run names, nor the reverse.
+        for item in item_pattern_recipes(&repos) {
+            let RecipeItem::Pattern(p) = item else {
+                panic!("expected only pattern items");
+            };
+            assert!(!claims_name(&p, "next.js.gha@run-1"));
+        }
+    }
+
+    #[test]
+    fn test_run_pattern_description_names_the_run_and_repo() {
+        let repos = vec![repo("kantord/enwiro", "/tmp/enwiro")];
+        let claims = run_claims(&repos);
+        let claim = claims.iter().find(|c| c.url.is_some()).unwrap();
+        let matched = enwiro_sdk::recipe_pattern::match_name(
+            &enwiro_sdk::recipe_pattern::anchor(&claim.pattern),
+            claim.description.as_deref(),
+            "enwiro.gha@run-77",
+        )
+        .unwrap();
+        assert_eq!(
+            matched.description.as_deref(),
+            Some("Work on a fix for CI run 77 in enwiro")
+        );
+    }
+
+    #[test]
+    fn test_run_url_rule_is_valid_and_renders_a_claimed_name() {
+        let rule = github_run_url_rule("enwiro", "kantord/enwiro");
+        enwiro_sdk::url_rule::validate(&rule).expect("emitted URL rule must pass validation");
+        assert_eq!(
+            rule.pattern,
+            "https://github.com/kantord/enwiro/actions/runs/:run_id([0-9]+){/*}?"
+        );
+        assert_eq!(rule.recipe, "enwiro.gha@run-{run_id}");
+    }
+
+    #[test]
+    fn test_parse_run_response_extracts_commit_branch_and_name() {
+        let json =
+            br#"{"head_sha":"abc123","head_branch":"main","name":"CI","status":"completed"}"#;
+        assert_eq!(
+            parse_run_response(json).unwrap(),
+            RunInfo {
+                head_sha: "abc123".to_string(),
+                head_branch: Some("main".to_string()),
+                name: Some("CI".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_run_response_tolerates_missing_optional_fields() {
+        let run = parse_run_response(br#"{"head_sha":"abc123","head_branch":null}"#).unwrap();
+        assert_eq!(run.head_branch, None);
+        assert_eq!(run.name, None);
+    }
+
+    #[test]
+    fn test_parse_run_response_errors_without_head_sha() {
+        assert!(parse_run_response(br#"{"name":"CI"}"#).is_err());
+        assert!(parse_run_response(b"not json").is_err());
+    }
+
+    #[test]
+    fn test_run_description_includes_workflow_and_branch() {
+        let run = RunInfo {
+            head_sha: "abc".to_string(),
+            head_branch: Some("main".to_string()),
+            name: Some("CI\nbuild".to_string()),
+        };
+        assert_eq!(run_description(&run), "[CI run] CI build on main");
     }
 
     #[test]
