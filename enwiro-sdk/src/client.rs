@@ -4,7 +4,7 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use crate::cookbook::{CookbookMetadata, CookbookPayload, Recipe};
+use crate::cookbook::{CookbookMetadata, CookbookPayload, PruneOutcome, Recipe};
 use crate::goal::GoalDetail;
 use crate::plugin::Plugin;
 
@@ -113,10 +113,12 @@ pub trait CookbookTrait {
     /// Tear down whatever this cookbook materialized on disk for `recipe`,
     /// if anything - e.g. a git worktree. Called once per environment
     /// removal (`enw rm`, `enw stale prune`), symmetric with `cook`: the
-    /// host never learns what existed or how it was cleaned up, just an
-    /// optional human-readable outcome message. A cookbook with nothing to
-    /// tear down (or that doesn't implement pruning) returns `Ok(None)`.
-    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<String>> {
+    /// host never learns what existed or how it was cleaned up, just
+    /// whether it is gone or kept (with a reason to show the user). A
+    /// cookbook with nothing to tear down returns `Ok(None)`. `Err` means
+    /// the prune itself failed (crash, timeout, no `prune` subcommand), and
+    /// is not the same thing as "kept".
+    fn prune(&self, _recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
         Ok(None)
     }
 }
@@ -563,14 +565,15 @@ impl CookbookTrait for RpcCookbookClient {
         ))
     }
 
-    /// Best-effort `prune <recipe>` via the daemon -- see
-    /// [`best_effort_json_via_rpc`] for the shared failure contract.
-    fn prune(&self, recipe: &str) -> anyhow::Result<Option<String>> {
-        Ok(best_effort_json_via_rpc(
-            self.invoke("prune", vec![recipe.to_string()]),
-            self.plugin.name.as_str(),
-            "prune",
-        ))
+    /// `prune <recipe>` via the daemon. Unlike the other optional
+    /// subcommands this is NOT best-effort: the caller must be able to tell
+    /// a failed prune from "nothing to prune" before it deletes the env
+    /// that records how to retry it.
+    fn prune(&self, recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
+        let stdout = self
+            .invoke("prune", vec![recipe.to_string()])
+            .with_context(|| format!("Cookbook '{}' failed to prune", self.plugin.name))?;
+        PruneOutcome::parse_stdout(&stdout)
     }
 }
 
@@ -666,16 +669,22 @@ impl CookbookTrait for CookbookClient {
         ))
     }
 
-    /// Invoke the cookbook binary's optional `prune <recipe>` subcommand --
-    /// see [`best_effort_json_via_subprocess`] for the shared failure
-    /// contract.
-    fn prune(&self, recipe: &str) -> anyhow::Result<Option<String>> {
-        Ok(best_effort_json_via_subprocess(
-            self.spawn_with_payload_timeout(&["prune", recipe], BEST_EFFORT_SUBCOMMAND_TIMEOUT),
-            self.plugin.name.as_str(),
-            recipe,
-            "prune",
-        ))
+    /// Invoke the cookbook binary's `prune <recipe>` subcommand. NOT
+    /// best-effort, for the same reason as the RPC client's `prune`: spawn
+    /// failure, timeout and a non-zero exit are all errors.
+    fn prune(&self, recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
+        let output = self
+            .spawn_with_payload_timeout(&["prune", recipe], BEST_EFFORT_SUBCOMMAND_TIMEOUT)
+            .with_context(|| format!("Cookbook '{}' failed to prune", self.plugin.name))?;
+        if !output.status.success() {
+            bail!(
+                "Cookbook '{}' prune exited with {}: {}",
+                self.plugin.name,
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        PruneOutcome::parse_stdout(&String::from_utf8_lossy(&output.stdout))
     }
 }
 

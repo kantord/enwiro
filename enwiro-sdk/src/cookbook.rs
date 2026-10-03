@@ -221,9 +221,90 @@ impl From<Recipe> for RecipeItem {
     }
 }
 
+/// What a cookbook's `prune <recipe>` subcommand reports on stdout, as JSON.
+/// "Nothing to prune" is empty stdout (see [`PruneOutcome::parse_stdout`]),
+/// not a variant. The host never looks inside `reason`: it prints it
+/// verbatim, so whatever the user needs to act on (the path, a manual fix)
+/// belongs in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum PruneOutcome {
+    /// Everything the cookbook materialized for the recipe is gone.
+    Removed,
+    /// Cleanup stopped short; the host keeps the environment so the prune
+    /// can be retried once the user has dealt with `reason`.
+    Kept { reason: String },
+}
+
+impl PruneOutcome {
+    /// Parse a `prune` subcommand's stdout. Empty means the cookbook had
+    /// nothing to prune.
+    pub fn parse_stdout(stdout: &str) -> anyhow::Result<Option<Self>> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Tagged(PruneOutcome),
+            // TODO(2027-01-03): remove this fallback and the string variant.
+            // Cookbooks built before `PruneOutcome` existed printed a bare
+            // JSON string; it is read as `Removed`, which is what the host
+            // assumed for it then. Deliberately undocumented: cookbook
+            // authors must emit the tagged form.
+            Legacy(#[allow(dead_code)] String),
+        }
+
+        let stdout = stdout.trim();
+        if stdout.is_empty() {
+            return Ok(None);
+        }
+        let wire: Wire = serde_json::from_str(stdout)
+            .with_context(|| format!("Invalid prune output: {stdout}"))?;
+        Ok(Some(match wire {
+            Wire::Tagged(outcome) => outcome,
+            Wire::Legacy(_) => PruneOutcome::Removed,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_outcome_empty_stdout_means_nothing_to_prune() {
+        assert_eq!(PruneOutcome::parse_stdout("").unwrap(), None);
+        assert_eq!(PruneOutcome::parse_stdout("  \n").unwrap(), None);
+    }
+
+    #[test]
+    fn prune_outcome_round_trips_the_tagged_wire_format() {
+        let removed = serde_json::to_string(&PruneOutcome::Removed).unwrap();
+        assert_eq!(removed, r#"{"status":"removed"}"#);
+        assert_eq!(
+            PruneOutcome::parse_stdout(&removed).unwrap(),
+            Some(PruneOutcome::Removed)
+        );
+
+        let kept = PruneOutcome::Kept {
+            reason: "dirty".to_string(),
+        };
+        let wire = serde_json::to_string(&kept).unwrap();
+        assert_eq!(wire, r#"{"status":"kept","reason":"dirty"}"#);
+        assert_eq!(PruneOutcome::parse_stdout(&wire).unwrap(), Some(kept));
+    }
+
+    #[test]
+    fn prune_outcome_reads_a_legacy_bare_string_as_removed() {
+        assert_eq!(
+            PruneOutcome::parse_stdout(r#""removed worktree at /tmp/x""#).unwrap(),
+            Some(PruneOutcome::Removed)
+        );
+    }
+
+    #[test]
+    fn prune_outcome_rejects_garbage() {
+        assert!(PruneOutcome::parse_stdout("not json").is_err());
+        assert!(PruneOutcome::parse_stdout(r#"{"status":"exploded"}"#).is_err());
+    }
 
     #[test]
     fn recipe_item_with_name_and_stray_pattern_field_stays_concrete() {

@@ -2,7 +2,7 @@ use anyhow::{Context, bail};
 use std::io::Write;
 use std::path::Path;
 
-use crate::commands::rm::remove_env;
+use crate::commands::rm::{RemoveOutcome, remove_env, write_outcome};
 use crate::context::CommandContext;
 use crate::environments::Environment;
 use crate::status_display::{colorize_status, status_label};
@@ -36,7 +36,9 @@ pub enum StaleCommand {
                       waiting, ready, or unknown status) are left untouched. Each \
                       removed environment's owning cookbook is given a chance to \
                       clean up whatever it materialized for it (e.g. a git \
-                      worktree)."
+                      worktree). An environment whose cookbook cannot fully \
+                      clean up (e.g. a worktree with uncommitted changes) is \
+                      kept and reported, and the command then exits non-zero."
     )]
     Prune(StalePruneArgs),
 }
@@ -211,13 +213,12 @@ fn stale_prune<W: Write>(
 
     let workspaces_directory = Path::new(&context.config.workspaces_directory).to_path_buf();
     let active_env = std::env::var(ENWIRO_ENV_VAR).ok();
+    let mut tally = PruneTally::default();
     for name in done_names {
         if active_env.as_deref() == Some(name) {
-            writeln!(
-                context.writer,
-                "Skipping '{name}': it is the currently active environment"
-            )
-            .context("Could not write to output")?;
+            writeln!(context.writer, "- {name}  skipped (active)")
+                .context("Could not write to output")?;
+            tally.skipped += 1;
             continue;
         }
         // The confirmation above already covered the whole batch, so
@@ -229,27 +230,65 @@ fn stale_prune<W: Write>(
             true,
             active_env.as_deref(),
             &context.cookbooks,
-            &mut context.writer,
         ) {
-            Ok(()) => {
-                writeln!(context.writer, "Removed '{name}'").context("Could not write to output")?
+            Ok(outcome) => {
+                write_outcome(&mut context.writer, name, &outcome)?;
+                tally.record(&outcome);
             }
-            Err(err) => writeln!(context.writer, "Could not remove '{name}': {err}")
-                .context("Could not write to output")?,
+            Err(err) => {
+                // The env could not be removed at all, so it is still there.
+                writeln!(context.writer, "✗ {name}  failed: {err:#}")
+                    .context("Could not write to output")?;
+                tally.kept += 1;
+            }
         }
     }
 
+    writeln!(
+        context.writer,
+        "Removed {}, kept {}, warnings {}, skipped {}.",
+        tally.removed, tally.kept, tally.warnings, tally.skipped
+    )
+    .context("Could not write to output")?;
+    context.exit_failure |= tally.kept > 0 || tally.warnings > 0;
+
     Ok(())
+}
+
+/// What happened to each of the environments `stale prune` went through,
+/// for the closing summary line and the exit status.
+#[derive(Default)]
+struct PruneTally {
+    removed: usize,
+    /// Left in place: the cookbook kept its resource, or removal failed.
+    kept: usize,
+    /// Removed, but the cookbook's cleanup failed.
+    warnings: usize,
+    skipped: usize,
+}
+
+impl PruneTally {
+    fn record(&mut self, outcome: &RemoveOutcome) {
+        match outcome {
+            RemoveOutcome::Removed => self.removed += 1,
+            RemoveOutcome::Kept { .. } => self.kept += 1,
+            RemoveOutcome::CleanupFailed { .. } => self.warnings += 1,
+            // Unreachable here (`yes: true` never prompts); counted so a
+            // future caller that prompts can't silently drop an env.
+            RemoveOutcome::Aborted => self.skipped += 1,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::test_utilities::{
-        AdapterLog, FakeContext, NotificationLog, context_object,
+        AdapterLog, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
     use crate::usage_stats::EnvStats;
     use enwiro_daemon::meta::UserIntentSignals;
+    use enwiro_sdk::cookbook::PruneOutcome;
     use rstest::rstest;
 
     fn write_meta(env_dir: &Path, meta: &EnvStats) {
@@ -747,8 +786,65 @@ mod tests {
 
         let output = context_object.get_output();
         assert!(
-            output.contains("Removed 'done-a'") && output.contains("Removed 'done-b'"),
+            output.contains("✓ done-a")
+                && output.contains("✓ done-b")
+                && output.contains("Removed 2, kept 0, warnings 0, skipped 0."),
             "successful removals must be reported, got: {output}"
+        );
+        assert!(
+            !context_object.exit_failure,
+            "a clean run must not request a failing exit status"
+        );
+    }
+
+    #[rstest]
+    fn test_stale_prune_reports_a_kept_env_honestly_and_fails_the_exit_status(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("clean");
+        context_object.create_mock_environment("stuck");
+        context_object.cookbooks.push(Box::new(
+            FakeCookbook::new("git", vec![], vec![]).with_prune(PruneOutcome::Kept {
+                reason: "uncommitted changes".to_string(),
+            }),
+        ));
+
+        let now = crate::usage_stats::now_timestamp();
+        for (name, cookbook) in [("clean", None), ("stuck", Some("git".to_string()))] {
+            write_meta(
+                &temp_dir.path().join(name),
+                &EnvStats {
+                    signals: UserIntentSignals {
+                        activation_buffer: vec![(now - 60 * SECONDS_PER_DAY, 1.0)],
+                        ..Default::default()
+                    },
+                    status: Some(Status::Done { outcome: None }),
+                    cookbook,
+                    recipe: Some(name.to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        stale(&mut context_object, prune(30, true)).unwrap();
+
+        assert!(!temp_dir.path().join("clean").exists());
+        assert!(
+            temp_dir.path().join("stuck").exists(),
+            "an env whose cookbook kept its resource must survive so the prune can be retried"
+        );
+        let output = context_object.get_output();
+        assert!(
+            output.contains("✓ clean")
+                && output.contains("✗ stuck  kept: uncommitted changes")
+                && !output.contains("Removed 'stuck'")
+                && output.contains("Removed 1, kept 1, warnings 0, skipped 0."),
+            "a kept env must never be reported as removed, got: {output}"
+        );
+        assert!(
+            context_object.exit_failure,
+            "a kept env must request a failing exit status"
         );
     }
 
@@ -792,8 +888,12 @@ mod tests {
         );
         let output = context_object.get_output();
         assert!(
-            output.contains("Skipping 'active-done'") && !output.contains("Could not remove"),
+            output.contains("- active-done  skipped (active)") && !output.contains("failed"),
             "active-env skip must read as expected behavior, not an error, got: {output}"
+        );
+        assert!(
+            !context_object.exit_failure,
+            "skipping the active env is expected, not a failure"
         );
     }
 

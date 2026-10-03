@@ -31,6 +31,7 @@ use std::ffi::OsString;
 use std::fs::create_dir;
 use std::io::Write;
 use std::path::Path;
+use std::process::ExitCode;
 
 #[derive(Parser)]
 struct Cli {
@@ -130,7 +131,7 @@ fn is_dispatch_invocation(argv: &[OsString]) -> bool {
         .is_some_and(|s| s.starts_with(':'))
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<ExitCode> {
     let _guard = enwiro_sdk::init_logging("enwiro.log");
 
     let cwd = std::env::current_dir().context("Could not determine current directory")?;
@@ -141,7 +142,8 @@ fn main() -> anyhow::Result<()> {
 
     let argv: Vec<OsString> = std::env::args_os().collect();
     if is_dispatch_invocation(&argv) {
-        return run_gear::dispatch(Path::new(&config.workspaces_directory), &argv[1..]);
+        return run_gear::dispatch(Path::new(&config.workspaces_directory), &argv[1..])
+            .map(|()| ExitCode::SUCCESS);
     }
 
     let cli = Cli::parse();
@@ -177,5 +179,10 @@ fn main() -> anyhow::Result<()> {
         .write_all("\n".as_bytes())
         .context("Could not write to output")?;
 
-    result
+    result?;
+    Ok(if context_object.exit_failure {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }

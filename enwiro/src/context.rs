@@ -43,6 +43,10 @@ pub struct CommandContext<W: Write> {
     pub cookbooks: Vec<Box<dyn CookbookTrait>>,
     pub cache_dir: Option<PathBuf>,
     pub global_env: Option<String>,
+    /// Set by a command that completed but wants a non-zero exit status
+    /// without an error message of its own (the output already said what
+    /// went wrong, e.g. `enw stale prune` leaving an environment behind).
+    pub exit_failure: bool,
 }
 
 impl<W: Write> CommandContext<W> {
@@ -77,6 +81,7 @@ impl<W: Write> CommandContext<W> {
             cookbooks,
             cache_dir: None,
             global_env: None,
+            exit_failure: false,
         })
     }
 

@@ -304,7 +304,7 @@ Environments with an `evergreen` status are never listed, regardless of --days -
 
 ## `enw stale prune`
 
-Remove environments that are both stale and whose status is `done` (merged/closed). Other stale environments (active, waiting, ready, or unknown status) are left untouched. Each removed environment's owning cookbook is given a chance to clean up whatever it materialized for it (e.g. a git worktree).
+Remove environments that are both stale and whose status is `done` (merged/closed). Other stale environments (active, waiting, ready, or unknown status) are left untouched. Each removed environment's owning cookbook is given a chance to clean up whatever it materialized for it (e.g. a git worktree). An environment whose cookbook cannot fully clean up (e.g. a worktree with uncommitted changes) is kept and reported, and the command then exits non-zero.
 
 **Usage:** `enw stale prune [OPTIONS]`
 

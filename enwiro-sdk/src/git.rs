@@ -10,6 +10,8 @@
 
 use std::path::Path;
 
+use crate::cookbook::PruneOutcome;
+
 /// Remove a worktree via `git worktree remove`, run from inside its base
 /// repository. Deliberately shells out to the real `git` binary rather
 /// than using git2's lower-level `Worktree::prune` - only the CLI command
@@ -17,10 +19,9 @@ use std::path::Path;
 /// check this needs, and reimplementing that check risks missing an edge
 /// case the CLI already handles correctly.
 ///
-/// Returns a short, human-readable outcome either way - removed, or kept
-/// with the reason (e.g. uncommitted changes) - for the caller to surface
-/// verbatim; it never needs to parse this.
-pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> std::io::Result<String> {
+/// Reports the outcome as a [`PruneOutcome`]: removed, or kept with a
+/// one-line, human-readable reason (see [`kept_reason`]).
+pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> std::io::Result<PruneOutcome> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_path)
@@ -30,15 +31,49 @@ pub fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> std::io::Resul
         .output()?;
 
     Ok(if output.status.success() {
-        format!("removed worktree at {}", worktree_path.display())
+        PruneOutcome::Removed
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        format!(
-            "kept worktree at {} ({})",
-            worktree_path.display(),
-            stderr.trim()
-        )
+        PruneOutcome::Kept {
+            reason: kept_reason(
+                repo_path,
+                worktree_path,
+                &String::from_utf8_lossy(&output.stderr),
+            ),
+        }
     })
+}
+
+/// One actionable line out of `git worktree remove`'s stderr, which is
+/// noisy (it repeats the path, and can run to several lines). Known shapes
+/// get a manual fix the user can paste; anything else keeps git's first
+/// line, so an unexpected failure is still reported rather than hidden.
+fn kept_reason(repo_path: &Path, worktree_path: &Path, stderr: &str) -> String {
+    let first_line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let message = first_line
+        .strip_prefix("fatal: ")
+        .or_else(|| first_line.strip_prefix("error: "))
+        .unwrap_or(first_line);
+    let path = worktree_path.display().to_string();
+    let repo = repo_path.display();
+
+    if message.contains("contains modified or untracked files") {
+        format!(
+            "uncommitted changes in {path} - commit or discard them, or run: \
+             git -C '{repo}' worktree remove --force '{path}'"
+        )
+    } else if message.contains("locked working tree") {
+        format!("{path} is locked - unlock it with: git -C '{repo}' worktree unlock '{path}'")
+    } else if message.is_empty() {
+        format!("git could not remove {path}")
+    } else if message.contains(&path) {
+        message.to_string()
+    } else {
+        format!("{path}: {message}")
+    }
 }
 
 /// The remote default branch name: `origin/HEAD`'s target, else probe
@@ -121,7 +156,7 @@ mod tests {
         assert!(wt_path.exists());
 
         let outcome = remove_worktree(&repo_path, &wt_path).unwrap();
-        assert!(outcome.contains("removed worktree"), "got: {outcome}");
+        assert_eq!(outcome, PruneOutcome::Removed);
         assert!(!wt_path.exists(), "worktree directory must be gone");
     }
 
@@ -135,7 +170,67 @@ mod tests {
         std::fs::write(wt_path.join("dirty.txt"), b"uncommitted").unwrap();
 
         let outcome = remove_worktree(&repo_path, &wt_path).unwrap();
-        assert!(outcome.contains("kept worktree"), "got: {outcome}");
+        let PruneOutcome::Kept { reason } = outcome else {
+            panic!("a dirty worktree must be kept, got: {outcome:?}");
+        };
+        assert!(reason.contains("uncommitted changes"), "got: {reason}");
+        assert!(
+            reason.contains("--force"),
+            "must hint the fix, got: {reason}"
+        );
         assert!(wt_path.exists(), "dirty worktree must survive");
+    }
+
+    const REPO: &str = "/home/u/repo";
+    const WT: &str = "/home/u/wt/feature";
+
+    fn reason_for(stderr: &str) -> String {
+        kept_reason(Path::new(REPO), Path::new(WT), stderr)
+    }
+
+    #[test]
+    fn kept_reason_explains_dirty_worktree_with_a_manual_fix() {
+        let reason = reason_for(&format!(
+            "fatal: '{WT}' contains modified or untracked files, use --force to delete it\n"
+        ));
+        assert_eq!(
+            reason,
+            format!(
+                "uncommitted changes in {WT} - commit or discard them, or run: \
+                 git -C '{REPO}' worktree remove --force '{WT}'"
+            )
+        );
+    }
+
+    #[test]
+    fn kept_reason_keeps_git_text_for_permission_denied() {
+        let reason = reason_for(&format!(
+            "error: failed to delete '{WT}': Permission denied\nsecond line noise\n"
+        ));
+        assert_eq!(
+            reason,
+            format!("failed to delete '{WT}': Permission denied")
+        );
+    }
+
+    #[test]
+    fn kept_reason_explains_locked_worktree() {
+        let reason = reason_for(
+            "fatal: cannot remove a locked working tree, lock reason: usb\n\
+             use 'remove -f -f' to override or unlock first\n",
+        );
+        assert_eq!(
+            reason,
+            format!("{WT} is locked - unlock it with: git -C '{REPO}' worktree unlock '{WT}'")
+        );
+    }
+
+    #[test]
+    fn kept_reason_names_the_path_for_unrecognized_or_empty_stderr() {
+        assert_eq!(
+            reason_for("fatal: something new\n"),
+            format!("{WT}: something new")
+        );
+        assert_eq!(reason_for(""), format!("git could not remove {WT}"));
     }
 }
