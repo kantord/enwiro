@@ -14,8 +14,7 @@
   },
   "packageRules": [
     {
-      "description": "Tag-tracking actions (non-semver refs) only get digest updates, which have no release timestamp, so the age gate would block them forever",
-      "matchDepNames": ["dtolnay/rust-toolchain", "taiki-e/install-action"],
+      "description": "Tag-tracking deps (non-semver refs, e.g. dtolnay/rust-toolchain@stable) only get digest updates, which have no release timestamp, so the age gate would block them forever",
       "matchUpdateTypes": ["digest"],
       "minimumReleaseAge": null
     },
@@ -28,6 +27,10 @@
       "description": "Patch updates are low-review-effort; land them as one PR",
       "matchUpdateTypes": ["patch"],
       "groupName": "patch updates"
+    },
+    {
+      "matchManagers": ["cargo"],
+      "rangeStrategy": "bump"
     },
     {
       "description": "Action digest bumps are independent and noisy; one PR is enough.",
