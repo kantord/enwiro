@@ -20,18 +20,18 @@ algorithm = "minisign"
 pubkey = "RWQowPNA2jR6/GBAZNkd5d6by7LwOPBdEwK1NptQjAPGrB8UhUUHHP8T"
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4.5.4", features = ["derive"] }
-glob = "0.3.1"
-serde = "1.0.197"
-serde_json = "1"
-serde_derive = "1.0.197"
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+glob = "0.3.4"
+serde = "1.0.229"
+serde_json = "1.0.151"
+serde_derive = "1.0.229"
 enwiro-sdk = { workspace = true, features = ["git", "cli"] }
 git2 = "0.21.0"
 tracing.workspace = true
 dirs = "7"
 sha2 = "0.11"
-hex = "0.4"
+hex = "0.4.3"
 
 [dev-dependencies]
 tempfile = "=3.27.0"
