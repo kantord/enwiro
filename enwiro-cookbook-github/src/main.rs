@@ -238,6 +238,40 @@ fn parse_run_recipe_name(name: &str) -> Option<(&str, u64)> {
     Some((repo, run_id.parse().ok()?))
 }
 
+/// A parsed recipe name: the one place that tells PR/issue names from
+/// CI-run names, so commands match on it instead of probing each parser.
+enum RecipeName<'a> {
+    Item {
+        repo: &'a str,
+        number: u64,
+        is_fix_ci_variant: bool,
+    },
+    Run {
+        repo: &'a str,
+        run_id: u64,
+    },
+}
+
+impl<'a> RecipeName<'a> {
+    fn parse(name: &'a str) -> anyhow::Result<Self> {
+        if let Some((repo, run_id)) = parse_run_recipe_name(name) {
+            return Ok(Self::Run { repo, run_id });
+        }
+        let (repo, number, is_fix_ci_variant) = parse_recipe_name(name)?;
+        Ok(Self::Item {
+            repo,
+            number,
+            is_fix_ci_variant,
+        })
+    }
+
+    fn repo(&self) -> &'a str {
+        match self {
+            Self::Item { repo, .. } | Self::Run { repo, .. } => repo,
+        }
+    }
+}
+
 /// Build a GitHub search query string.
 /// `type_filter` controls the item type, e.g.:
 /// - `"is:pr is:open"` for pull requests
@@ -1031,41 +1065,74 @@ fn fetch_run(repo: &str, run_id: u64) -> anyhow::Result<RunInfo> {
 /// and fixed in its own environment. The branch is created at the run's
 /// `head_sha`, not the branch tip, which may have moved on. No PR routing:
 /// deduplicating against an existing PR workspace is a core concern.
-fn cook_run(config: &ConfigurationValues, repo_str: &str, run_id: u64) -> anyhow::Result<()> {
-    let repo_config = resolve_repo_config(repo_str)?;
-    let repo_str = repo_config.short_name();
-    let wt_path = worktree_path(config, &repo_config, repo_str, "run", run_id)?;
+fn cook_run(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    run_id: u64,
+) -> anyhow::Result<()> {
+    let wt_path = run_worktree_path(config, repo_config, run_id)?;
     if wt_path.exists() {
         return print_worktree_path(&wt_path);
     }
-
     let run = fetch_run(&repo_config.repo, run_id)?;
+    create_run_worktree(repo_config, &wt_path, run_id, &run.head_sha)?;
+    tracing::debug!(path = %wt_path.display(), run = run_id, "Created worktree for CI run");
+    print_worktree_path(&wt_path)
+}
+
+fn run_worktree_path(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    run_id: u64,
+) -> anyhow::Result<PathBuf> {
+    worktree_path(
+        config,
+        repo_config,
+        repo_config.short_name(),
+        RUN_KIND.worktree_subdir,
+        run_id,
+    )
+}
+
+fn run_branch_name(run_id: u64) -> String {
+    format!("fix-ci-{run_id}")
+}
+
+/// Fetch `head_sha` from origin and check `fix-ci-<run_id>` out at it in a
+/// worktree at `wt_path`. A leftover branch from an earlier cook is reused,
+/// as `cook_issue` does.
+fn create_run_worktree(
+    repo_config: &RepoConfig,
+    wt_path: &Path,
+    run_id: u64,
+    head_sha: &str,
+) -> anyhow::Result<()> {
     let local_path_str = repo_config
         .local_path
         .to_str()
         .context("Could not convert local path to string")?;
     let fetch_output = Command::new("git")
-        .args(["-C", local_path_str, "fetch", "origin", &run.head_sha])
+        .args(["-C", local_path_str, "fetch", "origin", head_sha])
         .output()
         .context("Failed to run git fetch")?;
     anyhow::ensure!(
         fetch_output.status.success(),
         "Failed to fetch commit {} of run {} from {}: {}",
-        run.head_sha,
+        head_sha,
         run_id,
         repo_config.repo,
-        String::from_utf8_lossy(&fetch_output.stderr).trim()
+        String::from_utf8_lossy(fetch_output.stderr.as_slice()).trim()
     );
 
-    std::fs::create_dir_all(wt_path.parent().unwrap())
+    std::fs::create_dir_all(wt_path.parent().context("Worktree path has no parent")?)
         .context("Could not create worktree directory")?;
     let repo = git2::Repository::open(&repo_config.local_path)
         .context("Could not open repository for worktree creation")?;
     let commit = repo
-        .find_commit(git2::Oid::from_str(&run.head_sha).context("Invalid head_sha")?)
-        .with_context(|| format!("Commit {} is missing after fetch", run.head_sha))?;
+        .find_commit(git2::Oid::from_str(head_sha).context("Invalid head_sha")?)
+        .with_context(|| format!("Commit {head_sha} is missing after fetch"))?;
 
-    let branch_name = format!("fix-ci-{run_id}");
+    let branch_name = run_branch_name(run_id);
     let branch = match repo.find_branch(&branch_name, git2::BranchType::Local) {
         Ok(existing) => existing,
         Err(_) => repo
@@ -1076,11 +1143,9 @@ fn cook_run(config: &ConfigurationValues, repo_str: &str, run_id: u64) -> anyhow
 
     let mut opts = git2::WorktreeAddOptions::new();
     opts.reference(Some(&reference));
-    repo.worktree(&format!("enwiro-run-{run_id}"), &wt_path, Some(&opts))
+    repo.worktree(&format!("enwiro-run-{run_id}"), wt_path, Some(&opts))
         .with_context(|| format!("Could not create worktree for run {run_id}"))?;
-
-    tracing::debug!(path = %wt_path.display(), run = run_id, "Created worktree for CI run");
-    print_worktree_path(&wt_path)
+    Ok(())
 }
 
 /// A goal-variant number resolved to an issue, not a PR - the variant only
@@ -1094,10 +1159,16 @@ fn reject_fix_ci_on_issue(is_fix_ci_variant: bool, number: u64) -> anyhow::Resul
 }
 
 fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
-    if let Some((repo_str, run_id)) = parse_run_recipe_name(&args.recipe_name) {
-        return cook_run(config, repo_str, run_id);
-    }
-    let (repo_str, number, is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
+    let (repo_str, number, is_fix_ci_variant) = match RecipeName::parse(&args.recipe_name)? {
+        RecipeName::Run { repo, run_id } => {
+            return cook_run(config, &resolve_repo_config(repo)?, run_id);
+        }
+        RecipeName::Item {
+            repo,
+            number,
+            is_fix_ci_variant,
+        } => (repo, number, is_fix_ci_variant),
+    };
     let repo_config = resolve_repo_config(repo_str)?;
     // Whichever alias was typed, paths use the canonical short name so every
     // alias shares one worktree.
@@ -1166,30 +1237,25 @@ fn prune_recipe(
     config: &ConfigurationValues,
     recipe_name: &str,
 ) -> anyhow::Result<Option<PruneOutcome>> {
-    if let Some((repo_str, run_id)) = parse_run_recipe_name(recipe_name) {
-        let Ok(repo_config) = resolve_repo_config(repo_str) else {
-            return Ok(None);
-        };
-        let wt_path = worktree_path(
-            config,
-            &repo_config,
-            repo_config.short_name(),
-            "run",
-            run_id,
-        )?;
-        return if wt_path.exists() {
-            Ok(Some(remove_worktree(&repo_config.local_path, &wt_path)?))
-        } else {
-            Ok(None)
-        };
+    let Ok(name) = RecipeName::parse(recipe_name) else {
+        return Ok(None);
+    };
+    let Ok(repo_config) = resolve_repo_config(name.repo()) else {
+        return Ok(None);
+    };
+    match name {
+        RecipeName::Item { number, .. } => {
+            prune_worktree(config, &repo_config, repo_config.short_name(), number)
+        }
+        RecipeName::Run { run_id, .. } => {
+            let wt_path = run_worktree_path(config, &repo_config, run_id)?;
+            if wt_path.exists() {
+                Ok(Some(remove_worktree(&repo_config.local_path, &wt_path)?))
+            } else {
+                Ok(None)
+            }
+        }
     }
-    let Ok((repo_str, number, _is_fix_ci_variant)) = parse_recipe_name(recipe_name) else {
-        return Ok(None);
-    };
-    let Ok(repo_config) = resolve_repo_config(repo_str) else {
-        return Ok(None);
-    };
-    prune_worktree(config, &repo_config, repo_config.short_name(), number)
 }
 
 /// A PR and an issue share one number sequence per repo, so at most one of
@@ -1241,6 +1307,13 @@ const ISSUE_KIND: GearKind = GearKind {
     url_subdir: "issues",
 };
 
+const RUN_KIND: GearKind = GearKind {
+    worktree_subdir: "run",
+    description_prefix: "CI run",
+    page_description: "Open the run page",
+    url_subdir: "actions/runs",
+};
+
 fn build_gear_file_for_kind(
     kind: &GearKind,
     repo: &str,
@@ -1282,37 +1355,36 @@ fn gear_with_writer<W: Write>(
     anyhow::bail!("No worktree found for {}#{}", repo_str, number)
 }
 
-const RUN_KIND: GearKind = GearKind {
-    worktree_subdir: "run",
-    description_prefix: "CI run",
-    page_description: "Open the run page",
-    url_subdir: "actions/runs",
-};
-
 fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
-    if let Some((repo_str, run_id)) = parse_run_recipe_name(&args.recipe_name) {
-        let repo_config = resolve_repo_config(repo_str)?;
-        let path = worktree_path(
+    let name = RecipeName::parse(&args.recipe_name)?;
+    let repo_config = resolve_repo_config(name.repo())?;
+    match name {
+        RecipeName::Item { number, .. } => gear_with_writer(
             config,
             &repo_config,
             repo_config.short_name(),
-            "run",
-            run_id,
-        )?;
-        anyhow::ensure!(path.exists(), "No worktree found for run {run_id}");
-        let file = build_gear_file_for_kind(&RUN_KIND, &repo_config.repo, run_id);
-        serde_json::to_writer(std::io::stdout(), &file)?;
-        return Ok(());
+            number,
+            &mut std::io::stdout(),
+        ),
+        RecipeName::Run { run_id, .. } => {
+            gear_for_run_with_writer(config, &repo_config, run_id, &mut std::io::stdout())
+        }
     }
-    let (repo_str, number, _is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
-    let repo_config = resolve_repo_config(repo_str)?;
-    gear_with_writer(
-        config,
-        &repo_config,
-        repo_config.short_name(),
-        number,
-        &mut std::io::stdout(),
-    )
+}
+
+fn gear_for_run_with_writer<W: Write>(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    run_id: u64,
+    writer: &mut W,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        run_worktree_path(config, repo_config, run_id)?.exists(),
+        "No worktree found for run {run_id}"
+    );
+    let file = build_gear_file_for_kind(&RUN_KIND, &repo_config.repo, run_id);
+    serde_json::to_writer(writer, &file)?;
+    Ok(())
 }
 
 /// Every recipe here cooks to a git worktree (`cook_pr`/`cook_issue`); its
@@ -1324,11 +1396,7 @@ fn gear(config: &ConfigurationValues, args: GearArgs) -> anyhow::Result<()> {
 /// cookbook, there's no "base repo" recipe here to special-case: every PR
 /// and issue recipe is a worktree.
 fn resolve_external_paths(recipe_name: &str) -> anyhow::Result<Vec<String>> {
-    let repo_str = match parse_run_recipe_name(recipe_name) {
-        Some((repo_str, _run_id)) => repo_str,
-        None => parse_recipe_name(recipe_name)?.0,
-    };
-    let repo_config = resolve_repo_config(repo_str)?;
+    let repo_config = resolve_repo_config(RecipeName::parse(recipe_name)?.repo())?;
     Ok(vec![
         repo_config
             .local_path
@@ -1391,15 +1459,12 @@ fn run_description(run: &RunInfo) -> String {
 }
 
 fn describe(args: DescribeArgs) -> anyhow::Result<()> {
-    if let Some((repo_str, run_id)) = parse_run_recipe_name(&args.recipe_name) {
-        let repo_config = resolve_repo_config(repo_str)?;
-        let run = fetch_run(&repo_config.repo, run_id)?;
-        println!("{}", serde_json::to_string(&run_description(&run))?);
-        return Ok(());
-    }
-    let (repo_str, number, _is_fix_ci_variant) = parse_recipe_name(&args.recipe_name)?;
-    let repo_config = resolve_repo_config(repo_str)?;
-    let description = resolve_description(&repo_config.repo, number)?;
+    let name = RecipeName::parse(&args.recipe_name)?;
+    let repo_config = resolve_repo_config(name.repo())?;
+    let description = match name {
+        RecipeName::Item { number, .. } => resolve_description(&repo_config.repo, number)?,
+        RecipeName::Run { run_id, .. } => run_description(&fetch_run(&repo_config.repo, run_id)?),
+    };
     println!("{}", serde_json::to_string(&description)?);
     Ok(())
 }
@@ -2412,6 +2477,108 @@ mod tests {
             .clone(origin_path.to_str().unwrap(), local_path)
             .unwrap();
         repo
+    }
+
+    /// A cloned repo plus a commit pushed to its origin afterwards, so the
+    /// clone only has it once `create_run_worktree` fetches it. Returns the
+    /// config and that commit's SHA.
+    fn run_fixture(tmp: &Path) -> (ConfigurationValues, RepoConfig, String) {
+        let origin_path = tmp.join("origin.git");
+        let local_path = tmp.join("my-project");
+        setup_repo_with_origin(&local_path, &origin_path);
+
+        let origin = git2::Repository::open_bare(&origin_path).unwrap();
+        let sig = git2::Signature::now("Test", "test@test.com").unwrap();
+        let parent = origin.find_reference("refs/heads/main").unwrap();
+        let parent = parent.peel_to_commit().unwrap();
+        let tree = origin.find_tree(parent.tree_id()).unwrap();
+        let failing = origin
+            .commit(
+                Some("refs/heads/main"),
+                &sig,
+                &sig,
+                "breaks ci",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.join("worktrees").to_str().unwrap().to_string()),
+        };
+        let repo_config = RepoConfig {
+            repo: "kantord/my-project".to_string(),
+            local_path,
+        };
+        (config, repo_config, failing.to_string())
+    }
+
+    #[test]
+    fn test_create_run_worktree_checks_out_the_runs_commit_on_a_fix_ci_branch() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (config, repo_config, sha) = run_fixture(tmp.path());
+        let wt_path = run_worktree_path(&config, &repo_config, 99).unwrap();
+
+        create_run_worktree(&repo_config, &wt_path, 99, &sha).unwrap();
+
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        assert!(wt_repo.is_worktree());
+        let head = wt_repo.head().unwrap();
+        assert_eq!(head.shorthand().unwrap(), "fix-ci-99");
+        assert_eq!(head.peel_to_commit().unwrap().id().to_string(), sha);
+    }
+
+    #[test]
+    fn test_create_run_worktree_errors_naming_the_commit_when_fetch_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (config, repo_config, _sha) = run_fixture(tmp.path());
+        let wt_path = run_worktree_path(&config, &repo_config, 99).unwrap();
+        let missing = "0123456789abcdef0123456789abcdef01234567";
+
+        let error = create_run_worktree(&repo_config, &wt_path, 99, missing).unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains(missing), "{message}");
+        assert!(message.contains("kantord/my-project"), "{message}");
+        assert!(!wt_path.exists(), "no half-created worktree");
+    }
+
+    #[test]
+    fn test_gear_for_run_requires_a_cooked_worktree_and_links_the_run_page() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (config, repo_config, sha) = run_fixture(tmp.path());
+        let mut output = Vec::new();
+        assert!(gear_for_run_with_writer(&config, &repo_config, 99, &mut output).is_err());
+
+        let wt_path = run_worktree_path(&config, &repo_config, 99).unwrap();
+        create_run_worktree(&repo_config, &wt_path, 99, &sha).unwrap();
+        gear_for_run_with_writer(&config, &repo_config, 99, &mut output).unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            json["gear"]["run"]["web"]["page"]["url"],
+            "https://github.com/kantord/my-project/actions/runs/99"
+        );
+    }
+
+    #[test]
+    fn test_recipe_name_tells_runs_from_items() {
+        assert!(matches!(
+            RecipeName::parse("enwiro.gha@run-7").unwrap(),
+            RecipeName::Run {
+                repo: "enwiro",
+                run_id: 7
+            }
+        ));
+        assert!(matches!(
+            RecipeName::parse("enwiro#7@fix-ci").unwrap(),
+            RecipeName::Item {
+                repo: "enwiro",
+                number: 7,
+                is_fix_ci_variant: true
+            }
+        ));
+        assert!(RecipeName::parse("enwiro").is_err());
     }
 
     #[test]
