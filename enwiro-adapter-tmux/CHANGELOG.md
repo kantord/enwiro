@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.25](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.24...enwiro-adapter-tmux-v0.1.25) - 2026-10-03
+
+### Fixed
+
+- *(deps)* update patch updates ([#868](https://github.com/kantord/enwiro/pull/868))
+
 ## [0.1.24](https://github.com/kantord/enwiro/compare/enwiro-adapter-tmux-v0.1.23...enwiro-adapter-tmux-v0.1.24) - 2026-09-13
 
 ### Other

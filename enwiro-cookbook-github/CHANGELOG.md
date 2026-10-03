@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.31](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.30...enwiro-cookbook-github-v0.1.31) - 2026-10-03
+
+### Added
+
+- *(github)* add repo.gha@run-<id> recipes for CI run failures ([#865](https://github.com/kantord/enwiro/pull/865))
+- *(github)* accept folder name and owner/repo as recipe aliases ([#850](https://github.com/kantord/enwiro/pull/850))
+- add `enw stale` ([#839](https://github.com/kantord/enwiro/pull/839))
+
+### Fixed
+
+- *(deps)* update patch updates ([#868](https://github.com/kantord/enwiro/pull/868))
+- keep env and report outcome when cookbook keeps worktree ([#862](https://github.com/kantord/enwiro/pull/862))
+
 ## [0.1.30](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.29...enwiro-cookbook-github-v0.1.30) - 2026-09-13
 
 ### Fixed
