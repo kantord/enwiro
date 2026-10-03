@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.64](https://github.com/kantord/enwiro/compare/enwiro-v0.3.63...enwiro-v0.3.64) - 2026-10-03
+
+### Added
+
+- add `enw stale` ([#839](https://github.com/kantord/enwiro/pull/839))
+
+### Fixed
+
+- *(deps)* update patch updates ([#868](https://github.com/kantord/enwiro/pull/868))
+- keep env and report outcome when cookbook keeps worktree ([#862](https://github.com/kantord/enwiro/pull/862))
+- enw stale prune reports empty results, recipe fallback ([#842](https://github.com/kantord/enwiro/pull/842))
+
 ## [0.3.63](https://github.com/kantord/enwiro/compare/enwiro-v0.3.62...enwiro-v0.3.63) - 2026-09-13
 
 ### Fixed

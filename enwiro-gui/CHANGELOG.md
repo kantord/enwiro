@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.10](https://github.com/kantord/enwiro/compare/enwiro-gui-v0.1.9...enwiro-gui-v0.1.10) - 2026-10-03
+
+### Fixed
+
+- *(deps)* update patch updates ([#868](https://github.com/kantord/enwiro/pull/868))
+- *(deps)* update rust crate utoipa to v6 ([#864](https://github.com/kantord/enwiro/pull/864))
+
+### Other
+
+- *(deps)* update patch updates ([#853](https://github.com/kantord/enwiro/pull/853))
+- *(deps)* update dependency @types/node to v24.19.0 ([#858](https://github.com/kantord/enwiro/pull/858))
+- *(deps)* update dependency @types/node to v24.13.6 ([#847](https://github.com/kantord/enwiro/pull/847))
+- *(deps)* update patch updates ([#834](https://github.com/kantord/enwiro/pull/834))
+- *(deps)* update react monorepo to v19.3.0 ([#819](https://github.com/kantord/enwiro/pull/819))
+
 ## [0.1.9](https://github.com/kantord/enwiro/compare/enwiro-gui-v0.1.8...enwiro-gui-v0.1.9) - 2026-09-13
 
 ### Other

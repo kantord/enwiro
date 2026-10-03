@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.34](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.33...enwiro-cookbook-git-v0.1.34) - 2026-10-03
+
+### Added
+
+- add `enw stale` ([#839](https://github.com/kantord/enwiro/pull/839))
+
+### Fixed
+
+- *(deps)* update patch updates ([#868](https://github.com/kantord/enwiro/pull/868))
+- keep env and report outcome when cookbook keeps worktree ([#862](https://github.com/kantord/enwiro/pull/862))
+
 ## [0.1.33](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.32...enwiro-cookbook-git-v0.1.33) - 2026-09-13
 
 ### Fixed

@@ -1,6 +1,6 @@
 [package]
 name = "enwiro-adapter-i3wm"
-version = "0.1.42"
+version = "0.1.43"
 edition = "2024"
 description = "i3wm adapter for enwiro"
 license = "MIT OR Apache-2.0"
