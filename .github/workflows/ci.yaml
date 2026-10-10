@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: rustfmt, clippy
       - name: Check formatting
@@ -55,8 +55,8 @@ jobs:
             cargo_args: "-p enwiro -p enwiro-cookbook-git -p enwiro-cookbook-github -p enwiro-bridge-rofi"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-      - uses: taiki-e/install-action@b8ca55432ade22a5aa85afad7ab26a68741694fd # just
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: taiki-e/install-action@6b65014c06e2adee0cc956076c200ca3432af678 # just
       - name: Build
         run: cargo build ${{ matrix.cargo_args }}
       - name: Test
@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           components: clippy
       - name: Clippy (container-wrap)
@@ -81,8 +81,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-      - uses: taiki-e/install-action@06fdba324c5b39a45498b012f0106ea067bed7c7 # cargo-deny
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: taiki-e/install-action@2d1eaf048dd225380198787e893f43aa90fdd094 # cargo-deny
       - run: cargo deny check
 
   docs:
