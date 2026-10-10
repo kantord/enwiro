@@ -38,12 +38,12 @@ enwiro-sdk.workspace = true
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
 home.workspace = true
 jsonrpsee = { version = "=0.26.1", default-features = false, features = ["server-core", "macros"] }
-libc = "0.2.189"
+libc = "0.2.190"
 optative-process-pool = "0.0.9"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 system-idle-time = "1.0.4"
-tokio = { version = "1.53.1", default-features = false, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
+tokio = { version = "1.53.2", default-features = false, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 tokio-util = { version = "0.7.19", default-features = false, features = ["codec"] }
 tracing.workspace = true
 which = { version = "8.0.6", optional = true }
