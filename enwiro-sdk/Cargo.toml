@@ -23,13 +23,13 @@ git2 = { version = "0.21.0", optional = true }
 rand = "0.10.3"
 regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 strum_macros = "0.28.0"
 subtle = "2.6.1"
 thiserror = "2.0.21"
-tokio = { version = "1.53.1", default-features = false, features = ["net", "io-util", "rt", "macros", "sync"] }
-tokio-util = { version = "0.7.19", default-features = false, features = ["codec"] }
-toml = "1.1.6"
+tokio = { version = "1.53.3", default-features = false, features = ["net", "io-util", "rt", "macros", "sync"] }
+tokio-util = { version = "0.7.20", default-features = false, features = ["codec"] }
+toml = "1.1.8"
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
