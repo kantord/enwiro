@@ -31,17 +31,17 @@ enwiro-daemon.workspace = true
 enwiro-sdk.workspace = true
 home.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-tokio = { version = "1.53.1", default-features = false, features = ["rt"] }
+serde_json = "1.0.154"
+tokio = { version = "1.53.3", default-features = false, features = ["rt"] }
 strum = { version = "0.28.0", features = ["derive"] }
 strum_macros = "0.28.0"
-notify-rust = "4.18.1"
+notify-rust = "4.18.2"
 tracing.workspace = true
 dirs = "7"
 dialoguer = { version = "0.12", default-features = false }
 ratatui = "0.30.2"
 crossterm = "0.29"
-libc = "0.2.189"
+libc = "0.2.191"
 clap-markdown = "0.1.5"
 
 [dev-dependencies]

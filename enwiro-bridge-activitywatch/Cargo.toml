@@ -22,9 +22,9 @@ anyhow = "1.0.104"
 enwiro-sdk.workspace = true
 hostname = "0.4.2"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+serde_json = "1.0.154"
 time = { version = "0.3.55", features = ["formatting"] }
-tokio = { version = "1.53.1", features = ["macros", "rt", "time"] }
+tokio = { version = "1.53.3", features = ["macros", "rt", "time"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 ureq = { version = "3.4.2", features = ["json"] }

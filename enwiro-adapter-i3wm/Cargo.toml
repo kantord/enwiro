@@ -26,11 +26,11 @@ enwiro-sdk = { workspace = true, features = ["cli"] }
 i3ipc-types = "0.16.0"
 optative = "0.1.4"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-tokio = "1.53.1"
+serde_json = "1.0.154"
+tokio = "1.53.3"
 tokio-i3ipc = "0.16.0"
 tokio-stream = "0.1.19"
-toml = "1.1.6"
+toml = "1.1.8"
 tracing.workspace = true
 which = "8.0.6"
 
