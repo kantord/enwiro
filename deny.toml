@@ -7,6 +7,11 @@ ignore = [
     # transitive via enwiro-gui -> utoipa-axum -> paste; upstream is archived,
     # no safe upgrade exists (see the advisory for alternatives to migrate to).
     { id = "RUSTSEC-2024-0436", reason = "no safe upgrade available; revisit if utoipa-axum drops paste" },
+    # transitive via notify-rust and system-idle-time -> zbus 5; these crates
+    # were merged into zbus 6, which neither dependent supports yet.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant merged into zbus 6; revisit when notify-rust and system-idle-time move to zbus 6" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names merged into zbus 6; revisit when notify-rust and system-idle-time move to zbus 6" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive merged into zbus 6; revisit when notify-rust and system-idle-time move to zbus 6" },
 ]
 
 [licenses]
