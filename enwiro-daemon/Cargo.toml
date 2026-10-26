@@ -43,7 +43,7 @@ optative-process-pool = "0.0.9"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 system-idle-time = "1.0.4"
-tokio = { version = "1.53.3", default-features = false, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
+tokio = { version = "1.54.1", default-features = false, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "process", "signal"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["codec"] }
 tracing.workspace = true
 which = { version = "8.0.6", optional = true }
