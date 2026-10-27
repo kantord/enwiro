@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.32](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.31...enwiro-cookbook-github-v0.1.32) - 2026-10-27
+
+### Fixed
+
+- *(deps)* update patch updates ([#882](https://github.com/kantord/enwiro/pull/882))
+
+### Other
+
+- *(deps)* update rust crate proptest to v1.12.0 ([#878](https://github.com/kantord/enwiro/pull/878))
+
 ## [0.1.31](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.30...enwiro-cookbook-github-v0.1.31) - 2026-10-03
 
 ### Added

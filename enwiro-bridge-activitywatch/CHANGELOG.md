@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11](https://github.com/kantord/enwiro/compare/enwiro-bridge-activitywatch-v0.1.10...enwiro-bridge-activitywatch-v0.1.11) - 2026-10-27
+
+### Fixed
+
+- *(deps)* update patch updates ([#871](https://github.com/kantord/enwiro/pull/871))
+- *(deps)* update patch updates ([#882](https://github.com/kantord/enwiro/pull/882))
+
 ## [0.1.10](https://github.com/kantord/enwiro/compare/enwiro-bridge-activitywatch-v0.1.9...enwiro-bridge-activitywatch-v0.1.10) - 2026-10-03
 
 ### Fixed
