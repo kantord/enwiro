@@ -35,6 +35,6 @@ tracing.workspace = true
 which = "8.0.6"
 
 [dev-dependencies]
-proptest = "=1.11.0"
+proptest = "=1.12.0"
 rstest = "=0.28.0"
 tempfile = "=3.27.0"
