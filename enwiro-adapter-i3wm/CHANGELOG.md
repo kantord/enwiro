@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.45](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.44...enwiro-adapter-i3wm-v0.1.45) - 2026-11-07
+
+### Fixed
+
+- *(deps)* update rust crate toml to 1.2.0 ([#906](https://github.com/kantord/enwiro/pull/906))
+
 ## [0.1.44](https://github.com/kantord/enwiro/compare/enwiro-adapter-i3wm-v0.1.43...enwiro-adapter-i3wm-v0.1.44) - 2026-10-27
 
 ### Fixed
