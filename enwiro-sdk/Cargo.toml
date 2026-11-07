@@ -29,7 +29,7 @@ subtle = "2.6.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", default-features = false, features = ["net", "io-util", "rt", "macros", "sync"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["codec"] }
-toml = "1.1.8"
+toml = "1.2.0"
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
