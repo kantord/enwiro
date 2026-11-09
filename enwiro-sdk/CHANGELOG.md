@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.13.1...enwiro-sdk-v0.13.2) - 2026-11-09
+
+### Fixed
+
+- *(deps)* update rust crate toml to 1.2.0 ([#906](https://github.com/kantord/enwiro/pull/906))
+
 ## [0.13.1](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.13.0...enwiro-sdk-v0.13.1) - 2026-10-27
 
 ### Fixed
