@@ -281,8 +281,10 @@ fn build_search_query(repos: &[String], type_filter: &str) -> String {
     let date_qualifier = if type_filter.contains("is:issue") {
         String::new()
     } else {
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
-        format!(" updated:>{}", cutoff.format("%Y-%m-%d"))
+        // 30 days is a uniform 24h-day offset; jiff Timestamp arithmetic only
+        // permits clock units, so express the cutoff in hours.
+        let cutoff = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(30 * 24);
+        format!(" updated:>{}", cutoff.strftime("%Y-%m-%d"))
     };
     format!(
         "{} {}{} sort:updated-desc",

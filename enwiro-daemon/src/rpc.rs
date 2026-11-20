@@ -204,9 +204,9 @@ impl EnwiroRpcServer for DaemonRpc {
         Ok(EnvCurrentResult {
             env_name: state.as_ref().map(|s| s.env_name.clone()),
             timestamp: state.as_ref().map(|s| {
-                chrono::DateTime::from_timestamp(s.timestamp, 0)
-                    .map(|dt| dt.to_rfc3339())
-                    .unwrap_or_else(|| s.timestamp.to_string())
+                jiff::Timestamp::from_second(s.timestamp)
+                    .map(|dt| dt.to_string())
+                    .unwrap_or_else(|_| s.timestamp.to_string())
             }),
         })
     }

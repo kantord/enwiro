@@ -3,7 +3,7 @@
 //! the read/write helpers, and the data-collection functions that produce
 //! entries on activation, switch, and recipe-cook events.
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -171,9 +171,9 @@ pub struct EventLogEntry {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set_by: Option<StatusSource>,
-    pub started: DateTime<Utc>,
+    pub started: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended: Option<DateTime<Utc>>,
+    pub ended: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -184,8 +184,8 @@ pub enum EventType {
     Other(String),
 }
 
-pub fn now_utc() -> DateTime<Utc> {
-    Utc::now()
+pub fn now_utc() -> Timestamp {
+    Timestamp::now()
 }
 
 pub fn now_timestamp() -> i64 {
@@ -312,6 +312,30 @@ pub fn record_cook_metadata_per_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Timestamps in `EventLogEntry` were previously written by chrono as
+    /// RFC 3339 strings (e.g. with trailing fractional digits). `jiff`
+    /// serializes the same wire format, and must keep deserializing every
+    /// shape chrono ever wrote.
+    #[test]
+    fn event_log_timestamps_parse_legacy_chrono_output() {
+        for json in [
+            r#""2026-11-20T22:42:16Z""#,
+            r#""2026-11-20T22:42:16.000000Z""#,
+            r#""2026-11-20T22:42:16.123456789Z""#,
+        ] {
+            let entry: EventLogEntry = serde_json::from_str(&format!(
+                r#"{{"type":"status_change","detail":"done","started":{json}}}"#
+            ))
+            .unwrap_or_else(|e| panic!("failed to parse {json}: {e}"));
+            let expected: Timestamp = json
+                .trim_matches('"')
+                .parse()
+                .expect("valid RFC 3339 test input");
+            assert_eq!(entry.started, expected, "instant mismatch for {json}");
+            assert!(entry.ended.is_none());
+        }
+    }
 
     /// `StatusSource` must round-trip through the flat legacy wire strings so
     /// existing `meta.json` logs keep deserializing unchanged.
