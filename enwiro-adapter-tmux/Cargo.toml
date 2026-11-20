@@ -19,7 +19,7 @@ pubkey = "RWQowPNA2jR6/GBAZNkd5d6by7LwOPBdEwK1NptQjAPGrB8UhUUHHP8T"
 
 [dependencies]
 anyhow = "1.0.104"
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.8", features = ["derive"] }
 enwiro-sdk = { workspace = true, features = ["cli"] }
 serde_json = "1.0.154"
 tracing.workspace = true
