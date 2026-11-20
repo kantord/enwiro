@@ -1328,10 +1328,12 @@ mod tests {
     fn test_read_cache_returns_content_regardless_of_mtime() {
         let dir = tempfile::tempdir().unwrap();
         write_cache_atomic(dir.path(), r#"{"cookbook":"git","name":"old-repo"}"#).unwrap();
-        let past = filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(600),
-        );
-        filetime::set_file_mtime(dir.path().join("recipes.cache"), past).unwrap();
+        std::fs::set_times(
+            dir.path().join("recipes.cache"),
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600)),
+        )
+        .unwrap();
         let read = read_cached_recipes(dir.path()).unwrap();
         assert!(
             read.is_some(),
