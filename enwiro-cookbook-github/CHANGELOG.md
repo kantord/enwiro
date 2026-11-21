@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.33](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.32...enwiro-cookbook-github-v0.1.33) - 2026-11-21
+
+### Fixed
+
+- *(deps)* update patch updates ([#923](https://github.com/kantord/enwiro/pull/923))
+- *(deps)* drop unmaintained chrono (RUSTSEC-2026-0543) ([#926](https://github.com/kantord/enwiro/pull/926))
+
 ## [0.1.32](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.31...enwiro-cookbook-github-v0.1.32) - 2026-10-27
 
 ### Fixed
