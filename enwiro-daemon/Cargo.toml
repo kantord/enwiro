@@ -32,7 +32,7 @@ container-wrap = ["dep:which"]
 [dependencies]
 anyhow = "1.0.104"
 async-trait = "0.1.92"
-jiff = { version = "0.2", default-features = false, features = ["std", "serde"] }
+jiff = { version = "0.2.46", default-features = false, features = ["std", "serde"] }
 dirs = "7"
 enwiro-sdk.workspace = true
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
