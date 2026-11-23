@@ -37,7 +37,7 @@ dirs = "7"
 enwiro-sdk.workspace = true
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
 home.workspace = true
-jsonrpsee = { version = "=0.26.1", default-features = false, features = ["server-core", "macros"] }
+jsonrpsee = { version = "=0.26.2", default-features = false, features = ["server-core", "macros"] }
 libc = "0.2.191"
 optative-process-pool = "0.0.9"
 serde = { version = "1.0.229", features = ["derive"] }
