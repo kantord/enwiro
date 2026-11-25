@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.3](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.13.2...enwiro-sdk-v0.13.3) - 2026-11-25
+
+### Fixed
+
+- *(deps)* update patch updates ([#937](https://github.com/kantord/enwiro/pull/937))
+- *(deps)* update patch updates ([#928](https://github.com/kantord/enwiro/pull/928))
+
+### Other
+
+- *(deps)* update rust crate rstest to v0.29.0 ([#939](https://github.com/kantord/enwiro/pull/939))
+
 ## [0.13.2](https://github.com/kantord/enwiro/compare/enwiro-sdk-v0.13.1...enwiro-sdk-v0.13.2) - 2026-11-21
 
 ### Fixed

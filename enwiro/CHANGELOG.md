@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.67](https://github.com/kantord/enwiro/compare/enwiro-v0.3.66...enwiro-v0.3.67) - 2026-11-25
+
+### Fixed
+
+- *(deps)* update patch updates ([#928](https://github.com/kantord/enwiro/pull/928))
+
+### Other
+
+- *(deps)* update rust crate rstest to v0.29.0 ([#939](https://github.com/kantord/enwiro/pull/939))
+
 ## [0.3.66](https://github.com/kantord/enwiro/compare/enwiro-v0.3.65...enwiro-v0.3.66) - 2026-11-21
 
 ### Fixed

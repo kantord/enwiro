@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.24](https://github.com/kantord/enwiro/compare/enwiro-garnish-submodules-v0.1.23...enwiro-garnish-submodules-v0.1.24) - 2026-11-25
+
+### Fixed
+
+- *(deps)* update patch updates ([#928](https://github.com/kantord/enwiro/pull/928))
+
 ## [0.1.23](https://github.com/kantord/enwiro/compare/enwiro-garnish-submodules-v0.1.22...enwiro-garnish-submodules-v0.1.23) - 2026-11-21
 
 ### Fixed
