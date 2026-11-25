@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro"
-version = "0.3.66"
+version = "0.3.67"
 dependencies = [
  "anyhow",
  "assertables",
@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-i3wm"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "anyhow",
  "clap",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-adapter-tmux"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "clap",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-activitywatch"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "enwiro-sdk",
@@ -1051,7 +1051,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-bridge-rofi"
-version = "0.1.37"
+version = "0.1.38"
 dependencies = [
  "anyhow",
  "enwiro-sdk",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-chezmoi"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "anyhow",
  "clap",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-git"
-version = "0.1.36"
+version = "0.1.37"
 dependencies = [
  "anyhow",
  "clap",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-github"
-version = "0.1.33"
+version = "0.1.34"
 dependencies = [
  "anyhow",
  "clap",
@@ -1114,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-cookbook-obsidian"
-version = "0.1.26"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "clap",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-daemon"
-version = "0.0.28"
+version = "0.0.29"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-garnish-just"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-garnish-submodules"
-version = "0.1.23"
+version = "0.1.24"
 dependencies = [
  "anyhow",
  "clap",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-gui"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "axum",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "enwiro-sdk"
-version = "0.13.2"
+version = "0.13.3"
 dependencies = [
  "anyhow",
  "ariadne",
