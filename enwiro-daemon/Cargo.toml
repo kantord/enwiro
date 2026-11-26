@@ -30,7 +30,7 @@ path = "src/main.rs"
 container-wrap = ["dep:which"]
 
 [dependencies]
-anyhow = "1.0.104"
+anyhow = "1.0.105"
 async-trait = "0.1.92"
 jiff = { version = "0.2.46", default-features = false, features = ["std", "serde"] }
 dirs = "7"
