@@ -240,28 +240,13 @@ impl PruneOutcome {
     /// Parse a `prune` subcommand's stdout. Empty means the cookbook had
     /// nothing to prune.
     pub fn parse_stdout(stdout: &str) -> anyhow::Result<Option<Self>> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Wire {
-            Tagged(PruneOutcome),
-            // TODO(2027-01-03): remove this fallback and the string variant.
-            // Cookbooks built before `PruneOutcome` existed printed a bare
-            // JSON string; it is read as `Removed`, which is what the host
-            // assumed for it then. Deliberately undocumented: cookbook
-            // authors must emit the tagged form.
-            Legacy(#[allow(dead_code)] String),
-        }
-
         let stdout = stdout.trim();
         if stdout.is_empty() {
             return Ok(None);
         }
-        let wire: Wire = serde_json::from_str(stdout)
-            .with_context(|| format!("Invalid prune output: {stdout}"))?;
-        Ok(Some(match wire {
-            Wire::Tagged(outcome) => outcome,
-            Wire::Legacy(_) => PruneOutcome::Removed,
-        }))
+        serde_json::from_str(stdout)
+            .map(Some)
+            .with_context(|| format!("Invalid prune output: {stdout}"))
     }
 }
 
@@ -293,11 +278,8 @@ mod tests {
     }
 
     #[test]
-    fn prune_outcome_reads_a_legacy_bare_string_as_removed() {
-        assert_eq!(
-            PruneOutcome::parse_stdout(r#""removed worktree at /tmp/x""#).unwrap(),
-            Some(PruneOutcome::Removed)
-        );
+    fn prune_outcome_rejects_a_bare_string() {
+        assert!(PruneOutcome::parse_stdout(r#""kept worktree at /tmp/x""#).is_err());
     }
 
     #[test]
