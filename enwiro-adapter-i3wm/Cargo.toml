@@ -20,7 +20,7 @@ algorithm = "minisign"
 pubkey = "RWQowPNA2jR6/GBAZNkd5d6by7LwOPBdEwK1NptQjAPGrB8UhUUHHP8T"
 
 [dependencies]
-anyhow = "1.0.104"
+anyhow = "1.0.105"
 clap = { version = "4.6.9", features = ["derive"] }
 enwiro-sdk = { workspace = true, features = ["cli"] }
 i3ipc-types = "0.16.0"

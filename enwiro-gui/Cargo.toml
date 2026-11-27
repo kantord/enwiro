@@ -27,7 +27,7 @@ name = "enw-gui"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.104"
+anyhow = "1.0.105"
 axum = "0.8.9"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net"] }
 rust-embed = "8.14.0"
