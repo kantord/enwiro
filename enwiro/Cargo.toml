@@ -25,7 +25,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.105"
-clap = { version = "4.6.9", features = ["derive"] }
+clap = { version = "4.6.10", features = ["derive"] }
 console = "0.16.6"
 enwiro-daemon.workspace = true
 enwiro-sdk.workspace = true
