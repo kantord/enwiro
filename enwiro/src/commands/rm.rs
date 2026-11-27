@@ -146,13 +146,11 @@ pub(crate) fn remove_env(
     let cleanup_error = match prune_cookbook_resource(&env_path, cookbooks) {
         Ok(Some(PruneOutcome::Kept { reason })) => return Ok(RemoveOutcome::Kept { reason }),
         Ok(Some(PruneOutcome::Removed) | None) => None,
-        // TODO(2027-01-03): the env is deleted even though its prune failed
-        // only because cookbooks built before the `PruneOutcome` contract
-        // may not have a `prune` subcommand at all, and such an env would
-        // otherwise be impossible to remove. Once the legacy fallback in
-        // `PruneOutcome::parse_stdout` is gone, refactor this: report the
-        // failure for this env, leave it in place, and simply move on so
-        // the other environments still get cleaned up properly.
+        // TODO: the env is deleted even though its prune failed, because
+        // `prune` is optional: a cookbook without that subcommand fails
+        // here, and its envs would otherwise be impossible to remove. Once
+        // the host can tell which cookbooks support `prune`, leave the env
+        // in place when a supported prune fails.
         Err(err) => Some(format!("{err:#}")),
     };
 
