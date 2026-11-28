@@ -4,7 +4,7 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use crate::cookbook::{CookbookMetadata, CookbookPayload, PruneOutcome, Recipe};
+use crate::cookbook::{CookbookMetadata, CookbookPayload, PruneOutcome, Recipe, one_line};
 use crate::goal::GoalDetail;
 use crate::plugin::Plugin;
 
@@ -311,6 +311,24 @@ impl CookbookClient {
 /// Poll cadence while waiting for a time-bounded subprocess to exit.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// Why a `cookbook.invoke` RPC failed, on one line. For an error the daemon
+/// reported, that is its message plus the cookbook's stderr: jsonrpsee's own
+/// rendering is a debug dump of the whole error object, printed twice.
+fn rpc_failure_line(error: &anyhow::Error) -> String {
+    let Some(jsonrpsee::core::client::Error::Call(object)) = error.downcast_ref() else {
+        return one_line(&format!("{error:#}"));
+    };
+    let stderr = object
+        .data()
+        .and_then(|data| serde_json::from_str::<serde_json::Value>(data.get()).ok())
+        .and_then(|data| data.get("stderr")?.as_str().map(one_line))
+        .filter(|stderr| !stderr.is_empty());
+    match stderr {
+        Some(stderr) => format!("{}: {stderr}", one_line(object.message())),
+        None => one_line(object.message()),
+    }
+}
+
 /// `wait_with_output` with a deadline: drains stdout/stderr on reader
 /// threads (so output larger than the pipe buffer can't deadlock the
 /// child - same hazard as in [`crate::metadata`]), kills the child and
@@ -572,7 +590,13 @@ impl CookbookTrait for RpcCookbookClient {
     fn prune(&self, recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
         let stdout = self
             .invoke("prune", vec![recipe.to_string()])
-            .with_context(|| format!("Cookbook '{}' failed to prune", self.plugin.name))?;
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Cookbook '{}' failed to prune: {}",
+                    self.plugin.name,
+                    rpc_failure_line(&error)
+                )
+            })?;
         PruneOutcome::parse_stdout(&stdout)
     }
 }
@@ -681,7 +705,7 @@ impl CookbookTrait for CookbookClient {
                 "Cookbook '{}' prune exited with {}: {}",
                 self.plugin.name,
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                one_line(&String::from_utf8_lossy(&output.stderr))
             );
         }
         PruneOutcome::parse_stdout(&String::from_utf8_lossy(&output.stdout))
@@ -699,6 +723,51 @@ mod tests {
             kind: PluginKind::Cookbook,
             executable: String::new(),
         }
+    }
+
+    fn rpc_call_error(message: &str, data: Option<serde_json::Value>) -> anyhow::Error {
+        let object = jsonrpsee::types::ErrorObjectOwned::owned(-32000, message, data);
+        anyhow::Error::new(jsonrpsee::core::client::Error::Call(object))
+            .context("rpc cookbook.invoke")
+    }
+
+    #[test]
+    fn rpc_failure_line_joins_the_message_and_the_cookbook_stderr() {
+        let error = rpc_call_error(
+            "cookbook 'git' op 'prune' exited with non-zero status",
+            Some(
+                serde_json::json!({"exit_code": 1, "stderr": "Error: broken\n\nCaused by:\n    disk\n"}),
+            ),
+        );
+
+        assert_eq!(
+            rpc_failure_line(&error),
+            "cookbook 'git' op 'prune' exited with non-zero status: Error: broken Caused by: disk"
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::no_data(None)]
+    #[case::empty_stderr(Some(serde_json::json!({"exit_code": 1, "stderr": "\n"})))]
+    fn rpc_failure_line_is_just_the_message_without_cookbook_stderr(
+        #[case] data: Option<serde_json::Value>,
+    ) {
+        let error = rpc_call_error("cookbook 'git' op 'prune' did not exit", data);
+
+        assert_eq!(
+            rpc_failure_line(&error),
+            "cookbook 'git' op 'prune' did not exit"
+        );
+    }
+
+    #[test]
+    fn rpc_failure_line_keeps_the_context_chain_of_other_errors() {
+        let error = anyhow::anyhow!("no such\n  socket").context("connect to enwiro-daemon");
+
+        assert_eq!(
+            rpc_failure_line(&error),
+            "connect to enwiro-daemon: no such socket"
+        );
     }
 
     #[test]

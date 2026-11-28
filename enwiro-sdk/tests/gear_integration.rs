@@ -6,37 +6,16 @@
 //! starts) and drop a sibling `.config` describing what each subcommand
 //! should print. No test thread ever opens an executable for writing.
 
-use std::os::unix::fs::symlink;
-use std::path::{Path, PathBuf};
+mod common;
 
+use std::path::Path;
+
+use common::{cookbook_plugin, install_fixture};
 use enwiro_sdk::client::{CookbookClient, CookbookTrait};
 use enwiro_sdk::cookbook::CookbookPayload;
 use enwiro_sdk::garnish::{Garnish, GarnishClient};
 use enwiro_sdk::plugin::{Plugin, PluginKind};
-use serde_json::{Value, json};
-use tempfile::TempDir;
-
-const FIXTURE: &str = env!("CARGO_BIN_EXE_test-fake-plugin");
-
-fn install_fixture(name: &str, config: &Value) -> (TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let bin = dir.path().join(name);
-    symlink(FIXTURE, &bin).expect("symlink fixture");
-    std::fs::write(
-        bin.with_extension("config"),
-        serde_json::to_vec(config).expect("serialize fixture config"),
-    )
-    .expect("write fixture config");
-    (dir, bin)
-}
-
-fn cookbook_plugin(bin: &Path) -> Plugin {
-    Plugin {
-        name: enwiro_sdk::plugin::PluginName::new("fake").unwrap(),
-        kind: PluginKind::Cookbook,
-        executable: bin.to_string_lossy().into_owned(),
-    }
-}
+use serde_json::json;
 
 fn garnish_plugin(name: &str, bin: &Path) -> Plugin {
     Plugin {
