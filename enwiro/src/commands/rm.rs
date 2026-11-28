@@ -8,6 +8,7 @@ use enwiro_sdk::cookbook::PruneOutcome;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 
 use crate::CommandContext;
+use crate::progress::with_spinner;
 
 #[derive(clap::Args)]
 #[command(author, version, about = "Remove an environment")]
@@ -132,7 +133,10 @@ pub(crate) fn remove_env(
         return Ok(RemoveOutcome::Aborted);
     }
 
-    match prune_cookbook_resource(&env_path, cookbooks) {
+    let pruned = with_spinner(&format!("cleaning up '{name}'..."), || {
+        prune_cookbook_resource(&env_path, cookbooks)
+    });
+    match pruned {
         Ok(Some(PruneOutcome::Kept { reason })) => return Ok(RemoveOutcome::Kept { reason }),
         Ok(Some(PruneOutcome::Removed) | None) => {}
         // The env records how to retry, so it must outlive a failed cleanup.
