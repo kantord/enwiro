@@ -53,7 +53,9 @@ it.
 - A cookbook that implements `prune` without declaring it is silently skipped,
   so cookbooks have to be updated before, or together with, `enw`.
 - A cleanup that can never succeed leaves the environment until it is deleted
-  by hand. The report names the directory.
+  by hand. When the cleanup failed, the report names the environment
+  directory. When the cookbook itself keeps its resource, the report shows
+  only the cookbook's reason.
 
 ### Risks
 

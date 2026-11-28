@@ -1240,10 +1240,9 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
 
 /// Resolve `recipe_name`'s worktree path the same deterministic way `cook`
 /// does, without ever creating anything, and remove it if it exists.
-/// A PR and an issue share one number sequence per repo, so at most one of
-/// the two candidate paths can ever exist. Recipes whose repo can't be
-/// resolved (unknown, or no local clone) have nothing this cookbook can
-/// safely prune.
+/// Names this cookbook cannot parse, and repos that discovery does not
+/// resolve (unknown or ambiguous), have nothing it can safely prune.
+/// Discovery itself failing is an error.
 fn prune_recipe(
     config: &ConfigurationValues,
     recipe_name: &str,
@@ -1280,8 +1279,10 @@ fn prune_recipe_in(
     }
 }
 
-/// A PR and an issue share one number sequence per repo, so at most one of
-/// the two candidate paths can ever exist.
+/// Remove the first worktree that exists for `number`, looking in the same
+/// order as `cook`: the PR path, the issue path, then the old-format PR path.
+/// A PR and an issue share one number sequence per repo, so one number never
+/// has both.
 fn prune_worktree(
     config: &ConfigurationValues,
     repo_config: &RepoConfig,
