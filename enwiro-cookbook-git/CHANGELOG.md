@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.38](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.37...enwiro-cookbook-git-v0.1.38) - 2026-11-28
+
+### Fixed
+
+- keep environments when cookbook cleanup fails ([#947](https://github.com/kantord/enwiro/pull/947))
+- *(deps)* update patch updates ([#944](https://github.com/kantord/enwiro/pull/944))
+- *(deps)* update patch updates ([#940](https://github.com/kantord/enwiro/pull/940))
+
 ## [0.1.37](https://github.com/kantord/enwiro/compare/enwiro-cookbook-git-v0.1.36...enwiro-cookbook-git-v0.1.37) - 2026-11-25
 
 ### Fixed

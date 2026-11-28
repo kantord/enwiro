@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.35](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.34...enwiro-cookbook-github-v0.1.35) - 2026-11-28
+
+### Fixed
+
+- keep environments when cookbook cleanup fails ([#947](https://github.com/kantord/enwiro/pull/947))
+- *(deps)* update patch updates ([#944](https://github.com/kantord/enwiro/pull/944))
+- *(deps)* update rust crate jiff to v1 ([#927](https://github.com/kantord/enwiro/pull/927))
+- *(deps)* update patch updates ([#940](https://github.com/kantord/enwiro/pull/940))
+
 ## [0.1.34](https://github.com/kantord/enwiro/compare/enwiro-cookbook-github-v0.1.33...enwiro-cookbook-github-v0.1.34) - 2026-11-25
 
 ### Fixed
