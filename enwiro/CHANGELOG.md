@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.68](https://github.com/kantord/enwiro/compare/enwiro-v0.3.67...enwiro-v0.3.68) - 2026-11-28
+
+### Fixed
+
+- keep environments when cookbook cleanup fails ([#947](https://github.com/kantord/enwiro/pull/947))
+- report bare-string cookbook prune output as a failed cleanup ([#946](https://github.com/kantord/enwiro/pull/946))
+- *(deps)* update patch updates ([#944](https://github.com/kantord/enwiro/pull/944))
+- *(deps)* update patch updates ([#940](https://github.com/kantord/enwiro/pull/940))
+
 ## [0.3.67](https://github.com/kantord/enwiro/compare/enwiro-v0.3.66...enwiro-v0.3.67) - 2026-11-25
 
 ### Fixed

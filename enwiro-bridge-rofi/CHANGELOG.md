@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.39](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.38...enwiro-bridge-rofi-v0.1.39) - 2026-11-28
+
+### Fixed
+
+- *(deps)* update patch updates ([#940](https://github.com/kantord/enwiro/pull/940))
+
 ## [0.1.38](https://github.com/kantord/enwiro/compare/enwiro-bridge-rofi-v0.1.37...enwiro-bridge-rofi-v0.1.38) - 2026-11-25
 
 ### Other

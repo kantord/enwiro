@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.28](https://github.com/kantord/enwiro/compare/enwiro-cookbook-obsidian-v0.1.27...enwiro-cookbook-obsidian-v0.1.28) - 2026-11-28
+
+### Fixed
+
+- *(deps)* update patch updates ([#944](https://github.com/kantord/enwiro/pull/944))
+- *(deps)* update patch updates ([#940](https://github.com/kantord/enwiro/pull/940))
+
 ## [0.1.27](https://github.com/kantord/enwiro/compare/enwiro-cookbook-obsidian-v0.1.26...enwiro-cookbook-obsidian-v0.1.27) - 2026-11-25
 
 ### Fixed
