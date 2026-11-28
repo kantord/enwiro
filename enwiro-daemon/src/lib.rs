@@ -474,12 +474,10 @@ fn cookbook_sources(
                 recipes: Vec::new(),
             },
         );
-        let recognized: Vec<CookbookCapability> =
-            client.metadata().capabilities.recognized().collect();
-        if recognized.is_empty() {
-            tracing::debug!(cookbook = %name, "Cookbook declares no recognized capabilities, not spawning listen");
+        if !client.metadata().has(CookbookCapability::Listen) {
+            tracing::debug!(cookbook = %name, "Cookbook does not declare listen, not spawning it");
         }
-        for capability in recognized {
+        for capability in client.metadata().capabilities.recognized() {
             match capability {
                 CookbookCapability::Listen => {
                     tracing::info!(cookbook = %name, "Cookbook declares listen capability, autostarting");
@@ -491,6 +489,8 @@ fn cookbook_sources(
                         serde_json::to_value(&payload).ok(),
                     ));
                 }
+                // Run by the CLI when an environment is removed.
+                CookbookCapability::Prune => {}
             }
         }
     }

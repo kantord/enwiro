@@ -26,6 +26,9 @@ co-locating your cookbook binary there works too.
 ## Subcommands
 
 Your cookbook binary must handle three subcommands passed as the first argument:
+[`list-recipes`](#list-recipes), [`cook`](#cook-recipe_name) and
+[`metadata`](#metadata). [`prune`](#prune-recipe_name) and [`listen`](#listen)
+are optional, and enwiro runs them only if `metadata` declares them.
 
 ### `list-recipes`
 
@@ -176,9 +179,11 @@ enwiro-cookbook-yourname prune my-project
 Tear down whatever `cook` materialized for the recipe (a worktree, a clone, a
 scratch directory). This subcommand is **optional**: implement it only if
 your cookbook creates something on disk that should go away with its
-environment. Enwiro calls it when an environment is removed (`enw rm`,
+environment, and declare it with the `prune` capability in your
+[`metadata`](#metadata) output. Enwiro never runs `prune` on a cookbook that
+does not declare it. For one that does, enwiro calls it when an environment is removed (`enw rm`,
 `enw stale prune`), before the environment itself is deleted, and gives it
-10 seconds.
+55 seconds.
 
 Print a JSON object to stdout and exit 0:
 
@@ -204,7 +209,8 @@ recipe is not one your cookbook materialized), print nothing and exit 0.
 
 Make `prune` safe to repeat: after the user fixes the problem you reported,
 the next call must succeed. Exit non-zero only when the cleanup itself failed
-unexpectedly; enwiro then reports that failure to the user.
+unexpectedly. A non-zero exit, a timeout or output enwiro cannot parse keeps
+the environment and reports the failure to the user.
 
 ### `metadata`
 
@@ -213,28 +219,30 @@ enwiro-cookbook-yourname metadata
 ```
 
 Print a JSON object to stdout describing your cookbook. This subcommand is
-**optional** - if your binary doesn't support it (exits non-zero, doesn't
-recognize the command, or doesn't answer within a few seconds), enwiro uses
-sensible defaults.
+**required**; `{}` is a valid answer. If it fails (exits non-zero, prints
+something else, or takes more than 5 seconds), enwiro lists and cooks with
+defaults, but cannot tell whether your cookbook implements `prune`, so it
+refuses to remove the cookbook's environments.
 
-Because this is a probe, enwiro **will invoke your binary with `metadata`
-whether or not you implement it** (and may do the same with other
-subcommands you don't implement, like `gear`). Your binary should therefore
-exit non-zero promptly on any unrecognized subcommand, rather than falling
-back to its normal behavior. Standard argument parsers (clap, argparse, a
-shell `case` with a `*)` arm) already behave this way, so most cookbooks
-need no extra work to satisfy this.
+Enwiro may invoke your binary with subcommands you don't implement, like
+`gear`. Your binary should therefore exit non-zero promptly on any
+unrecognized subcommand, rather than falling back to its normal behavior.
+Standard argument parsers (clap, argparse, a shell `case` with a `*)` arm)
+already behave this way, so most cookbooks need no extra work to satisfy
+this.
 
 ```json
 {"defaultPriority": 40, "capabilities": [{"name": "listen"}]}
 ```
 
-**Capabilities** declare the optional subcommands your cookbook implements,
-so the daemon never invokes an ability your binary doesn't have. Each entry
-is an object with a `name` (so future capabilities can carry parameters);
-names the host doesn't recognize are ignored. The only cookbook capability
-today is `listen`: the daemon spawns and supervises your
-[`listen`](#listen) subcommand **only if you declare it here**.
+**Capabilities** declare which of these optional subcommands your cookbook
+implements. Each entry is an object with a `name` (so future capabilities can
+carry parameters); names the host doesn't recognize are ignored.
+
+| Capability | Effect of declaring it |
+|----------|----------|
+| `listen` | The daemon spawns and supervises your [`listen`](#listen) subcommand |
+| `prune`  | Enwiro runs [`prune`](#prune-recipe_name) when an environment is removed, and keeps the environment if it fails |
 
 **Priority** controls the order your cookbook's recipes appear relative to other
 cookbooks. Lower numbers appear first. If omitted, the default priority is 50.
@@ -464,9 +472,7 @@ when it applies, but subprocess delegation is the option that always works.
   worktree, or do other setup work - the user expects to wait.
 - **Idempotent cooking.** If `cook` is called for a recipe that was already
   cooked, just return the existing path. Don't fail or recreate.
-- **Metadata is optional until you need `listen`.** If you skip the
-  `metadata` subcommand entirely, your cookbook still works - it just gets
-  the default priority of 50 and declares no capabilities, so the daemon
-  won't spawn a `listen` subprocess for it.
+- **Declare what you implement.** Without the matching capability, `listen`
+  is never spawned and `prune` is never run.
 - **Recipe names are identifiers.** Users type them (e.g., `enw activate
   my-project`), so keep them short and filesystem-friendly. Avoid spaces.

@@ -8,6 +8,7 @@ use enwiro_sdk::cookbook::PruneOutcome;
 use enwiro_sdk::process::ENWIRO_ENV_VAR;
 
 use crate::CommandContext;
+use crate::progress::with_spinner;
 
 #[derive(clap::Args)]
 #[command(author, version, about = "Remove an environment")]
@@ -41,15 +42,10 @@ pub(crate) enum RemoveOutcome {
     /// The user declined the confirmation prompt.
     Aborted,
     /// The owning cookbook could not fully clean up after the environment.
-    /// The environment is left in place, so removing it again retries.
+    /// Either the cookbook said so, or its cleanup failed. The environment
+    /// is left in place, so removing it again retries.
     Kept {
         reason: String,
-    },
-    /// The environment is gone, but asking its cookbook to clean up failed
-    /// (crash, timeout, no `prune` subcommand), so nothing is known about
-    /// what was left behind.
-    CleanupFailed {
-        error: String,
     },
 }
 
@@ -59,7 +55,7 @@ impl RemoveOutcome {
     pub(crate) fn needs_attention(&self) -> bool {
         match self {
             RemoveOutcome::Removed | RemoveOutcome::Aborted => false,
-            RemoveOutcome::Kept { .. } | RemoveOutcome::CleanupFailed { .. } => true,
+            RemoveOutcome::Kept { .. } => true,
         }
     }
 }
@@ -75,12 +71,6 @@ pub(crate) fn write_outcome<W: Write>(
         RemoveOutcome::Removed => writeln!(writer, "✓ {name}"),
         RemoveOutcome::Aborted => writeln!(writer, "Aborted."),
         RemoveOutcome::Kept { reason } => writeln!(writer, "✗ {name}  kept: {reason}"),
-        RemoveOutcome::CleanupFailed { error } => {
-            writeln!(
-                writer,
-                "! {name}  removed, but cookbook cleanup failed: {error}"
-            )
-        }
     }
     .context("Could not write to output")
 }
@@ -143,16 +133,23 @@ pub(crate) fn remove_env(
         return Ok(RemoveOutcome::Aborted);
     }
 
-    let cleanup_error = match prune_cookbook_resource(&env_path, cookbooks) {
+    let pruned = with_spinner(&format!("cleaning up '{name}'..."), || {
+        prune_cookbook_resource(&env_path, cookbooks)
+    });
+    match pruned {
         Ok(Some(PruneOutcome::Kept { reason })) => return Ok(RemoveOutcome::Kept { reason }),
-        Ok(Some(PruneOutcome::Removed) | None) => None,
-        // TODO: the env is deleted even though its prune failed, because
-        // `prune` is optional: a cookbook without that subcommand fails
-        // here, and its envs would otherwise be impossible to remove. Once
-        // the host can tell which cookbooks support `prune`, leave the env
-        // in place when a supported prune fails.
-        Err(err) => Some(format!("{err:#}")),
-    };
+        Ok(Some(PruneOutcome::Removed) | None) => {}
+        // The env records how to retry, so it must outlive a failed cleanup.
+        Err(err) => {
+            return Ok(RemoveOutcome::Kept {
+                reason: format!(
+                    "cleanup failed: {err:#} - fix it and run again, or delete {} to drop \
+                     the env (its resources stay on disk)",
+                    env_path.display()
+                ),
+            });
+        }
+    }
 
     if meta.file_type().is_symlink() {
         fs::remove_file(&env_path).with_context(|| format!("Could not remove env '{name}'"))?;
@@ -162,10 +159,7 @@ pub(crate) fn remove_env(
         bail!("unexpected file type at {}", env_path.display());
     }
 
-    Ok(match cleanup_error {
-        Some(error) => RemoveOutcome::CleanupFailed { error },
-        None => RemoveOutcome::Removed,
-    })
+    Ok(RemoveOutcome::Removed)
 }
 
 #[cfg(test)]
@@ -364,7 +358,7 @@ mod tests {
     }
 
     #[rstest]
-    fn removes_the_env_but_reports_it_when_the_cookbook_prune_fails(
+    fn keeps_the_env_and_says_how_to_drop_it_when_the_cookbook_prune_fails(
         context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
     ) {
         let (_temp_dir, mut context, _, _) = context_object;
@@ -381,11 +375,18 @@ mod tests {
 
         assert_eq!(
             outcome,
-            RemoveOutcome::CleanupFailed {
-                error: "simulated failure".to_string()
+            RemoveOutcome::Kept {
+                reason: format!(
+                    "cleanup failed: simulated failure - fix it and run again, or delete {} \
+                     to drop the env (its resources stay on disk)",
+                    env_path.display()
+                )
             }
         );
-        assert!(!env_path.exists(), "env dir must still be gone");
+        assert!(
+            env_path.join("meta.json").exists(),
+            "meta.json records the cookbook and recipe a retry needs"
+        );
     }
 
     /// Records which recipe `prune` was called with, so the fallback test
@@ -461,8 +462,8 @@ mod tests {
         let workspaces = Path::new(&context.config.workspaces_directory).to_path_buf();
 
         // A cookbook whose `prune` always errors - proves the
-        // no-cookbook-recorded case never reaches it (it would otherwise
-        // come back as `CleanupFailed`).
+        // no-cookbook-recorded case never reaches it (the env would
+        // otherwise be kept).
         let cookbooks: Vec<Box<dyn CookbookTrait>> = vec![Box::new(FailingCookbook {
             cookbook_name: enwiro_sdk::plugin::PluginName::new("git").unwrap(),
         })];
@@ -496,30 +497,15 @@ mod tests {
             ),
             "✗ a  kept: dirty\n"
         );
-        assert_eq!(
-            report(
-                "a",
-                &RemoveOutcome::CleanupFailed {
-                    error: "timed out".to_string()
-                }
-            ),
-            "! a  removed, but cookbook cleanup failed: timed out\n"
-        );
     }
 
     #[test]
-    fn only_kept_and_failed_cleanup_need_attention() {
+    fn only_a_kept_env_needs_attention() {
         assert!(!RemoveOutcome::Removed.needs_attention());
         assert!(!RemoveOutcome::Aborted.needs_attention());
         assert!(
             RemoveOutcome::Kept {
                 reason: String::new()
-            }
-            .needs_attention()
-        );
-        assert!(
-            RemoveOutcome::CleanupFailed {
-                error: String::new()
             }
             .needs_attention()
         );

@@ -3,6 +3,7 @@ use anyhow::anyhow;
 use crate::CommandContext;
 use crate::commands::wrap::resolve_launch_via_daemon;
 use crate::environments::Environment;
+use crate::progress::{FRAME_INTERVAL, clear_line, draw_line};
 
 use enwiro_sdk::process::ProcessSpec;
 
@@ -11,8 +12,6 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const FALLBACK_SHELL: &str = "/bin/sh";
 
@@ -93,13 +92,13 @@ fn wait_for_environment(
     loop {
         if let Ok(environment) = Environment::get_one(workspaces_directory, flat_name) {
             if tty {
-                clear_progress_line();
+                clear_line(&mut io::stderr());
             }
             return Some(environment);
         }
         if timeout_secs > 0 && started.elapsed() >= Duration::from_secs(timeout_secs) {
             if tty {
-                clear_progress_line();
+                clear_line(&mut io::stderr());
             }
             eprintln!(
                 "enwiro: environment '{name}' was not ready after {timeout_secs}s; \
@@ -108,19 +107,12 @@ fn wait_for_environment(
             return None;
         }
         if tty {
-            let spinner = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
-            let elapsed = started.elapsed().as_secs();
-            eprint!("\r\x1b[2K{spinner} preparing environment '{name}'... ({elapsed}s)");
-            let _ = io::stderr().flush();
+            let message = format!("preparing environment '{name}'...");
+            draw_line(&mut io::stderr(), frame, &message, started);
             frame += 1;
         }
-        std::thread::sleep(POLL_INTERVAL);
+        std::thread::sleep(FRAME_INTERVAL);
     }
-}
-
-fn clear_progress_line() {
-    eprint!("\r\x1b[2K");
-    let _ = io::stderr().flush();
 }
 
 /// Wrap-parity launch: daemon `launch.resolve`, then exec-replace with cwd +

@@ -743,6 +743,11 @@ mod tests {
     }
 
     #[test]
+    fn metadata_declares_prune() {
+        assert!(metadata().has(CookbookCapability::Prune));
+    }
+
+    #[test]
     fn test_discovers_regular_repo() {
         let tmp = TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
@@ -1811,6 +1816,17 @@ fn read_config() -> anyhow::Result<ConfigurationValues> {
     Ok(config)
 }
 
+fn metadata() -> CookbookMetadata {
+    CookbookMetadata {
+        capabilities: DeclaredCapabilities::declare([
+            CookbookCapability::Listen,
+            CookbookCapability::Prune,
+        ]),
+        default_priority: Some(10),
+        project_overridable: vec!["repo_globs".to_string()],
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-cookbook-git.log");
 
@@ -1834,15 +1850,7 @@ fn main() -> anyhow::Result<()> {
             prune(&config, args)?;
         }
         EnwiroCookbookGit::Core(CookbookCore::Metadata) => {
-            println!(
-                "{}",
-                CookbookMetadata {
-                    capabilities: DeclaredCapabilities::declare([CookbookCapability::Listen]),
-                    default_priority: Some(10),
-                    project_overridable: vec!["repo_globs".to_string()],
-                }
-                .to_json()
-            );
+            println!("{}", metadata().to_json());
         }
         EnwiroCookbookGit::Listen => {
             let payload = CookbookPayload::read_first_line_from_stdin()

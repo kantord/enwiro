@@ -149,7 +149,12 @@ fn spawn_probe(executable: &str) -> std::io::Result<std::process::Child> {
     }
 }
 
-fn probe_metadata<T: DeserializeOwned>(executable: &str, timeout: Duration) -> anyhow::Result<T> {
+/// Like [`fetch_metadata_with_timeout`], but reports why the probe failed,
+/// for callers that must tell "declares nothing" from "did not answer".
+pub(crate) fn probe_metadata<T: DeserializeOwned>(
+    executable: &str,
+    timeout: Duration,
+) -> anyhow::Result<T> {
     let mut child = spawn_probe(executable)
         .map_err(|e| anyhow::anyhow!("Failed to spawn plugin metadata command: {e}"))?;
 

@@ -246,11 +246,11 @@ fn stale_prune<W: Write>(
 
     writeln!(
         context.writer,
-        "Removed {}, kept {}, warnings {}, skipped {}.",
-        tally.removed, tally.kept, tally.warnings, tally.skipped
+        "Removed {}, kept {}, skipped {}.",
+        tally.removed, tally.kept, tally.skipped
     )
     .context("Could not write to output")?;
-    context.exit_failure |= tally.kept > 0 || tally.warnings > 0;
+    context.exit_failure |= tally.kept > 0;
 
     Ok(())
 }
@@ -260,10 +260,9 @@ fn stale_prune<W: Write>(
 #[derive(Default)]
 struct PruneTally {
     removed: usize,
-    /// Left in place: the cookbook kept its resource, or removal failed.
+    /// Left in place: the cookbook kept its resource, its cleanup failed, or
+    /// removal failed.
     kept: usize,
-    /// Removed, but the cookbook's cleanup failed.
-    warnings: usize,
     skipped: usize,
 }
 
@@ -272,7 +271,6 @@ impl PruneTally {
         match outcome {
             RemoveOutcome::Removed => self.removed += 1,
             RemoveOutcome::Kept { .. } => self.kept += 1,
-            RemoveOutcome::CleanupFailed { .. } => self.warnings += 1,
             // Unreachable here (`yes: true` never prompts); counted so a
             // future caller that prompts can't silently drop an env.
             RemoveOutcome::Aborted => self.skipped += 1,
@@ -284,7 +282,7 @@ impl PruneTally {
 mod tests {
     use super::*;
     use crate::test_utils::test_utilities::{
-        AdapterLog, FakeContext, FakeCookbook, NotificationLog, context_object,
+        AdapterLog, FailingCookbook, FakeContext, FakeCookbook, NotificationLog, context_object,
     };
     use crate::usage_stats::EnvStats;
     use enwiro_daemon::meta::UserIntentSignals;
@@ -788,7 +786,7 @@ mod tests {
         assert!(
             output.contains("✓ done-a")
                 && output.contains("✓ done-b")
-                && output.contains("Removed 2, kept 0, warnings 0, skipped 0."),
+                && output.contains("Removed 2, kept 0, skipped 0."),
             "successful removals must be reported, got: {output}"
         );
         assert!(
@@ -839,13 +837,50 @@ mod tests {
             output.contains("✓ clean")
                 && output.contains("✗ stuck  kept: uncommitted changes")
                 && !output.contains("Removed 'stuck'")
-                && output.contains("Removed 1, kept 1, warnings 0, skipped 0."),
+                && output.contains("Removed 1, kept 1, skipped 0."),
             "a kept env must never be reported as removed, got: {output}"
         );
         assert!(
             context_object.exit_failure,
             "a kept env must request a failing exit status"
         );
+    }
+
+    #[rstest]
+    fn test_stale_prune_keeps_an_env_whose_cleanup_failed(
+        context_object: (tempfile::TempDir, FakeContext, AdapterLog, NotificationLog),
+    ) {
+        let (temp_dir, mut context_object, _, _) = context_object;
+        context_object.create_mock_environment("stuck");
+        context_object.cookbooks.push(Box::new(FailingCookbook {
+            cookbook_name: enwiro_sdk::plugin::PluginName::new("git").unwrap(),
+        }));
+
+        let now = crate::usage_stats::now_timestamp();
+        write_meta(
+            &temp_dir.path().join("stuck"),
+            &EnvStats {
+                signals: UserIntentSignals {
+                    activation_buffer: vec![(now - 60 * SECONDS_PER_DAY, 1.0)],
+                    ..Default::default()
+                },
+                status: Some(Status::Done { outcome: None }),
+                cookbook: Some("git".to_string()),
+                recipe: Some("stuck".to_string()),
+                ..Default::default()
+            },
+        );
+
+        stale(&mut context_object, prune(30, true)).unwrap();
+
+        assert!(temp_dir.path().join("stuck").exists());
+        let output = context_object.get_output();
+        assert!(
+            output.contains("✗ stuck  kept: cleanup failed: simulated failure")
+                && output.contains("Removed 0, kept 1, skipped 0."),
+            "got: {output}"
+        );
+        assert!(context_object.exit_failure);
     }
 
     #[rstest]

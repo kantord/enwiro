@@ -3,6 +3,7 @@ mod confirm;
 mod context;
 mod environments;
 mod notifier;
+mod progress;
 mod status_display;
 mod test_utils;
 mod usage_stats;

@@ -14,6 +14,7 @@ decision, and the trade-offs.
 | [0004](0004-recipe-grammar-and-composed-environments.md) | Recipe-name grammar and composed environments | Accepted |
 | [0005](0005-shell-waits-never-cooks.md)    | `enw shell` waits for cooking, never cooks | Accepted |
 | [0006](0006-description-resolution-for-pattern-recipes.md) | Resolving real descriptions for pattern-routed cooks | Accepted |
+| [0007](0007-cookbook-prune-capability.md)  | Cookbooks declare `prune`, and a failed cleanup keeps the env | Accepted |
 
 ## Status values
 

@@ -18,14 +18,18 @@ pub enum CookbookCapability {
     /// The daemon spawns and supervises the cookbook's `listen` subcommand,
     /// feeding it the resolved config payload on stdin.
     Listen,
+    /// The cookbook implements `prune`. The host runs it only if declared,
+    /// and keeps the environment when it fails.
+    Prune,
 }
 
 impl Capability for CookbookCapability {
-    const ALL: &'static [Self] = &[CookbookCapability::Listen];
+    const ALL: &'static [Self] = &[CookbookCapability::Listen, CookbookCapability::Prune];
 
     fn wire_name(self) -> &'static str {
         match self {
             CookbookCapability::Listen => "listen",
+            CookbookCapability::Prune => "prune",
         }
     }
 }
@@ -246,8 +250,14 @@ impl PruneOutcome {
         }
         serde_json::from_str(stdout)
             .map(Some)
-            .with_context(|| format!("Invalid prune output: {stdout}"))
+            .with_context(|| format!("Invalid prune output: {}", one_line(stdout)))
     }
+}
+
+/// `text` with every run of whitespace, newlines included, collapsed to one
+/// space, for messages that must fit on one line of a report.
+pub(crate) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -280,6 +290,18 @@ mod tests {
     #[test]
     fn prune_outcome_rejects_a_bare_string() {
         assert!(PruneOutcome::parse_stdout(r#""kept worktree at /tmp/x""#).is_err());
+    }
+
+    #[test]
+    fn prune_outcome_reports_invalid_output_on_one_line() {
+        let error = PruneOutcome::parse_stdout("Removing...\n  done\n").unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(
+            message.starts_with("Invalid prune output: Removing... done: "),
+            "{message}"
+        );
+        assert!(!message.contains('\n'), "{message}");
     }
 
     #[test]
