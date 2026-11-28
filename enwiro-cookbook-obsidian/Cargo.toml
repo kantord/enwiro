@@ -18,8 +18,8 @@ algorithm = "minisign"
 pubkey = "RWQowPNA2jR6/GBAZNkd5d6by7LwOPBdEwK1NptQjAPGrB8UhUUHHP8T"
 
 [dependencies]
-anyhow = "1.0.104"
-clap = { version = "4.6.9", features = ["derive"] }
+anyhow = "1.0.105"
+clap = { version = "4.6.10", features = ["derive"] }
 enwiro-sdk = { workspace = true, features = ["cli"] }
 home.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
