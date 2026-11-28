@@ -20,6 +20,7 @@ use crate::meta::{
 };
 use anyhow::Context;
 use async_trait::async_trait;
+use enwiro_sdk::client::{BEST_EFFORT_SUBCOMMAND_TIMEOUT, PRUNE_TIMEOUT};
 use enwiro_sdk::rpc::{
     APPLICATION_ERROR_CODE, CALL_CHAIN_ENV_VAR, CYCLE_DETECTED_CODE, CookbookInvokeParams,
     CookbookInvokeResult, EnvCurrentResult, EnvListEntry, EnvListResult, EnvMarkParams,
@@ -117,7 +118,7 @@ impl EnwiroRpcServer for DaemonRpc {
 
         // tokio::process gives us async pipes + kill_on_drop: if the
         // handler returns early (client disconnect, task cancellation,
-        // best-effort timeout), the cookbook child is killed automatically
+        // per-op timeout), the cookbook child is killed automatically
         // rather than leaked. Bounded reads on stdout / stderr cap daemon
         // memory against a cookbook that dumps a gigabyte of build output.
         let subprocess = run_cookbook_subprocess(
@@ -127,7 +128,7 @@ impl EnwiroRpcServer for DaemonRpc {
             &chain_env_value,
             &payload,
         );
-        let output = match best_effort_op_timeout(&params.op) {
+        let output = match op_timeout(&params.op) {
             Some(timeout) => tokio::time::timeout(timeout, subprocess)
                 .await
                 .map_err(|_| {
@@ -312,13 +313,17 @@ impl EnwiroRpcServer for DaemonRpc {
     }
 }
 
-/// Wall-clock cap for best-effort ops invoked over RPC; the caller
-/// (`RpcCookbookClient`) treats every failure as "nothing declared".
-/// Mirrors `BEST_EFFORT_SUBCOMMAND_TIMEOUT` on the direct-subprocess
-/// path in `enwiro_sdk::client`. `cook` deliberately has no cap: cloning
-/// a large repo can take minutes.
-fn best_effort_op_timeout(op: &str) -> Option<std::time::Duration> {
-    matches!(op, "gear" | "external-paths" | "prune").then(|| std::time::Duration::from_secs(10))
+/// Wall-clock cap for ops invoked over RPC, mirroring the direct-subprocess
+/// path in `enwiro_sdk::client`. `gear` and `external-paths` are best-effort:
+/// the caller (`RpcCookbookClient`) treats every failure as "nothing
+/// declared". `prune` failures are reported, so it gets longer. `cook`
+/// deliberately has no cap: cloning a large repo can take minutes.
+fn op_timeout(op: &str) -> Option<std::time::Duration> {
+    match op {
+        "gear" | "external-paths" => Some(BEST_EFFORT_SUBCOMMAND_TIMEOUT),
+        "prune" => Some(PRUNE_TIMEOUT),
+        _ => None,
+    }
 }
 
 /// Output of a single cookbook subprocess invocation; carries enough
@@ -513,19 +518,32 @@ async fn handle_conn(stream: UnixStream, methods: Methods) -> anyhow::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
-    fn best_effort_ops_get_a_timeout() {
-        assert!(best_effort_op_timeout("gear").is_some());
-        assert!(best_effort_op_timeout("external-paths").is_some());
-        assert!(best_effort_op_timeout("prune").is_some());
+    fn best_effort_ops_get_a_short_timeout() {
+        for op in ["gear", "external-paths"] {
+            assert_eq!(op_timeout(op), Some(Duration::from_secs(10)), "{op}");
+        }
+    }
+
+    #[test]
+    fn prune_gets_a_longer_timeout_than_best_effort_ops() {
+        assert_eq!(op_timeout("prune"), Some(Duration::from_secs(55)));
+    }
+
+    /// The RPC client gives up on any request after jsonrpsee's default of
+    /// 60s, which would replace the daemon's own timeout message.
+    #[test]
+    fn prune_times_out_in_the_daemon_before_the_client_gives_up() {
+        assert!(PRUNE_TIMEOUT < Duration::from_secs(60));
     }
 
     #[test]
     fn cook_and_unknown_ops_are_uncapped() {
-        assert!(best_effort_op_timeout("cook").is_none());
-        assert!(best_effort_op_timeout("list-recipes").is_none());
-        assert!(best_effort_op_timeout("future-op").is_none());
+        assert!(op_timeout("cook").is_none());
+        assert!(op_timeout("list-recipes").is_none());
+        assert!(op_timeout("future-op").is_none());
     }
 
     /// `run` binds this synchronously and propagates a failure with `?`

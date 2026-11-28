@@ -17,6 +17,13 @@ const DEFAULT_PRIORITY: u32 = 50;
 /// `list-recipes` are exempt: cooking may legitimately take minutes.
 pub const BEST_EFFORT_SUBCOMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Wall-clock cap for `prune`. Longer than the best-effort cap because
+/// deleting a large worktree takes time, and giving up early reports a
+/// cleanup that is still running as failed. It stays under jsonrpsee's
+/// default 60s request timeout so that the daemon's own timeout message is
+/// the one reported: raising it further also needs a longer client timeout.
+pub const PRUNE_TIMEOUT: Duration = Duration::from_secs(55);
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct EnvScores {
     pub launcher: f64,
@@ -278,7 +285,7 @@ impl CookbookClient {
     /// Like [`Self::spawn_with_payload`], but kills the cookbook and
     /// errors if it doesn't exit within `timeout`. Used for the
     /// best-effort subcommands, whose callers turn the error into
-    /// "nothing declared".
+    /// "nothing declared", and for `prune`, whose callers report it.
     fn spawn_with_payload_timeout(
         &self,
         args: &[&str],
@@ -698,7 +705,7 @@ impl CookbookTrait for CookbookClient {
     /// failure, timeout and a non-zero exit are all errors.
     fn prune(&self, recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
         let output = self
-            .spawn_with_payload_timeout(&["prune", recipe], BEST_EFFORT_SUBCOMMAND_TIMEOUT)
+            .spawn_with_payload_timeout(&["prune", recipe], PRUNE_TIMEOUT)
             .with_context(|| format!("Cookbook '{}' failed to prune", self.plugin.name))?;
         if !output.status.success() {
             bail!(

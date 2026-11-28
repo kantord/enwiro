@@ -178,7 +178,7 @@ scratch directory). This subcommand is **optional**: implement it only if
 your cookbook creates something on disk that should go away with its
 environment. Enwiro calls it when an environment is removed (`enw rm`,
 `enw stale prune`), before the environment itself is deleted, and gives it
-10 seconds.
+55 seconds.
 
 Print a JSON object to stdout and exit 0:
 
