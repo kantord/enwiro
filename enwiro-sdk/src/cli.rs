@@ -22,7 +22,7 @@
 //! [`crate::metadata`]).
 
 // Required subcommands of every cookbook: `list-recipes`, `cook`, and
-// `metadata`. Optional surface (`listen`, `external-paths`, `gear`) is
+// `metadata`. Optional surface (`listen`, `prune`, `external-paths`, `gear`) is
 // added per-plugin. A regular comment, not a doc comment: clap derives
 // would otherwise surface it as the adopting plugin's own --help about.
 #[derive(Debug, clap::Subcommand)]

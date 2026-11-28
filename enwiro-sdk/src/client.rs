@@ -4,7 +4,9 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
-use crate::cookbook::{CookbookMetadata, CookbookPayload, PruneOutcome, Recipe, one_line};
+use crate::cookbook::{
+    CookbookCapability, CookbookMetadata, CookbookPayload, PruneOutcome, Recipe, one_line,
+};
 use crate::goal::GoalDetail;
 use crate::plugin::Plugin;
 
@@ -122,9 +124,10 @@ pub trait CookbookTrait {
     /// removal (`enw rm`, `enw stale prune`), symmetric with `cook`: the
     /// host never learns what existed or how it was cleaned up, just
     /// whether it is gone or kept (with a reason to show the user). A
-    /// cookbook with nothing to tear down returns `Ok(None)`. `Err` means
-    /// the prune itself failed (crash, timeout, no `prune` subcommand), and
-    /// is not the same thing as "kept".
+    /// cookbook that does not declare [`CookbookCapability::Prune`] is not
+    /// run and, like one with nothing to tear down, yields `Ok(None)`. `Err`
+    /// means the prune itself failed (crash, timeout, bad output) or that
+    /// support for it is unknown because `metadata` failed.
     fn prune(&self, _recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
         Ok(None)
     }
@@ -199,6 +202,7 @@ fn best_effort_json_via_subprocess<T: serde::de::DeserializeOwned>(
 pub struct CookbookClient {
     plugin: Plugin,
     metadata: CookbookMetadata,
+    metadata_error: Option<String>,
     config: serde_json::Value,
 }
 
@@ -208,11 +212,13 @@ impl CookbookClient {
     /// CLI: the user invokes `enw` from a project shell, so cwd identifies
     /// the project context.
     pub fn new(plugin: Plugin) -> Self {
-        let metadata = Self::fetch_metadata(&plugin.executable);
-        let config = resolve_config_with_walker(&plugin, &metadata);
+        let (metadata, metadata_error) =
+            metadata_or_default(&plugin, Self::probe_metadata(&plugin.executable));
+        let (config, _) = config_or_empty(&plugin, resolve_config_with_walker(&plugin, &metadata));
         Self {
             plugin,
             metadata,
+            metadata_error,
             config,
         }
     }
@@ -224,11 +230,13 @@ impl CookbookClient {
     /// meaningfully. The daemon's recipe cache is correspondingly
     /// project-independent.
     pub fn new_user_level_only(plugin: Plugin) -> Self {
-        let metadata = Self::fetch_metadata(&plugin.executable);
+        let (metadata, metadata_error) =
+            metadata_or_default(&plugin, Self::probe_metadata(&plugin.executable));
         let config = resolve_user_level_only(&plugin);
         Self {
             plugin,
             metadata,
+            metadata_error,
             config,
         }
     }
@@ -265,12 +273,13 @@ impl CookbookClient {
         Self {
             plugin,
             metadata,
+            metadata_error: None,
             config,
         }
     }
 
-    pub(crate) fn fetch_metadata(executable: &str) -> CookbookMetadata {
-        crate::metadata::fetch_metadata(executable)
+    fn probe_metadata(executable: &str) -> anyhow::Result<CookbookMetadata> {
+        crate::metadata::probe_metadata(executable, crate::metadata::METADATA_PROBE_TIMEOUT)
     }
 
     /// Spawn the cookbook with the given subcommand args, write the
@@ -394,30 +403,71 @@ fn wait_with_output_timeout(
 
 /// Resolve a cookbook's config with the project-layer walker rooted at
 /// the current working directory, filtered through the cookbook's
-/// `project_overridable` allowlist. Falls back to an empty JSON object
-/// (with `warn` log) on error so a single misconfigured cookbook
-/// doesn't break the whole CLI.
-fn resolve_config_with_walker(plugin: &Plugin, metadata: &CookbookMetadata) -> serde_json::Value {
-    let cwd = match std::env::current_dir() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, "Could not determine cwd; cookbook config defaults to empty");
-            return serde_json::Value::Object(Default::default());
-        }
-    };
+/// `project_overridable` allowlist.
+fn resolve_config_with_walker(
+    plugin: &Plugin,
+    metadata: &CookbookMetadata,
+) -> anyhow::Result<serde_json::Value> {
+    let cwd = std::env::current_dir().context("Could not determine cwd")?;
     let scope = scope_for(plugin);
     let allowlist: Vec<&str> = metadata
         .project_overridable
         .iter()
         .map(String::as_str)
         .collect();
-    match crate::config::build_cookbook_config(&cwd, &scope, &allowlist) {
-        Ok(v) => v,
+    crate::config::build_cookbook_config(&cwd, &scope, &allowlist)
+}
+
+fn empty_config() -> serde_json::Value {
+    serde_json::Value::Object(Default::default())
+}
+
+/// A config that failed to load falls back to an empty one (with `warn`
+/// log), so a single misconfigured cookbook doesn't break the whole CLI.
+/// The error is returned too, on one line, for operations where running
+/// with an empty config would be wrong.
+fn config_or_empty(
+    plugin: &Plugin,
+    config: anyhow::Result<serde_json::Value>,
+) -> (serde_json::Value, Option<String>) {
+    match config {
+        Ok(config) => (config, None),
         Err(e) => {
             tracing::warn!(cookbook = %plugin.name, error = %e, "Failed to resolve cookbook config; using empty config");
-            serde_json::Value::Object(Default::default())
+            (empty_config(), Some(one_line(&format!("{e:#}"))))
         }
     }
+}
+
+/// A cookbook that fails the metadata probe is treated as declaring nothing,
+/// except by operations that need to know: the error is returned too.
+fn metadata_or_default(
+    plugin: &Plugin,
+    metadata: anyhow::Result<CookbookMetadata>,
+) -> (CookbookMetadata, Option<String>) {
+    match metadata {
+        Ok(metadata) => (metadata, None),
+        Err(e) => {
+            tracing::debug!(cookbook = %plugin.name, error = %e, "Metadata probe failed, using defaults");
+            (Default::default(), Some(one_line(&format!("{e:#}"))))
+        }
+    }
+}
+
+/// Whether to run `prune` on a cookbook: only if it declares it. An error if
+/// the metadata probe failed, because then nobody knows.
+fn declares_prune(
+    plugin: &Plugin,
+    metadata: &CookbookMetadata,
+    metadata_error: Option<&str>,
+) -> anyhow::Result<bool> {
+    if let Some(error) = metadata_error {
+        bail!(
+            "Cookbook '{}' failed to answer 'metadata': {error}",
+            plugin.name
+        );
+    }
+    Ok(metadata.has(CookbookCapability::Prune))
 }
 
 /// Resolve a cookbook's config from the user-level file only. Used by
@@ -454,7 +504,9 @@ fn scope_for(plugin: &Plugin) -> String {
 pub struct RpcCookbookClient {
     plugin: Plugin,
     metadata: CookbookMetadata,
+    metadata_error: Option<String>,
     config: serde_json::Value,
+    config_error: Option<String>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -465,8 +517,22 @@ impl RpcCookbookClient {
     /// subprocess (metadata is a one-shot read on construction, not a hot
     /// path, and doesn't need the daemon).
     pub fn new(plugin: Plugin) -> Self {
-        let metadata = CookbookClient::fetch_metadata(&plugin.executable);
-        let config = resolve_config_with_walker(&plugin, &metadata);
+        let metadata = CookbookClient::probe_metadata(&plugin.executable);
+        // A failed probe leaves no allowlist, so no project overrides apply.
+        let config = match &metadata {
+            Ok(metadata) => resolve_config_with_walker(&plugin, metadata),
+            Err(_) => resolve_config_with_walker(&plugin, &Default::default()),
+        };
+        Self::from_parts(plugin, metadata, config)
+    }
+
+    fn from_parts(
+        plugin: Plugin,
+        metadata: anyhow::Result<CookbookMetadata>,
+        config: anyhow::Result<serde_json::Value>,
+    ) -> Self {
+        let (metadata, metadata_error) = metadata_or_default(&plugin, metadata);
+        let (config, config_error) = config_or_empty(&plugin, config);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -474,7 +540,9 @@ impl RpcCookbookClient {
         Self {
             plugin,
             metadata,
+            metadata_error,
             config,
+            config_error,
             runtime,
         }
     }
@@ -595,6 +663,14 @@ impl CookbookTrait for RpcCookbookClient {
     /// a failed prune from "nothing to prune" before it deletes the env
     /// that records how to retry it.
     fn prune(&self, recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
+        if !declares_prune(&self.plugin, &self.metadata, self.metadata_error.as_deref())? {
+            return Ok(None);
+        }
+        // With an empty config a cookbook finds nothing to prune and says so
+        // successfully, which would orphan whatever it had materialized.
+        if let Some(error) = &self.config_error {
+            bail!("Cookbook '{}' failed to prune: {error}", self.plugin.name);
+        }
         let stdout = self
             .invoke("prune", vec![recipe.to_string()])
             .map_err(|error| {
@@ -704,6 +780,9 @@ impl CookbookTrait for CookbookClient {
     /// best-effort, for the same reason as the RPC client's `prune`: spawn
     /// failure, timeout and a non-zero exit are all errors.
     fn prune(&self, recipe: &str) -> anyhow::Result<Option<PruneOutcome>> {
+        if !declares_prune(&self.plugin, &self.metadata, self.metadata_error.as_deref())? {
+            return Ok(None);
+        }
         let output = self
             .spawn_with_payload_timeout(&["prune", recipe], PRUNE_TIMEOUT)
             .with_context(|| format!("Cookbook '{}' failed to prune", self.plugin.name))?;
@@ -722,6 +801,7 @@ impl CookbookTrait for CookbookClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::DeclaredCapabilities;
     use crate::plugin::PluginKind;
 
     fn mock_plugin(name: &str) -> Plugin {
@@ -774,6 +854,46 @@ mod tests {
         assert_eq!(
             rpc_failure_line(&error),
             "connect to enwiro-daemon: no such socket"
+        );
+    }
+
+    /// A cookbook name that cannot be installed: if a check below regresses,
+    /// the call goes on to a daemon, which must not find a real cookbook.
+    const ABSENT_COOKBOOK: &str = "enwiro-test-absent";
+
+    fn prune_error(
+        metadata: anyhow::Result<CookbookMetadata>,
+        config: anyhow::Result<serde_json::Value>,
+    ) -> String {
+        let client = RpcCookbookClient::from_parts(mock_plugin(ABSENT_COOKBOOK), metadata, config);
+        format!("{:#}", client.prune("some-recipe").unwrap_err())
+    }
+
+    #[test]
+    fn rpc_prune_fails_without_calling_when_the_config_did_not_load() {
+        let metadata = CookbookMetadata {
+            capabilities: DeclaredCapabilities::declare([CookbookCapability::Prune]),
+            ..Default::default()
+        };
+
+        let message = prune_error(Ok(metadata), Err(anyhow::anyhow!("TOML error\n  line 1")));
+
+        assert_eq!(
+            message,
+            "Cookbook 'enwiro-test-absent' failed to prune: TOML error line 1"
+        );
+    }
+
+    #[test]
+    fn rpc_prune_fails_when_the_metadata_probe_failed() {
+        let message = prune_error(
+            Err(anyhow::anyhow!("did not\nanswer")),
+            Ok(serde_json::json!({})),
+        );
+
+        assert_eq!(
+            message,
+            "Cookbook 'enwiro-test-absent' failed to answer 'metadata': did not answer"
         );
     }
 

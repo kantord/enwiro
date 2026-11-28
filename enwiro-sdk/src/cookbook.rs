@@ -18,14 +18,18 @@ pub enum CookbookCapability {
     /// The daemon spawns and supervises the cookbook's `listen` subcommand,
     /// feeding it the resolved config payload on stdin.
     Listen,
+    /// The cookbook implements `prune`. The host runs it only if declared,
+    /// and keeps the environment when it fails.
+    Prune,
 }
 
 impl Capability for CookbookCapability {
-    const ALL: &'static [Self] = &[CookbookCapability::Listen];
+    const ALL: &'static [Self] = &[CookbookCapability::Listen, CookbookCapability::Prune];
 
     fn wire_name(self) -> &'static str {
         match self {
             CookbookCapability::Listen => "listen",
+            CookbookCapability::Prune => "prune",
         }
     }
 }

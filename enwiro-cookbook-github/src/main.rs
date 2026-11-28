@@ -914,6 +914,17 @@ fn worktree_path(
     Ok(repo_worktree_dir(config, repo_config, repo_str)?.join(format!("{}-{}", prefix, number)))
 }
 
+/// Where a PR worktree was cooked before paths used the repo's short name.
+/// `cook` still returns an existing one, so `prune` must remove it too.
+fn old_pr_worktree_path(
+    config: &ConfigurationValues,
+    repo_config: &RepoConfig,
+    number: u64,
+) -> anyhow::Result<PathBuf> {
+    let old_repo_name = repo_config.repo.replace('/', "-");
+    Ok(repo_worktree_dir(config, repo_config, &old_repo_name)?.join(format!("pr-{}", number)))
+}
+
 /// Create a worktree for a PR. Assumes the ref `pr-{number}` was already
 /// fetched and that no existing worktree was found (caller checks both).
 fn cook_pr(
@@ -1189,9 +1200,7 @@ fn cook(config: &ConfigurationValues, args: CookArgs) -> anyhow::Result<()> {
     }
 
     // Also check old worktree path format for backward compatibility (PR only)
-    let old_repo_name = repo_config.repo.replace('/', "-");
-    let old_pr_wt_path =
-        repo_worktree_dir(config, &repo_config, &old_repo_name)?.join(format!("pr-{}", number));
+    let old_pr_wt_path = old_pr_worktree_path(config, &repo_config, number)?;
     if old_pr_wt_path.exists() {
         return print_worktree_path(&old_pr_wt_path);
     }
@@ -1239,18 +1248,29 @@ fn prune_recipe(
     config: &ConfigurationValues,
     recipe_name: &str,
 ) -> anyhow::Result<Option<PruneOutcome>> {
+    prune_recipe_in(config, recipe_name, discover_github_repos)
+}
+
+fn prune_recipe_in(
+    config: &ConfigurationValues,
+    recipe_name: &str,
+    discover: impl FnOnce() -> anyhow::Result<Vec<RepoConfig>>,
+) -> anyhow::Result<Option<PruneOutcome>> {
     let Ok(name) = RecipeName::parse(recipe_name) else {
         return Ok(None);
     };
-    let Ok(repo_config) = resolve_repo_config(name.repo()) else {
+    // A failed discovery is an error: reporting nothing to prune would drop
+    // the env while its worktree stays.
+    let repos = discover()?;
+    let Ok(repo_config) = resolve_in(&repos, name.repo()) else {
         return Ok(None);
     };
     match name {
         RecipeName::Item { number, .. } => {
-            prune_worktree(config, &repo_config, repo_config.short_name(), number)
+            prune_worktree(config, repo_config, repo_config.short_name(), number)
         }
         RecipeName::Run { run_id, .. } => {
-            let wt_path = run_worktree_path(config, &repo_config, run_id)?;
+            let wt_path = run_worktree_path(config, repo_config, run_id)?;
             if wt_path.exists() {
                 Ok(Some(remove_worktree(&repo_config.local_path, &wt_path)?))
             } else {
@@ -1268,8 +1288,12 @@ fn prune_worktree(
     repo_str: &str,
     number: u64,
 ) -> anyhow::Result<Option<PruneOutcome>> {
-    for prefix in ["pr", "issue"] {
-        let wt_path = worktree_path(config, repo_config, repo_str, prefix, number)?;
+    let candidates = [
+        worktree_path(config, repo_config, repo_str, "pr", number)?,
+        worktree_path(config, repo_config, repo_str, "issue", number)?,
+        old_pr_worktree_path(config, repo_config, number)?,
+    ];
+    for wt_path in candidates {
         if wt_path.exists() {
             return Ok(Some(remove_worktree(&repo_config.local_path, &wt_path)?));
         }
@@ -1475,6 +1499,11 @@ fn describe(args: DescribeArgs) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn metadata_declares_prune() {
+        assert!(metadata().has(CookbookCapability::Prune));
+    }
 
     #[test]
     fn parse_cooked_env_dir_examples() {
@@ -2351,6 +2380,51 @@ mod tests {
     }
 
     #[test]
+    fn test_prune_recipe_fails_when_repos_cannot_be_discovered() {
+        let config = ConfigurationValues { worktree_dir: None };
+
+        let result = prune_recipe_in(&config, "my-project#42", || {
+            anyhow::bail!("Could not load git cookbook configuration")
+        });
+
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn test_prune_recipe_has_nothing_to_prune_for_an_unknown_repo() {
+        let config = ConfigurationValues { worktree_dir: None };
+
+        let result = prune_recipe_in(&config, "unknown#42", || Ok(Vec::new()));
+
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn test_prune_worktree_removes_a_pr_worktree_at_the_old_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("my-project");
+        std::fs::create_dir(&repo_path).unwrap();
+        let repo = repo_with_commit(&repo_path);
+
+        let config = ConfigurationValues {
+            worktree_dir: Some(tmp.path().join("worktrees").to_str().unwrap().to_string()),
+        };
+        let repo_config = RepoConfig {
+            repo: "kantord/my-project".to_string(),
+            local_path: repo_path,
+        };
+        let wt_path = repo_worktree_dir(&config, &repo_config, "kantord-my-project")
+            .unwrap()
+            .join("pr-42");
+        add_worktree(&repo, "pr-42", "enwiro-pr-42", &wt_path);
+
+        let outcome = prune_worktree(&config, &repo_config, "my-project", 42).unwrap();
+
+        assert_eq!(outcome, Some(PruneOutcome::Removed));
+        assert!(!wt_path.exists(), "worktree directory must be gone");
+    }
+
+    #[test]
     fn test_prune_worktree_keeps_a_dirty_cooked_issue_worktree() {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("my-project");
@@ -3068,6 +3142,17 @@ fn read_config() -> anyhow::Result<ConfigurationValues> {
     Ok(config)
 }
 
+fn metadata() -> CookbookMetadata {
+    CookbookMetadata {
+        capabilities: DeclaredCapabilities::declare([
+            CookbookCapability::Listen,
+            CookbookCapability::Prune,
+        ]),
+        default_priority: Some(30),
+        project_overridable: vec![],
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let _guard = enwiro_sdk::init_logging("enwiro-cookbook-github.log");
 
@@ -3096,15 +3181,7 @@ fn main() -> anyhow::Result<()> {
             prune(&config, args)?;
         }
         EnwiroCookbookGithub::Core(CookbookCore::Metadata) => {
-            println!(
-                "{}",
-                CookbookMetadata {
-                    capabilities: DeclaredCapabilities::declare([CookbookCapability::Listen]),
-                    default_priority: Some(30),
-                    project_overridable: vec![],
-                }
-                .to_json()
-            );
+            println!("{}", metadata().to_json());
         }
         EnwiroCookbookGithub::Listen => {
             let payload = CookbookPayload::read_first_line_from_stdin()
